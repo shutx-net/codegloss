@@ -52,14 +52,14 @@ VS Code の Dev Containers 拡張、または [devcontainer CLI](https://github.
 scripts/verify-toolchain.sh
 ```
 
-`rust-toolchain.toml` の `channel` と実際の `rustc --version` が一致するか、`wasm32-wasip1` の標準ライブラリが利用できるかを確認する。Nix 環境には rustup が存在しないため、`rustup target list` ではなく `rustc --print target-libdir` で判定している。
+`rust-toolchain.toml` の `channel` と実際の `rustc --version` が一致するか、`wasm32-wasip2` の標準ライブラリが利用できるかを確認する。Nix 環境には rustup が存在しないため、`rustup target list` ではなく `rustc --print target-libdir` で判定している。
 
 ## 用意されているもの
 
 | 対象 | 理由 |
 |---|---|
 | Rust ツールチェーン（rust-analyzer / rust-src / rustfmt / clippy） | 開発一式 |
-| `wasm32-wasip1` ターゲット | Zed 拡張は WebAssembly にコンパイルされる |
+| `wasm32-wasip2` ターゲット | Zed 拡張は WebAssembly にコンパイルされる |
 | C コンパイラ（Nix では stdenv 由来） | tree-sitter のグラマークレートが C をコンパイルする |
 | `pkg-config` / `openssl` | ネットワーク系クレートが native-tls を引いたときに必要 |
 

@@ -26,7 +26,7 @@
 
 ## 2. Zed 拡張の実装言語
 
-### 結論: Rust → `wasm32-wasip1` 以外の選択肢はない
+### 結論: Rust → `wasm32-wasip2` 以外の選択肢はない
 
 - Zed 拡張の手続き的な部分は Rust で書き、WebAssembly にコンパイルされる（[Developing Extensions](https://zed.dev/docs/extensions/developing-extensions)）。
 - 拡張は `zed_extension_api` クレートの `zed::Extension` トレイトを実装する形で書く。ホストとのやり取りは WIT / `wit_bindgen` 経由（[Life of a Zed Extension](https://zed.dev/blog/zed-decoded-extensions)）。

@@ -25,7 +25,7 @@ CodeGloss は、ソースファイルを書き換えずに英語コメントの�
 
 調査済みなので再検討不要。覆す場合は `docs/tech-stack-evaluation.md` の根拠に当たること。
 
-- Zed 拡張は Rust → `wasm32-wasip1` 以外に選択肢がない。拡張の責務はサーバの取得・起動・設定受け渡しのみに留める。
+- Zed 拡張は Rust → `wasm32-wasip2` 以外に選択肢がない。拡張の責務はサーバの取得・起動・設定受け渡しのみに留める。
 - 翻訳エンジンはネイティブバイナリ `codegloss-lsp` 側に置く。WASM 拡張には入れない。
 - 翻訳ランタイムは v0.1 では candle（純 Rust）。ct2rs / ort / bergamot へ差し替えられるよう `trait Translator` の裏に置く。
 - モデル第一候補は FuguMT（Marian, CC-BY-SA-4.0）。
