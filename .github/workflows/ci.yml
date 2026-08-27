@@ -19,7 +19,7 @@ jobs:
     name: fmt / clippy / test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # toolchain 入力はあえて書かない。リポジトリ直下に rust-toolchain.toml が
       # あり toolchain 入力が無いときは、このアクションがそのファイルの内容を
@@ -43,14 +43,17 @@ jobs:
     name: Zed 拡張の wasm ビルド
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           # ルート直下の rust-toolchain.toml にも入っているが、editors/zed は
           # ルート直下ではないので明示しておく方が壊れにくい。
           target: wasm32-wasip2
-          workspaces: editors/zed
+          # このアクションのキャッシュ入力は cache-workspaces（Swatinem/rust-cache
+          # の workspaces にそのまま渡される）。editors/zed はルートワークスペース
+          # から exclude されているので、ここを指さないとキャッシュが当たらない。
+          cache-workspaces: editors/zed
 
       # editors/zed はルートワークスペースから exclude されているため、
       # check ジョブの fmt / clippy では見られない。ここで見る。
