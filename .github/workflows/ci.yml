@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # PR を開かずにブランチ上で確認したいときのため
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # toolchain 入力はあえて書かない。リポジトリ直下に rust-toolchain.toml が
+      # あり toolchain 入力が無いときは、このアクションがそのファイルの内容を
+      # そのままインストールする。バージョンとターゲットの定義を 1 箇所に
+      # 保つため、ここに版を書いてはいけない。
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: verify toolchain
+        run: scripts/verify-toolchain.sh
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
