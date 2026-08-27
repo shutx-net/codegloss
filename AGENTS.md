@@ -11,7 +11,15 @@ CodeGloss は、ソースファイルを書き換えずに英語コメントの�
 
 ## 現状
 
-実装コードはまだ存在しない（`LICENSE` / `README.md` / `docs/` のみ）。Cargo ワークスペース未作成のため `cargo` コマンドは通らない。
+実装コードはまだ存在しない（ドキュメントと開発環境の設定のみ）。Cargo ワークスペース未作成のため `cargo` コマンドは通らない。
+
+## 開発環境
+
+セットアップ手順は `DEVELOPERS.md` を参照（Nix flake と Dev Container の 2 通り。どちらも同じツールチェーンになる）。
+
+**IMPORTANT: Rust のバージョンを変えるときは `rust-toolchain.toml` だけを編集する。** flake.nix も devcontainer の rustup も同じこのファイルを読むため、他の場所に版を書くと二重管理になる。
+
+セットアップの検証は `scripts/verify-toolchain.sh`。
 
 ## 確定済みの設計判断
 
@@ -46,4 +54,3 @@ CodeGloss は、ソースファイルを書き換えずに英語コメントの�
 
 - `docs/` 配下のドキュメントとコミットメッセージは日本語。コード内の識別子とコメントは英語。
 - 作業は `claude/<topic>` ブランチで行い、`main` へ直接プッシュしない。
-- Zed 拡張の動作確認は Zed のコマンドパレットから `zed: install dev extension` で `editors/zed/` を指定する（ローカルビルドの拡張はレジストリ経由ではインストールしない）。

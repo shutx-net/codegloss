@@ -1,0 +1,23 @@
+{
+  "name": "CodeGloss",
+
+  // rustup を同梱した公式 Dev Container イメージ（rust:1-bookworm ベース）。
+  // 実際に使う Rust のバージョンはリポジトリ直下の rust-toolchain.toml が
+  // 決めるため、ここではあえて固定しない。ここに版を書くと
+  // rust-toolchain.toml と二重管理になり、ずれる原因になる。
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy"
+      }
+    }
+  }
+}
