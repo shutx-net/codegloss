@@ -1,6 +1,11 @@
 /target
 # Zed 拡張は独立ワークスペースなので target もここに掘られる
 /editors/zed/target
+# dev extension のインストールごとに Zed のビルダが吐き直す成果物。
+# レジストリ公開時も Zed 側の CI がソースからビルドするため、リポジトリには要らない。
+/editors/zed/extension.wasm
 /result
 /result-*
 /.direnv
+# codegloss-lsp の絶対パスを書くので環境ごとに中身が変わる
+/.zed
