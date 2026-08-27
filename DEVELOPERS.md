@@ -86,7 +86,50 @@ cargo test --workspace
 
 ## Zed 拡張の動作確認
 
-Zed のコマンドパレットから `zed: install dev extension` を実行し、`editors/zed/` を指定する。ローカルビルドの拡張はレジストリ経由ではインストールしない。
+1. LSP サーバを先にビルドする。拡張はこのバイナリを起動するだけで、翻訳処理は
+   一切持たない。
+
+   ```sh
+   cargo build -p codegloss-lsp
+   ```
+
+2. Zed の `settings.json` にサーバの絶対パスを書く。開発中はサーバを PATH に
+   置かないため、これが無いと拡張はサーバを見つけられない。
+
+   ```json
+   {
+     "lsp": {
+       "codegloss": {
+         "binary": {
+           "path": "/absolute/path/to/codegloss/target/debug/codegloss-lsp"
+         }
+       }
+     }
+   }
+   ```
+
+   キーの `"codegloss"` は `editors/zed/extension.toml` の
+   `[language_servers.codegloss]` のテーブルキーであって、表示名の
+   `name = "CodeGloss"` ではない。取り違えると設定が効かない。
+
+3. Zed のコマンドパレットから `zed: install dev extension` を実行し、
+   `editors/zed/` を指定する。ローカルビルドの拡張はレジストリ経由では
+   インストールしない。wasm へのビルドは Zed 側が実行する。
+
+4. Rust ファイルを開いて任意の位置にホバーする。`CodeGloss: hello` が出れば
+   疎通できている。rust-analyzer のホバーと同時に表示される。
+
+拡張の wasm を手元で先に確かめたいときは次を実行する。Zed が使うのと同じ
+ターゲットとディレクトリ構成になる。
+
+```sh
+cd editors/zed && cargo build --target wasm32-wasip2 --release
+# → editors/zed/target/wasm32-wasip2/release/codegloss_zed.wasm
+```
+
+うまく動かないときは `zed: open log` を見る。サーバ側のログの粒度は環境変数
+`CODEGLOSS_LOG`（例 `CODEGLOSS_LOG=debug`）で変えられる。ログは stderr にしか
+出さない（stdout は LSP の JSON-RPC が占有している）。
 
 ## つまずきやすい点
 

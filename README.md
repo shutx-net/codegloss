@@ -18,12 +18,29 @@ public User findUser(String id) {
 
 ## 状況
 
-開発初期です。設計と技術選定を終えた段階で、まだ動くものはありません。
+開発初期です。Zed 拡張と LSP サーバの骨組みができ、ホバーに固定の文字列を
+返すところまで動きます。コメントの抽出も翻訳もまだ実装していません。
 
 - 設計方針: [Issue #1](https://github.com/shutx-net/codegloss/issues/1)
 - 技術選定の根拠: [docs/tech-stack-evaluation.md](docs/tech-stack-evaluation.md)
 
 最初のターゲットは Zed 拡張です。将来的には他のエディタや、GitHub 上でソースを読むためのブラウザ拡張も見据えています。
+
+## 表示方法と設定
+
+CodeGloss は 3 通りの表示方法を想定しています。
+
+| 表示方法 | 見え方 | 必要な Zed の設定 |
+|---|---|---|
+| ホバー | コメントにカーソルを合わせると訳文が出る | 不要 |
+| Code Lens | コメント行の上に、独立した行として訳文が出る | `"code_lens": "on"` |
+| Inlay Hint | コメント行の行内に訳文が出る | `"inlay_hints": { "enabled": true }` |
+
+Zed の既定値は `"code_lens": "off"` と `"inlay_hints": { "enabled": false }`
+です。**拡張をインストールしただけでは Code Lens と Inlay Hint は表示されません。**
+設定スニペットは、それぞれの表示方法を実装した段階でここに載せます。
+
+現時点で動くのはホバーだけで、内容も固定の文字列です。
 
 ## 開発
 
