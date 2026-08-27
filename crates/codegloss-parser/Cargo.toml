@@ -1,0 +1,17 @@
+[package]
+name = "codegloss-parser"
+description = "Tree-sitter によるコメント抽出と、連続する行コメントの連結"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# IMPORTANT: このクレートは codegloss-core にしか依存しない。LSP の型
+# （Position / Range）を持ち込まず、バイトオフセットと行番号だけを返す。
+[dependencies]
+codegloss-core = { path = "../codegloss-core" }
+thiserror.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true

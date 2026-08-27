@@ -30,8 +30,21 @@ pub enum CommentStyle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommentBlock {
     pub style: CommentStyle,
-    /// Raw source text of the block, comment markers included.
+    /// The prose of the comment: markers (`//`, `///`, `/*`, `*/`, the leading
+    /// `*` of a continuation line) stripped, lines joined with a single space.
+    ///
+    /// This is what gets pre-processed, hashed into a [`GlossKey`] and handed
+    /// to the translator, so it must not carry syntax the model would try to
+    /// translate.
     pub text: String,
+    /// The block exactly as it appears in the file, markers and interior
+    /// indentation included.
+    ///
+    /// Post-processing needs it: rebuilding the shape of a Javadoc block, or
+    /// re-indenting a translated run of `//` lines, is impossible once the
+    /// markers and the line breaks are gone. Keeping it beside `text` is what
+    /// lets `text` stay clean.
+    pub raw: String,
     /// Zero-based line of the first line of the block.
     pub start_line: u32,
     /// Zero-based line of the last line of the block, inclusive.
