@@ -2,13 +2,18 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # claude/** も対象にする。push イベントは push されたコミットの
+    # ワークフロー定義で走るため、main にマージする前のブランチでも CI が回る。
+    branches: [main, "claude/**"]
   pull_request:
-  # PR を開かずにブランチ上で確認したいときのため
+  # 手動実行。ただしこれが Actions タブに出るのはワークフローが
+  # デフォルトブランチに乗ってから。それまでは上の push が唯一の起動経路。
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # PR が開いていると push と pull_request で二重に走る。head_ref を優先して
+  # 同じグループにまとめ、古い方を打ち切る。
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 env:
