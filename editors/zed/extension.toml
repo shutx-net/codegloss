@@ -1,0 +1,17 @@
+id = "codegloss"
+name = "CodeGloss"
+description = "英語コメントの日本語訳をエディタ上に表示する"
+version = "0.0.1"
+schema_version = 1
+authors = ["shutx <169037737+shutx-net@users.noreply.github.com>"]
+repository = "https://github.com/shutx-net/codegloss"
+
+# テーブルキー（codegloss）がそのまま language server id になる。Zed の
+# settings.json でも "lsp": { "codegloss": ... } と書く。name は表示名。
+#
+# languages の値は Zed 側の言語名と一致させる必要がある。Rust は Zed 本体に
+# 組み込まれているので確実に当たる。他の言語は別の拡張が提供するため、
+# 対応言語を増やす段階で実機確認してから足す。
+[language_servers.codegloss]
+name = "CodeGloss"
+languages = ["Rust"]
