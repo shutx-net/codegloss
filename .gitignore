@@ -1,4 +1,6 @@
 /target
+# Zed 拡張は独立ワークスペースなので target もここに掘られる
+/editors/zed/target
 /result
 /result-*
 /.direnv

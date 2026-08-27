@@ -1,0 +1,16 @@
+[package]
+name = "codegloss-core"
+description = "CodeGloss のドメイン型と、翻訳の前処理・後処理・キャッシュ"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# IMPORTANT: このクレートは tokio / tree-sitter / candle / LSP の型に依存しない。
+# 将来ブラウザ拡張と前処理・後処理を共有するため、wasm32-unknown-unknown でも
+# ビルドできる状態を保つ。
+[dependencies]
+blake3.workspace = true
+serde.workspace = true

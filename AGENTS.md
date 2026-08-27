@@ -11,7 +11,11 @@ CodeGloss は、ソースファイルを書き換えずに英語コメントの�
 
 ## 現状
 
-実装コードはまだ存在しない（ドキュメントと開発環境の設定のみ）。Cargo ワークスペース未作成のため `cargo` コマンドは通らない。
+Cargo ワークスペースがあり、`cargo build --workspace` / `cargo test --workspace` が通る。
+
+- `crates/codegloss-core` — ドメイン型（`CommentBlock` / `Gloss` / `GlossKey`）のみ。前処理・後処理・キャッシュは未実装。
+- `crates/codegloss-lsp` — LSP サーバ。initialize / didOpen / didChange / didClose / hover に応答する。hover は固定文字列を返すだけで、コメント抽出も翻訳もまだ無い。
+- `editors/zed` — Zed 拡張。`codegloss-lsp` を見つけて起動するだけ。ルートワークスペースからは exclude してあるため `cargo build --workspace` には含まれない（`cd editors/zed && cargo build --target wasm32-wasip2`）。
 
 ## 開発環境
 
@@ -25,7 +29,7 @@ CodeGloss は、ソースファイルを書き換えずに英語コメントの�
 
 調査済みなので再検討不要。覆す場合は `docs/tech-stack-evaluation.md` の根拠に当たること。
 
-- Zed 拡張は Rust → `wasm32-wasip1` 以外に選択肢がない。拡張の責務はサーバの取得・起動・設定受け渡しのみに留める。
+- Zed 拡張は Rust → `wasm32-wasip2` 以外に選択肢がない。拡張の責務はサーバの取得・起動・設定受け渡しのみに留める。
 - 翻訳エンジンはネイティブバイナリ `codegloss-lsp` 側に置く。WASM 拡張には入れない。
 - 翻訳ランタイムは v0.1 では candle（純 Rust）。ct2rs / ort / bergamot へ差し替えられるよう `trait Translator` の裏に置く。
 - モデル第一候補は FuguMT（Marian, CC-BY-SA-4.0）。

@@ -16,7 +16,7 @@ actual="$(rustc --version | cut -d' ' -f2)"
 
 # Zed 拡張のビルドに必要な wasm ターゲットが使えるか。
 # rustup target list は Nix 環境では使えないため rustc に直接問い合わせる。
-target="wasm32-wasip1"
+target="wasm32-wasip2"
 libdir="$(rustc --print target-libdir --target "$target" 2>/dev/null || true)"
 [ -n "$libdir" ] && [ -d "$libdir" ] || fail "ターゲット $target の標準ライブラリが見つかりません"
 

@@ -1,0 +1,28 @@
+# CodeGloss の Cargo ワークスペース。
+#
+# editors/zed（Zed 拡張）は exclude している。Zed のビルダは拡張ディレクトリを
+# current_dir にして `cargo build --target wasm32-wasip2 --target-dir <ext>/target`
+# を実行するため、ホストターゲット向けの通常ビルドとは分けておく。
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["editors/zed"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/shutx-net/codegloss"
+
+# 各クレートは `<crate>.workspace = true` でここから引く。版の指定はここ 1 箇所。
+[workspace.dependencies]
+blake3 = "1.8"
+dashmap = "6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.53", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
+tower-lsp-server = "0.23"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

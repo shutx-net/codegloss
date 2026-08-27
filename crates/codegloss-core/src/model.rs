@@ -1,0 +1,126 @@
+//! Domain types.
+//!
+//! Positions are expressed as zero-based line numbers plus byte offsets into
+//! the source file. LSP `Position` / `Range` are intentionally not used here so
+//! that this crate stays editor-agnostic.
+
+use serde::{Deserialize, Serialize};
+
+/// How a comment was written in the source file.
+///
+/// The distinction matters for post-processing: doc comments carry structure
+/// (`@param`, `@return`, Markdown) that has to survive translation, while a
+/// plain line comment does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CommentStyle {
+    /// `// ...`
+    Line,
+    /// `/* ... */`
+    Block,
+    /// `/// ...` or `//! ...`
+    DocLine,
+    /// `/** ... */`
+    DocBlock,
+}
+
+/// One contiguous run of comments, treated as a single unit of translation.
+///
+/// Consecutive line comments are merged into one block so that a sentence split
+/// across several `//` lines is translated as a whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentBlock {
+    pub style: CommentStyle,
+    /// Raw source text of the block, comment markers included.
+    pub text: String,
+    /// Zero-based line of the first line of the block.
+    pub start_line: u32,
+    /// Zero-based line of the last line of the block, inclusive.
+    pub end_line: u32,
+    /// Byte offset of the first byte of the block.
+    pub start_byte: usize,
+    /// Byte offset one past the last byte of the block.
+    pub end_byte: usize,
+}
+
+/// A finished translation of one comment block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Gloss {
+    /// Text that was fed to the translator, after pre-processing.
+    pub source: String,
+    /// Translated text, after post-processing.
+    pub translated: String,
+    /// Identifier of the model that produced `translated`. Part of the cache
+    /// key, so swapping models invalidates old entries instead of serving them.
+    pub model_version: String,
+}
+
+/// Cache key for a translation: `BLAKE3(model_version, src_lang, tgt_lang, text)`.
+///
+/// The four inputs are hashed with a NUL separator between them so that no two
+/// different tuples can produce the same byte stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct GlossKey(pub [u8; 32]);
+
+impl GlossKey {
+    /// Separator between the hashed fields. NUL cannot appear in a language tag
+    /// or a model version, which is what keeps the encoding unambiguous.
+    const SEPARATOR: &'static [u8] = b"\0";
+
+    pub fn new(model_version: &str, src_lang: &str, tgt_lang: &str, text: &str) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        for field in [model_version, src_lang, tgt_lang, text] {
+            hasher.update(field.as_bytes());
+            hasher.update(Self::SEPARATOR);
+        }
+        Self(*hasher.finalize().as_bytes())
+    }
+
+    /// Lowercase hex form, for logs and for on-disk cache file names.
+    pub fn to_hex(self) -> String {
+        let mut out = String::with_capacity(64);
+        for byte in self.0 {
+            out.push_str(&format!("{byte:02x}"));
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_inputs_produce_the_same_key() {
+        let a = GlossKey::new("fugumt-en-ja@1", "en", "ja", "Return the cached user.");
+        let b = GlossKey::new("fugumt-en-ja@1", "en", "ja", "Return the cached user.");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn every_field_changes_the_key() {
+        let base = GlossKey::new("m", "en", "ja", "text");
+        assert_ne!(base, GlossKey::new("m2", "en", "ja", "text"));
+        assert_ne!(base, GlossKey::new("m", "de", "ja", "text"));
+        assert_ne!(base, GlossKey::new("m", "en", "fr", "text"));
+        assert_ne!(base, GlossKey::new("m", "en", "ja", "other"));
+    }
+
+    #[test]
+    fn field_boundaries_are_not_ambiguous() {
+        // Without a separator these two would hash the same byte stream.
+        assert_ne!(
+            GlossKey::new("ab", "c", "ja", "text"),
+            GlossKey::new("a", "bc", "ja", "text")
+        );
+    }
+
+    #[test]
+    fn hex_is_64_lowercase_digits() {
+        let hex = GlossKey::new("m", "en", "ja", "text").to_hex();
+        assert_eq!(hex.len(), 64);
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
+    }
+}
