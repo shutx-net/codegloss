@@ -13,6 +13,18 @@ CodeGloss は、ソースファイルを書き換えずに英語コメントの�
 
 実装コードはまだ存在しない（`LICENSE` / `README.md` / `docs/` のみ）。Cargo ワークスペース未作成のため `cargo` コマンドは通らない。
 
+## 開発環境
+
+Nix と devcontainer のどちらを使っても同じツールチェーンになる。
+
+- Nix: `nix develop`（direnv 利用時は `direnv allow`）
+- devcontainer: `.devcontainer/devcontainer.json`。初回に `.devcontainer/post-create.sh` が走る
+- 両環境の一致確認: `scripts/verify-toolchain.sh`（rustup の有無に依存せず動く）
+
+**IMPORTANT: Rust のバージョンを変えるときは `rust-toolchain.toml` だけを編集する。** flake.nix は `rust-bin.fromRustupToolchainFile` で、devcontainer は rustup で、いずれも同じこのファイルを読む。他の場所に版を書くと二重管理になる。
+
+rustup 1.28 以降、`rust-toolchain.toml` のツールチェーンは暗黙にはインストールされない。手動で入れる場合は `rustup show active-toolchain || rustup toolchain install` を使う。
+
 ## 確定済みの設計判断
 
 調査済みなので再検討不要。覆す場合は `docs/tech-stack-evaluation.md` の根拠に当たること。

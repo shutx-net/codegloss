@@ -1,0 +1,12 @@
+# CodeGloss のツールチェーン定義。
+#
+# IMPORTANT: Rust のバージョンを変えるときは、このファイルだけを編集する。
+# flake.nix は rust-bin.fromRustupToolchainFile でこのファイルを読み、
+# devcontainer 側の rustup もこのファイルを読む。両者の取得元はいずれも
+# https://static.rust-lang.org/dist なので、同一のバイナリが使われる。
+[toolchain]
+channel = "1.98.0"
+profile = "default"
+components = ["rust-analyzer", "rust-src", "rustfmt", "clippy"]
+# Zed 拡張は WebAssembly にコンパイルされる
+targets = ["wasm32-wasip1"]
