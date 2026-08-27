@@ -13,8 +13,9 @@ CodeGloss は、ソースファイルを書き換えずに英語コメントの�
 
 Cargo ワークスペースがあり、`cargo build --workspace` / `cargo test --workspace` が通る。
 
-- `crates/codegloss-core` — ドメイン型（`CommentBlock` / `Gloss` / `GlossKey`）のみ。前処理・後処理・キャッシュは未実装。
-- `crates/codegloss-lsp` — LSP サーバ。initialize / didOpen / didChange / didClose / hover に応答する。hover は固定文字列を返すだけで、コメント抽出も翻訳もまだ無い。
+- `crates/codegloss-core` — ドメイン型（`CommentBlock` / `Gloss` / `GlossKey`）のみ。前処理・後処理・キャッシュは未実装。`CommentBlock` は `text`（コメント記号を剥がした本文＝翻訳の入力）と `raw`（元のソーステキストそのまま＝後処理の入力）の両方を持つ。
+- `crates/codegloss-parser` — Tree-sitter によるコメント抽出。対応言語は Rust のみ。連続する行コメントを 1 ブロックに連結し、区切り線と空コメントは落とす。
+- `crates/codegloss-lsp` — LSP サーバ。initialize / didOpen / didChange / didClose / hover に応答する。hover はコメント上でだけコメント本文を返し、コード上では `null` を返す。翻訳はまだ無い（本文がそのまま出る）。
 - `editors/zed` — Zed 拡張。`codegloss-lsp` を見つけて起動するだけ。ルートワークスペースからは exclude してあるため `cargo build --workspace` には含まれない（`cd editors/zed && cargo build --target wasm32-wasip2`）。
 
 ## 開発環境
