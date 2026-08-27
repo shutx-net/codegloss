@@ -3,7 +3,8 @@
 //! IMPORTANT: no LSP request handler may translate synchronously. Handlers
 //! answer from the cache only; translation happens on background tasks that
 //! ask the client to refetch once results are ready. Nothing here blocks yet
-//! because nothing here translates yet.
+//! because nothing here translates yet: `hover` reads comment blocks that were
+//! extracted when the document was opened or changed.
 
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::{
@@ -15,12 +16,6 @@ use tower_lsp_server::ls_types::{
 use tower_lsp_server::{Client, LanguageServer};
 
 use crate::documents::DocumentStore;
-
-/// Fixed text returned by `textDocument/hover` until real glosses land.
-///
-/// Hover is the only display mode that works with no user configuration, which
-/// makes it the cheapest end-to-end smoke test of the extension in Zed.
-pub const HOVER_PLACEHOLDER: &str = "CodeGloss: hello";
 
 #[derive(Debug)]
 pub struct Backend {
@@ -104,15 +99,33 @@ impl LanguageServer for Backend {
         self.documents.close(&params.text_document.uri);
     }
 
-    async fn hover(&self, _params: HoverParams) -> Result<Option<Hover>> {
+    /// Answers with the comment under the cursor, and with nothing at all
+    /// anywhere else.
+    ///
+    /// Returning `None` over code is what keeps CodeGloss out of the way of the
+    /// other language servers Zed runs alongside it: hovers from every server
+    /// are merged, so an unconditional answer here would pad every rust-analyzer
+    /// popup with a CodeGloss section.
+    ///
+    /// The value is still the source text rather than a translation. Hooking up
+    /// the translator is the next phase; the shape of the answer will not change.
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let position = params.text_document_position_params;
+        let Some(hit) = self
+            .documents
+            .comment_block_at(&position.text_document.uri, position.position)
+        else {
+            return Ok(None);
+        };
+
         // Markdown unconditionally: Zed advertises Markdown as the only hover
         // content format it accepts, so there is nothing to negotiate.
         Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: HOVER_PLACEHOLDER.to_owned(),
+                value: hit.block.text,
             }),
-            range: None,
+            range: Some(hit.range),
         }))
     }
 }

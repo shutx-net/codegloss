@@ -76,6 +76,8 @@ dependencies = [
 name = "codegloss-lsp"
 version = "0.0.1"
 dependencies = [
+ "codegloss-core",
+ "codegloss-parser",
  "dashmap",
  "serde_json",
  "tokio",

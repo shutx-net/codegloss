@@ -10,6 +10,8 @@ publish = false
 
 # IMPORTANT: LSP の型（tower_lsp_server::ls_types）はこのクレートの外に出さない。
 [dependencies]
+codegloss-core = { path = "../codegloss-core" }
+codegloss-parser = { path = "../codegloss-parser" }
 dashmap.workspace = true
 tokio.workspace = true
 tower-lsp-server.workspace = true
