@@ -38,3 +38,36 @@ jobs:
 
       - name: test
         run: cargo test --workspace
+
+  wasm:
+    name: Zed 拡張の wasm ビルド
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # ルート直下の rust-toolchain.toml にも入っているが、editors/zed は
+          # ルート直下ではないので明示しておく方が壊れにくい。
+          target: wasm32-wasip2
+          workspaces: editors/zed
+
+      # editors/zed はルートワークスペースから exclude されているため、
+      # check ジョブの fmt / clippy では見られない。ここで見る。
+      - name: fmt
+        working-directory: editors/zed
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        working-directory: editors/zed
+        run: cargo clippy --target wasm32-wasip2 --all-targets -- -D warnings
+
+      # Zed のビルダと同じく、拡張ディレクトリを作業ディレクトリにして
+      # wasm32-wasip2 向けにビルドする。Zed 側でだけ失敗する事故を防ぐ。
+      - name: build
+        working-directory: editors/zed
+        run: cargo build --target wasm32-wasip2 --release
+
+      # wasip2 はパッケージ名の `-` を `_` に正規化する。
+      - name: check artifact
+        run: test -f editors/zed/target/wasm32-wasip2/release/codegloss_zed.wasm
