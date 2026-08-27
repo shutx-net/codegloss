@@ -65,6 +65,25 @@ scripts/verify-toolchain.sh
 
 wasm 向けのリンカは追加不要。rustc が lld を同梱しており、wasm ターゲットでは自動的に使われる。
 
+## ワークスペースの構成
+
+```
+Cargo.toml          ルートワークスペース（members = ["crates/*"]）
+ └─ crates/
+     ├─ codegloss-core   ドメイン型・前処理・後処理・キャッシュ
+     └─ codegloss-lsp    LSP サーバ（配布するネイティブバイナリ）
+editors/zed         Zed 拡張。独立したワークスペース（ルートからは exclude）
+```
+
+`editors/zed` をルートワークスペースから外しているのは、Zed のビルダが拡張
+ディレクトリを作業ディレクトリにして `cargo build --target wasm32-wasip2` を
+実行するためである。ホストターゲット向けの通常のビルドと混ぜない。
+
+```sh
+cargo build --workspace   # ネイティブ側（crates/*）
+cargo test --workspace
+```
+
 ## Zed 拡張の動作確認
 
 Zed のコマンドパレットから `zed: install dev extension` を実行し、`editors/zed/` を指定する。ローカルビルドの拡張はレジストリ経由ではインストールしない。
@@ -78,4 +97,3 @@ Zed のコマンドパレットから `zed: install dev extension` を実行し�
   ```
 
 - Nix 環境に `rustup` は入っていない。`rustup` 前提のコマンドはそのままでは動かない。
-- Cargo ワークスペースはまだ存在しないため、現時点で `cargo build` は通らない。

@@ -11,7 +11,10 @@ CodeGloss は、ソースファイルを書き換えずに英語コメントの�
 
 ## 現状
 
-実装コードはまだ存在しない（ドキュメントと開発環境の設定のみ）。Cargo ワークスペース未作成のため `cargo` コマンドは通らない。
+Cargo ワークスペースがあり、`cargo build --workspace` / `cargo test --workspace` が通る。
+
+- `crates/codegloss-core` — ドメイン型（`CommentBlock` / `Gloss` / `GlossKey`）のみ。前処理・後処理・キャッシュは未実装。
+- `crates/codegloss-lsp` — LSP サーバ。initialize / didOpen / didChange / didClose / hover に応答する。hover は固定文字列を返すだけで、コメント抽出も翻訳もまだ無い。
 
 ## 開発環境
 
