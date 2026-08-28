@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use codegloss_core::Segment;
 use codegloss_lsp::Backend;
+use codegloss_lsp::code_lens::PENDING_TITLE;
 use codegloss_translator::Translator;
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -203,6 +204,35 @@ async fn hover_value(service: &mut LspService<Backend>, line: u32, character: u3
     response["result"]["contents"]["value"].clone()
 }
 
+/// The titles of the lenses of the fixture, paired with the lines they sit on.
+async fn code_lens_titles(service: &mut LspService<Backend>) -> Vec<(u64, String)> {
+    let response = call(
+        service,
+        Request::build("textDocument/codeLens")
+            .params(json!({ "textDocument": { "uri": DOCUMENT_URI } }))
+            .id(3)
+            .finish(),
+    )
+    .await
+    .expect("a code lens request is answered");
+
+    response["result"]
+        .as_array()
+        .expect("the answer is a list of lenses")
+        .iter()
+        .map(|lens| {
+            let line = lens["range"]["start"]["line"]
+                .as_u64()
+                .expect("a lens points at a line");
+            let title = lens["command"]["title"]
+                .as_str()
+                .expect("a lens carries a title")
+                .to_owned();
+            (line, title)
+        })
+        .collect()
+}
+
 /// Waits for the worker to finish one more batch.
 async fn next_batch(batches: &mut watch::Receiver<u64>) {
     timeout(SETTLE_TIMEOUT, batches.changed())
@@ -358,6 +388,55 @@ async fn nothing_is_refreshed_before_the_client_is_initialized() {
         "a client that has not finished initializing refuses these with -32002"
     );
     // The work still happened; only the notification was held back.
+    assert_eq!(engine.calls(), 1);
+}
+
+/// The lens half of the contract: an answer arrives while the engine is still
+/// busy, and the placeholder in it is replaced once the batch lands.
+///
+/// The replacement is what makes the placeholder defensible in the first place.
+/// Hover cannot do this - there is no `workspace/hover/refresh` - which is why
+/// it falls back to the English source instead of saying "translating".
+#[tokio::test(flavor = "current_thread")]
+async fn a_lens_shows_a_placeholder_until_its_gloss_lands() {
+    let engine = TestEngine::new();
+    let (mut service, seen) = server(Arc::clone(&engine));
+    let mut batches = service.inner().glosses().batches_completed();
+
+    initialize(&mut service, true).await;
+    did_open(&mut service, DOCUMENT_TEXT).await;
+
+    // The engine is holding, so nothing can be cached yet. The answer still
+    // comes back now, with one lens per comment on the comment's own line.
+    let pending = timeout(Duration::from_millis(50), code_lens_titles(&mut service))
+        .await
+        .expect("code lens must not wait for the engine");
+    assert_eq!(
+        pending,
+        vec![(0, PENDING_TITLE.to_owned()), (2, PENDING_TITLE.to_owned()),]
+    );
+
+    engine.release_one_batch();
+    next_batch(&mut batches).await;
+
+    // The client is told to come back for them, which is the only reason a
+    // placeholder is acceptable.
+    assert!(
+        refresh_requests(&seen).contains(&"workspace/codeLens/refresh".to_owned()),
+        "{:?}",
+        refresh_requests(&seen)
+    );
+
+    // Same document, same request: only the cache changed.
+    assert_eq!(
+        code_lens_titles(&mut service).await,
+        vec![
+            (0, "[ja] Return the cached user.".to_owned()),
+            (2, "[ja] Fails when the id is unknown.".to_owned()),
+        ]
+    );
+    // The lens request queued the misses it saw, and the retry found them all
+    // cached rather than running the engine a second time.
     assert_eq!(engine.calls(), 1);
 }
 

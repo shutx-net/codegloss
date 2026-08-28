@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod backend;
+pub mod code_lens;
 pub mod documents;
 pub mod translation;
 

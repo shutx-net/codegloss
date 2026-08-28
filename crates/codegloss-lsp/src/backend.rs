@@ -11,13 +11,16 @@ use std::sync::Arc;
 use codegloss_translator::{PassthroughTranslator, Translator};
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, Hover,
-    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-    InitializedParams, MarkupContent, MarkupKind, MessageType, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    CodeLens, CodeLensOptions, CodeLensParams, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, ExecuteCommandOptions,
+    ExecuteCommandParams, Hover, HoverContents, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, InitializedParams, LSPAny, MarkupContent, MarkupKind,
+    MessageType, ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind,
+    Uri,
 };
 use tower_lsp_server::{Client, LanguageServer};
 
+use crate::code_lens;
 use crate::documents::DocumentStore;
 use crate::translation::TranslationService;
 
@@ -77,6 +80,19 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                code_lens_provider: Some(CodeLensOptions {
+                    // A lens leaves here complete. Resolving one is for a
+                    // client that wants to defer expensive work per lens, and
+                    // there is none: a title is a cache lookup.
+                    resolve_provider: Some(false),
+                }),
+                // Advertised only so that the lenses can be clicked without
+                // the client reporting an unknown command. See
+                // [`code_lens::NOOP_COMMAND`].
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec![code_lens::NOOP_COMMAND.to_owned()],
+                    ..ExecuteCommandOptions::default()
+                }),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -176,6 +192,63 @@ impl LanguageServer for Backend {
             }),
             range: Some(hit.range),
         }))
+    }
+
+    /// One lens per comment block, each showing the gloss of that comment.
+    ///
+    /// Zed draws a lens as a line of its own above the line it points at, which
+    /// puts the Japanese directly above the English comment - the display mode
+    /// the project is aiming at. See [`crate::code_lens`] for the constraints
+    /// that shape a lens, and for why one without a gloss yet says "翻訳中"
+    /// where hover shows the source instead.
+    ///
+    /// Nothing here waits for the engine: a block with no gloss is queued and
+    /// gets a placeholder, and the `workspace/codeLens/refresh` the pipeline
+    /// sends when the batch lands brings the client back for the real title.
+    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        let uri = params.text_document.uri;
+
+        // `None` for a document that was never opened, an empty list for one
+        // that has no comments. The first is a question this server cannot
+        // answer; the second is an answer.
+        let Some((lenses, missing)) = self.documents.with_blocks(&uri, |blocks| {
+            let mut lenses = Vec::with_capacity(blocks.len());
+            let mut missing = false;
+            for block in blocks {
+                match self.glosses.lookup(&block.text) {
+                    Some(gloss) => lenses.push(code_lens::glossed(block, &gloss)),
+                    None => {
+                        missing = true;
+                        lenses.push(code_lens::pending(block));
+                    }
+                }
+            }
+            (lenses, missing)
+        }) else {
+            return Ok(None);
+        };
+
+        if missing {
+            // Outside the closure on purpose: it reads the document store
+            // again, and the closure ran with the document locked.
+            self.request_glosses(&uri);
+        }
+        Ok(Some(lenses))
+    }
+
+    /// Accepts [`code_lens::NOOP_COMMAND`] and does nothing with it.
+    ///
+    /// Every lens carries a command because Zed draws no lens that lacks one,
+    /// and a drawn lens is clickable whether or not anything should happen.
+    /// Answering `null` is what keeps a click from raising an error in the
+    /// editor.
+    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<LSPAny>> {
+        if params.command != code_lens::NOOP_COMMAND {
+            // Not worth failing the request over: an unknown command here is
+            // the client's mistake, and an error would surface as a popup.
+            tracing::debug!(command = %params.command, "ignoring an unknown command");
+        }
+        Ok(None)
     }
 }
 
