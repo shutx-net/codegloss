@@ -103,6 +103,34 @@ impl DocumentStore {
         })
     }
 
+    /// Runs `read` over the comment blocks of a document, without copying them.
+    ///
+    /// [`Self::snapshot`] would do as well, but it clones the whole buffer; a
+    /// request that only needs the blocks - one code lens per comment, on every
+    /// keystroke, for a file with hundreds of them - should not pay for the
+    /// text as well.
+    ///
+    /// IMPORTANT: `read` runs while the document is locked for reading. It must
+    /// not touch this store again, and it must not block.
+    pub fn with_blocks<T>(&self, uri: &Uri, read: impl FnOnce(&[CommentBlock]) -> T) -> Option<T> {
+        self.documents.get(uri).map(|entry| read(&entry.blocks))
+    }
+
+    /// Every comment of a document, in source order.
+    ///
+    /// This is what gets queued for translation. The whole document goes at
+    /// once, even when a single hover prompted it: a job carrying only part of
+    /// a document could not safely replace an earlier job for the same one.
+    pub fn comment_texts(&self, uri: &Uri) -> Vec<String> {
+        self.documents.get(uri).map_or_else(Vec::new, |document| {
+            document
+                .blocks
+                .iter()
+                .map(|block| block.text.clone())
+                .collect()
+        })
+    }
+
     pub fn len(&self) -> usize {
         self.documents.len()
     }
@@ -229,6 +257,46 @@ mod tests {
         let store = DocumentStore::new();
         store.update(&uri(), 1, RUST.to_owned());
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn comment_texts_lists_every_comment_in_order() {
+        let store = DocumentStore::new();
+        let text = "// First.\nfn f() {}\n// Second.\nfn g() {}\n";
+        store.open(uri(), "rust".to_owned(), 1, text.to_owned());
+
+        assert_eq!(
+            store.comment_texts(&uri()),
+            vec!["First.".to_owned(), "Second.".to_owned()]
+        );
+    }
+
+    #[test]
+    fn comment_texts_of_an_unknown_document_is_empty() {
+        assert!(DocumentStore::new().comment_texts(&uri()).is_empty());
+    }
+
+    #[test]
+    fn with_blocks_sees_the_blocks_of_an_open_document() {
+        let texts = store()
+            .with_blocks(&uri(), |blocks| {
+                blocks
+                    .iter()
+                    .map(|block| block.text.clone())
+                    .collect::<Vec<_>>()
+            })
+            .expect("document is open");
+        assert_eq!(texts, vec!["Return the cached user.".to_owned()]);
+    }
+
+    /// A document nobody opened is told apart from one without comments: the
+    /// first has no answer, the second has an empty one.
+    #[test]
+    fn with_blocks_of_an_unknown_document_returns_nothing() {
+        assert_eq!(
+            DocumentStore::new().with_blocks(&uri(), <[CommentBlock]>::len),
+            None
+        );
     }
 
     #[test]

@@ -8,14 +8,16 @@ CodeGloss は、ソースファイルを書き換えずに英語コメントの�
 
 - 設計の全体像: Issue #1
 - 技術選定の根拠と Zed ソースの実測調査: `docs/tech-stack-evaluation.md`（必要になったときに読む。常時参照しない）
+- Zed 上での表示の確認事項と性能の実測値: `docs/zed-display-notes.md`（**目視確認のチェックリストは未記入のまま。実機を持つ人間が埋める。推測で埋めない**）
 
 ## 現状
 
 Cargo ワークスペースがあり、`cargo build --workspace` / `cargo test --workspace` が通る。
 
-- `crates/codegloss-core` — ドメイン型（`CommentBlock` / `Gloss` / `GlossKey`）のみ。前処理・後処理・キャッシュは未実装。`CommentBlock` は `text`（コメント記号を剥がした本文＝翻訳の入力）と `raw`（元のソーステキストそのまま＝後処理の入力）の両方を持つ。
+- `crates/codegloss-core` — ドメイン型（`CommentBlock` / `Segment` / `Gloss` / `GlossKey`）と翻訳キャッシュ（`GlossCache`。LRU・インメモリ）。前処理・後処理は未実装。`CommentBlock` は `text`（コメント記号を剥がした本文＝翻訳の入力）と `raw`（元のソーステキストそのまま＝後処理の入力）の両方を持つ。
 - `crates/codegloss-parser` — Tree-sitter によるコメント抽出。対応言語は Rust のみ。連続する行コメントを 1 ブロックに連結し、区切り線と空コメントは落とす。
-- `crates/codegloss-lsp` — LSP サーバ。initialize / didOpen / didChange / didClose / hover に応答する。hover はコメント上でだけコメント本文を返し、コード上では `null` を返す。翻訳はまだ無い（本文がそのまま出る）。
+- `crates/codegloss-translator` — `trait Translator`（`translate(&[Segment]) -> Vec<String>` と `model_version()`）と `PassthroughTranslator`（入力をそのまま返す）。candle はまだ入っていない。
+- `crates/codegloss-lsp` — LSP サーバ。initialize / didOpen / didChange / didClose / hover / codeLens / executeCommand に応答する。hover はコメント上でだけ答え、コード上では `null` を返す。codeLens はコメントブロック 1 件につきレンズ 1 件を、そのコメント行に返す（Zed は行の**上**に描くのでコメントの 1 つ上に出る）。翻訳は `translation.rs` のバックグラウンドワーカーが行い、ハンドラはキャッシュを引くだけ。訳が無いあいだ hover は原文を、codeLens は `⟳ 翻訳中…` を返す（差し替えられるのは後者だけなので、わざと挙動を変えている。理由は `crates/codegloss-lsp/src/code_lens.rs` の冒頭と README）。訳ができると `workspace/inlayHint/refresh` と `workspace/codeLens/refresh` を送る。
 - `editors/zed` — Zed 拡張。`codegloss-lsp` を見つけて起動するだけ。ルートワークスペースからは exclude してあるため `cargo build --workspace` には含まれない（`cd editors/zed && cargo build --target wasm32-wasip2`）。
 
 ## 開発環境

@@ -8,6 +8,7 @@
 use std::str::FromStr;
 
 use codegloss_lsp::Backend;
+use codegloss_lsp::code_lens::{NOOP_COMMAND, PENDING_TITLE};
 use serde_json::{Value, json};
 use tower::{Service, ServiceExt};
 use tower_lsp_server::LspService;
@@ -85,6 +86,26 @@ async fn initialize_advertises_hover_and_full_sync() {
     );
 }
 
+/// Zed takes the text of a lens from `command.title` and draws nothing for a
+/// lens without a command, so the no-op command has to be advertised as
+/// executable or clicking a gloss reports an unknown command.
+#[tokio::test(flavor = "current_thread")]
+async fn initialize_advertises_code_lenses_and_the_command_they_carry() {
+    let (mut service, _socket) = LspService::new(Backend::new);
+
+    let response = request(&mut service, initialize_request()).await;
+    let capabilities = &response["result"]["capabilities"];
+
+    assert_eq!(
+        capabilities["codeLensProvider"],
+        json!({ "resolveProvider": false })
+    );
+    assert_eq!(
+        capabilities["executeCommandProvider"]["commands"],
+        json!([NOOP_COMMAND])
+    );
+}
+
 /// Brings a service up to the point where it has the fixture open.
 async fn opened_service() -> LspService<Backend> {
     let (mut service, _socket) = LspService::new(Backend::new);
@@ -97,6 +118,21 @@ async fn opened_service() -> LspService<Backend> {
     .await;
     notify(&mut service, did_open_notification()).await;
     service
+}
+
+/// Asserts that a hover answer is about `source`.
+///
+/// The value is the English source on its own until the background pipeline has
+/// a gloss for it, and the gloss with the source quoted underneath once it has;
+/// which of the two a given run sees depends on a background batch, so what is
+/// asserted here is what both forms share. `pipeline.rs` pins down each of them
+/// exactly, with an engine that only produces a gloss when told to.
+fn assert_hover_is_about(result: &Value, source: &str) {
+    let value = result["contents"]["value"]
+        .as_str()
+        .expect("hover contents carry a string");
+    assert_eq!(result["contents"]["kind"], json!("markdown"));
+    assert!(value.contains(source), "{value:?} is not about {source:?}");
 }
 
 async fn hover_at(service: &mut LspService<Backend>, line: u32, character: u32) -> Value {
@@ -114,17 +150,13 @@ async fn hover_at(service: &mut LspService<Backend>, line: u32, character: u32) 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn hover_over_a_comment_returns_its_text() {
+async fn hover_over_a_comment_answers_about_that_comment() {
     let mut service = opened_service().await;
 
     let response = hover_at(&mut service, 0, 3).await;
     let result = &response["result"];
 
-    assert_eq!(result["contents"]["kind"], json!("markdown"));
-    assert_eq!(
-        result["contents"]["value"],
-        json!("Return the cached user.")
-    );
+    assert_hover_is_about(result, "Return the cached user.");
     // The range covers the comment only, markers included and newline excluded.
     assert_eq!(
         result["range"]["start"],
@@ -159,10 +191,7 @@ async fn hover_on_a_multibyte_line_lands_on_the_right_half() {
 
     // Character 30 is inside the trailing comment.
     let response = hover_at(&mut service, 2, 30).await;
-    assert_eq!(
-        response["result"]["contents"]["value"],
-        json!("Trailing note.")
-    );
+    assert_hover_is_about(&response["result"], "Trailing note.");
     assert_eq!(
         response["result"]["range"]["start"],
         json!({ "line": 2, "character": 26 })
@@ -176,6 +205,94 @@ async fn hover_in_a_document_that_was_never_opened_returns_nothing() {
 
     let response = hover_at(&mut service, 0, 3).await;
     assert_eq!(response["result"], Value::Null);
+}
+
+async fn code_lens_for(service: &mut LspService<Backend>, uri: &str) -> Value {
+    request(
+        service,
+        Request::build("textDocument/codeLens")
+            .params(json!({ "textDocument": { "uri": uri } }))
+            .id(3)
+            .finish(),
+    )
+    .await
+}
+
+/// One lens per comment block, on the comment's own line.
+///
+/// The line matters more than it looks: Zed inserts the lens as a block *above*
+/// the line, so the gloss of a comment on line 2 only lands between the code and
+/// the comment if the lens says line 2.
+#[tokio::test(flavor = "current_thread")]
+async fn code_lens_answers_one_lens_per_comment_on_the_comment_line() {
+    let mut service = opened_service().await;
+
+    let response = code_lens_for(&mut service, DOCUMENT_URI).await;
+    let lenses = response["result"]
+        .as_array()
+        .expect("the answer is a list of lenses");
+
+    // The fixture has a comment on line 0 and a trailing comment on line 2.
+    assert_eq!(lenses.len(), 2, "{response}");
+    for (lens, line) in lenses.iter().zip([0, 2]) {
+        assert_eq!(
+            lens["range"]["start"],
+            json!({ "line": line, "character": 0 })
+        );
+        assert_eq!(lens["range"]["end"], lens["range"]["start"]);
+        assert_eq!(lens["command"]["command"], json!(NOOP_COMMAND));
+
+        let title = lens["command"]["title"]
+            .as_str()
+            .expect("a lens carries a title");
+        // Which of the two shows up is a race with the background pipeline;
+        // `pipeline.rs` pins down each of them with an engine it controls.
+        assert!(!title.is_empty(), "an empty title is never drawn");
+    }
+}
+
+/// A file the client never opened has no answer, as opposed to an empty one.
+#[tokio::test(flavor = "current_thread")]
+async fn code_lens_for_an_unopened_document_returns_nothing() {
+    let mut service = opened_service().await;
+
+    let response = code_lens_for(&mut service, "file:///tmp/codegloss/other.rs").await;
+    assert_eq!(response["result"], Value::Null);
+    assert!(response.get("error").is_none(), "{response}");
+}
+
+/// A lens is clickable whether or not that was wanted, and the click has to be
+/// answered rather than refused.
+#[tokio::test(flavor = "current_thread")]
+async fn executing_the_lens_command_answers_without_an_error() {
+    let mut service = opened_service().await;
+
+    let response = request(
+        &mut service,
+        Request::build("workspace/executeCommand")
+            .params(json!({ "command": NOOP_COMMAND, "arguments": [] }))
+            .id(4)
+            .finish(),
+    )
+    .await;
+
+    assert_eq!(response["result"], Value::Null);
+    assert!(response.get("error").is_none(), "{response}");
+}
+
+/// The placeholder is the one piece of UI text a lens can show that hover never
+/// does. Hover falls back to the English source instead, because a popup cannot
+/// be refreshed once it is on screen and because a lens sits directly above the
+/// English it would otherwise be repeating.
+#[tokio::test(flavor = "current_thread")]
+async fn the_lens_placeholder_is_not_what_hover_falls_back_to() {
+    let mut service = opened_service().await;
+
+    let hover = hover_at(&mut service, 0, 3).await;
+    let value = hover["result"]["contents"]["value"]
+        .as_str()
+        .expect("hover contents carry a string");
+    assert!(!value.contains(PENDING_TITLE), "{value:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]
