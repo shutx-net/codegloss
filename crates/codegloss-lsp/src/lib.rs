@@ -8,5 +8,7 @@
 
 pub mod backend;
 pub mod documents;
+pub mod translation;
 
 pub use backend::Backend;
+pub use translation::TranslationService;

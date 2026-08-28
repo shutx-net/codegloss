@@ -99,6 +99,21 @@ async fn opened_service() -> LspService<Backend> {
     service
 }
 
+/// Asserts that a hover answer is about `source`.
+///
+/// The value is the English source on its own until the background pipeline has
+/// a gloss for it, and the gloss with the source quoted underneath once it has;
+/// which of the two a given run sees depends on a background batch, so what is
+/// asserted here is what both forms share. `pipeline.rs` pins down each of them
+/// exactly, with an engine that only produces a gloss when told to.
+fn assert_hover_is_about(result: &Value, source: &str) {
+    let value = result["contents"]["value"]
+        .as_str()
+        .expect("hover contents carry a string");
+    assert_eq!(result["contents"]["kind"], json!("markdown"));
+    assert!(value.contains(source), "{value:?} is not about {source:?}");
+}
+
 async fn hover_at(service: &mut LspService<Backend>, line: u32, character: u32) -> Value {
     request(
         service,
@@ -114,17 +129,13 @@ async fn hover_at(service: &mut LspService<Backend>, line: u32, character: u32) 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn hover_over_a_comment_returns_its_text() {
+async fn hover_over_a_comment_answers_about_that_comment() {
     let mut service = opened_service().await;
 
     let response = hover_at(&mut service, 0, 3).await;
     let result = &response["result"];
 
-    assert_eq!(result["contents"]["kind"], json!("markdown"));
-    assert_eq!(
-        result["contents"]["value"],
-        json!("Return the cached user.")
-    );
+    assert_hover_is_about(result, "Return the cached user.");
     // The range covers the comment only, markers included and newline excluded.
     assert_eq!(
         result["range"]["start"],
@@ -159,10 +170,7 @@ async fn hover_on_a_multibyte_line_lands_on_the_right_half() {
 
     // Character 30 is inside the trailing comment.
     let response = hover_at(&mut service, 2, 30).await;
-    assert_eq!(
-        response["result"]["contents"]["value"],
-        json!("Trailing note.")
-    );
+    assert_hover_is_about(&response["result"], "Trailing note.");
     assert_eq!(
         response["result"]["range"]["start"],
         json!({ "line": 2, "character": 26 })

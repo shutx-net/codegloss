@@ -20,10 +20,15 @@ repository = "https://github.com/shutx-net/codegloss"
 anyhow = "1.0"
 blake3 = "1.8"
 dashmap = "6"
+# tower-lsp-server が使う futures と同じ版。テストでサーバ発リクエスト
+# （workspace/*/refresh）を ClientSocket から読むためだけに使う。
+futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
-tokio = { version = "1.53", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
+# sync: 翻訳ジョブのキュー（mpsc）と完了通知（watch）。
+# time: デバウンスと refresh のスロットリング。
+tokio = { version = "1.53", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
 tower-lsp-server = "0.23"
 tracing = "0.1"
