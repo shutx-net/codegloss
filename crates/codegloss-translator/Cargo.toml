@@ -1,0 +1,19 @@
+[package]
+name = "codegloss-translator"
+description = "trait Translator と、その実装（差し替え可能な翻訳エンジン）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# IMPORTANT: このクレートは codegloss-core にしか依存しない。前処理・後処理・
+# キャッシュを Translator 実装の中に書かないこと（AGENTS.md）。エンジンを
+# 差し替えたときに一緒に失われるため、それらは codegloss-core に置く。
+#
+# candle / tokenizers は実モデルを入れる段階（P7）で feature = "candle" の
+# 下に足す。まだ足さない。
+[dependencies]
+anyhow.workspace = true
+codegloss-core = { path = "../codegloss-core" }
