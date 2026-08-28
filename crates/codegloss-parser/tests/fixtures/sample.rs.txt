@@ -1,0 +1,27 @@
+//! CodeGloss parser fixture. Stored as .rs.txt so that cargo does not try to
+//! build it.
+
+/// Looks the user up in the cache.
+/// Falls back to the database on a miss.
+pub fn find_user(id: u64) -> Option<String> {
+    // The `//` in the URL below is not a comment. It sits inside a string
+    // literal, and Tree-sitter leaves it there instead of guessing from the
+    // raw text.
+    let endpoint = "https://example.com/users"; // Trailing note.
+
+    //////////
+
+    // First paragraph of the second run.
+    //
+    // Second paragraph, split off by the empty comment above.
+
+    /* A block comment
+     * that continues on this line
+     * and ends here.
+     */
+    let _ = (id, endpoint);
+    None
+}
+
+/** Doc block attached to a struct. */
+pub struct User;
