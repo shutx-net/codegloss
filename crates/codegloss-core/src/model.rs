@@ -55,6 +55,45 @@ pub struct CommentBlock {
     pub end_byte: usize,
 }
 
+/// One unit of translation: the plain text of a single request to the engine.
+///
+/// A distinct type rather than a bare `String` on purpose. Pre-processing has
+/// to hand the engine a text whose identifiers, back-quoted code and URLs have
+/// been swapped for placeholders, plus the table that puts them back; that
+/// table will live here, and every call site already speaks in `Segment`s by
+/// the time it does.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Segment {
+    text: String,
+}
+
+impl Segment {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+
+    /// The text to send to the engine.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn into_text(self) -> String {
+        self.text
+    }
+}
+
+impl From<String> for Segment {
+    fn from(text: String) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<&str> for Segment {
+    fn from(text: &str) -> Self {
+        Self::new(text)
+    }
+}
+
 /// A finished translation of one comment block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Gloss {
@@ -101,6 +140,16 @@ impl GlossKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_segment_carries_its_text_unchanged() {
+        let segment = Segment::new("Return the cached user.");
+        assert_eq!(segment.text(), "Return the cached user.");
+        assert_eq!(
+            Segment::from("x".to_owned()).into_text(),
+            Segment::from("x").into_text()
+        );
+    }
 
     #[test]
     fn same_inputs_produce_the_same_key() {
