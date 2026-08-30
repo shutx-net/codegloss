@@ -17,13 +17,21 @@
 //!
 //! ```text
 //! didOpen / didChange / hover miss
-//!   -> enqueue(uri, texts)                (returns immediately)
+//!   -> enqueue(uri, sources)              (returns immediately)
 //!   -> worker collects jobs for 150 ms    (a burst of keystrokes is one batch)
-//!   -> drops cached and duplicate texts
+//!   -> drops cached and duplicate blocks
+//!   -> GlossPlan::new                     (pre-processing: mask)
 //!   -> spawn_blocking(translate(batch))   (off the async executor)
+//!   -> GlossPlan::restore                 (post-processing: unmask, rebuild)
 //!   -> cache.insert(..)
 //!   -> workspace/inlayHint/refresh + workspace/codeLens/refresh
 //! ```
+//!
+//! IMPORTANT (AGENTS.md): the two steps around `translate` are what keep
+//! identifiers, inline code, URLs and doc tags out of the engine's reach, and
+//! they live in `codegloss-core` rather than in a [`Translator`]. This worker is
+//! the only place they are applied, so an engine swap cannot lose them: what
+//! [`Translator::translate`] receives is always a masked segment.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -32,7 +40,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use codegloss_core::{GlossCache, GlossKey, Segment};
+use codegloss_core::{GlossCache, GlossKey, GlossPlan, Segment};
 use codegloss_translator::Translator;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, timeout, timeout_at};
@@ -69,13 +77,14 @@ const MIN_REFRESH_INTERVAL: Duration = Duration::from_millis(300);
 /// this one.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// One document's worth of text to translate.
+/// One document's worth of comments to translate.
 struct Job {
     uri: Uri,
-    /// Every comment of the document, not only the ones that prompted the job.
-    /// Jobs for the same document supersede one another inside the debounce
-    /// window, which is only correct because each one is complete.
-    texts: Vec<String>,
+    /// Every comment of the document, not only the ones that prompted the job,
+    /// each as it is written in the file. Jobs for the same document supersede
+    /// one another inside the debounce window, which is only correct because
+    /// each one is complete.
+    sources: Vec<String>,
 }
 
 /// The handle the LSP handlers hold: a cache to read and a queue to write.
@@ -139,28 +148,34 @@ impl TranslationService {
         self.initialized.store(true, Ordering::Release);
     }
 
-    /// The finished translation of `text`, if there is one.
+    /// The finished gloss of the comment written as `source`, if there is one.
     ///
-    /// This is the only thing a request handler may call to obtain a
-    /// translation. A miss is a miss: it never waits for one to be produced.
-    pub fn lookup(&self, text: &str) -> Option<Arc<str>> {
-        self.cache.get(&self.key(text))
+    /// `source` is the comment exactly as it appears in the file
+    /// ([`CommentBlock::raw`](codegloss_core::CommentBlock::raw)), which is what
+    /// the gloss was built from: the same prose written as `//` and as `/** */`
+    /// glosses differently, because the structure of the block is part of the
+    /// answer.
+    ///
+    /// This is the only thing a request handler may call to obtain a gloss. A
+    /// miss is a miss: it never waits for one to be produced.
+    pub fn lookup(&self, source: &str) -> Option<Arc<str>> {
+        self.cache.get(&self.key(source))
     }
 
     /// Queues a document for translation and returns immediately.
     ///
-    /// `texts` should be every comment of the document. Sending the whole
+    /// `sources` should be every comment of the document. Sending the whole
     /// document is what makes it safe for a later job to supersede an earlier
     /// one; sending only the comment under the cursor would drop the rest.
-    pub fn enqueue(&self, uri: Uri, texts: Vec<String>) {
-        if texts.is_empty() {
+    pub fn enqueue(&self, uri: Uri, sources: Vec<String>) {
+        if sources.is_empty() {
             return;
         }
 
-        // Cached texts are filtered by the worker rather than here: this runs
-        // inside a request handler, and the worker has to re-check anyway
+        // Cached comments are filtered by the worker rather than here: this
+        // runs inside a request handler, and the worker has to re-check anyway
         // because entries can land between the two points.
-        if self.jobs.send(Job { uri, texts }).is_err() {
+        if self.jobs.send(Job { uri, sources }).is_err() {
             tracing::warn!("the translation worker is gone; nothing will be translated");
         }
     }
@@ -173,9 +188,10 @@ impl TranslationService {
         self.batches.clone()
     }
 
-    /// Cache key of `text` under the engine currently loaded.
-    pub fn key(&self, text: &str) -> GlossKey {
-        key(self.translator.model_version(), text)
+    /// Cache key of the comment written as `source`, under the engine currently
+    /// loaded.
+    pub fn key(&self, source: &str) -> GlossKey {
+        key(self.translator.model_version(), source)
     }
 }
 
@@ -193,7 +209,7 @@ impl Worker {
     async fn run(mut self, mut queue: mpsc::UnboundedReceiver<Job>) {
         while let Some(job) = queue.recv().await {
             let mut pending = HashMap::new();
-            pending.insert(job.uri, job.texts);
+            pending.insert(job.uri, job.sources);
 
             let still_open = collect_until_quiet(&mut queue, &mut pending).await;
             self.run_batch(pending).await;
@@ -209,12 +225,12 @@ impl Worker {
     /// to refetch.
     async fn run_batch(&mut self, pending: HashMap<Uri, Vec<String>>) {
         let documents = pending.len();
-        let segments = uncached_segments(&self.cache, self.translator.model_version(), pending);
+        let sources = uncached_sources(&self.cache, self.translator.model_version(), pending);
 
-        let stored = if segments.is_empty() {
+        let stored = if sources.is_empty() {
             0
         } else {
-            self.run_engine(segments).await
+            self.run_engine(sources).await
         };
 
         tracing::debug!(documents, stored, "translation batch finished");
@@ -228,11 +244,29 @@ impl Worker {
         self.completed.send_modify(|count| *count += 1);
     }
 
-    /// Runs the engine off the async executor and caches what comes back.
-    /// Returns how many translations were stored.
-    async fn run_engine(&self, segments: Vec<Segment>) -> usize {
-        let count = segments.len();
-        tracing::debug!(segments = count, "running the engine");
+    /// Pre-processes, runs the engine off the async executor, post-processes and
+    /// caches what comes back. Returns how many glosses were stored.
+    async fn run_engine(&self, sources: Vec<String>) -> usize {
+        // Pre-processing (`codegloss-core`): each comment is taken apart into
+        // the units a translator should see, with identifiers, inline code,
+        // URLs and doc tags replaced by placeholders.
+        let plans: Vec<GlossPlan> = sources
+            .iter()
+            .map(|source| GlossPlan::new(source))
+            .collect();
+        let Batch { segments, slots } = Batch::of(&plans);
+        tracing::debug!(
+            blocks = sources.len(),
+            segments = segments.len(),
+            "running the engine"
+        );
+
+        // A block that is pure decoration has nothing to translate. It is still
+        // stored, so that the next request finds an answer instead of queueing
+        // it again for ever.
+        if segments.is_empty() {
+            return self.store(&sources, &plans, &slots, &[]);
+        }
 
         let translator = Arc::clone(&self.translator);
         // IMPORTANT: inference is CPU-bound and blocking. Running it on the
@@ -244,7 +278,20 @@ impl Worker {
         .await;
 
         match finished {
-            Ok((segments, Ok(translations))) => self.store(segments, translations),
+            Ok((segments, Ok(translations))) if translations.len() == segments.len() => {
+                self.store(&sources, &plans, &slots, &translations)
+            }
+            Ok((segments, Ok(translations))) => {
+                // The trait says one output per input. An engine that breaks
+                // that would otherwise pair every following comment with the
+                // wrong translation, and the cache would keep serving the mix-up.
+                tracing::error!(
+                    inputs = segments.len(),
+                    outputs = translations.len(),
+                    "the engine returned the wrong number of translations; dropping the batch"
+                );
+                0
+            }
             Ok((_, Err(error))) => {
                 // A failed batch is dropped rather than retried: the next
                 // didChange or hover queues it again, and an engine that fails
@@ -259,26 +306,28 @@ impl Worker {
         }
     }
 
-    fn store(&self, segments: Vec<Segment>, translations: Vec<String>) -> usize {
-        if translations.len() != segments.len() {
-            // The trait says one output per input. An engine that breaks that
-            // would otherwise pair every following comment with the wrong
-            // translation, and the cache would keep serving the mix-up.
-            tracing::error!(
-                inputs = segments.len(),
-                outputs = translations.len(),
-                "the engine returned the wrong number of translations; dropping the batch"
-            );
-            return 0;
-        }
-
+    /// Post-processing (`codegloss-core`): puts the protected spans back into
+    /// each unit and rebuilds the structure of the block around them, then
+    /// caches the gloss under the comment it was made from.
+    fn store(
+        &self,
+        sources: &[String],
+        plans: &[GlossPlan],
+        slots: &[Vec<usize>],
+        translations: &[String],
+    ) -> usize {
         let model_version = self.translator.model_version();
-        let stored = segments.len();
-        for (segment, translation) in segments.into_iter().zip(translations) {
-            self.cache
-                .insert(key(model_version, segment.text()), Arc::from(translation));
+        for ((source, plan), slots) in sources.iter().zip(plans).zip(slots) {
+            let of_this_block: Vec<String> = slots
+                .iter()
+                .map(|slot| translations[*slot].clone())
+                .collect();
+            self.cache.insert(
+                key(model_version, source),
+                Arc::from(plan.restore(&of_this_block)),
+            );
         }
-        stored
+        sources.len()
     }
 
     /// Asks the client to refetch the hints it is showing.
@@ -328,7 +377,7 @@ async fn collect_until_quiet(
     loop {
         match timeout_at(deadline, queue.recv()).await {
             Ok(Some(job)) => {
-                pending.insert(job.uri, job.texts);
+                pending.insert(job.uri, job.sources);
             }
             Ok(None) => return false,
             Err(_elapsed) => return true,
@@ -336,27 +385,66 @@ async fn collect_until_quiet(
     }
 }
 
-/// Drops the texts that are already cached and the ones that repeat, so the
-/// engine sees each distinct text exactly once.
+/// Drops the comments that are already glossed and the ones that repeat, so
+/// that each distinct comment is prepared exactly once.
 ///
 /// Two files quoting the same sentence, or one file whose other comments
 /// survived an edit, must not pay for it twice.
-fn uncached_segments(
+fn uncached_sources(
     cache: &GlossCache,
     model_version: &str,
     pending: HashMap<Uri, Vec<String>>,
-) -> Vec<Segment> {
+) -> Vec<String> {
     let mut seen = HashSet::new();
-    let mut segments = Vec::new();
+    let mut sources = Vec::new();
 
-    for text in pending.into_values().flatten() {
-        let key = key(model_version, &text);
+    for source in pending.into_values().flatten() {
+        let key = key(model_version, &source);
         if cache.contains(&key) || !seen.insert(key) {
             continue;
         }
-        segments.push(Segment::new(text));
+        sources.push(source);
     }
-    segments
+    sources
+}
+
+/// The engine input of one batch: every unit of every comment, deduplicated,
+/// plus where each comment's units ended up.
+///
+/// The deduplication is a second one, below the one `uncached_sources` does:
+/// two comments that differ only in their indentation, or a `@return` line
+/// repeated across a file, share a single segment and a single inference.
+struct Batch {
+    segments: Vec<Segment>,
+    /// One entry per comment, holding the index into `segments` of each of its
+    /// units, in order.
+    slots: Vec<Vec<usize>>,
+}
+
+impl Batch {
+    fn of(plans: &[GlossPlan]) -> Self {
+        let mut segments: Vec<Segment> = Vec::new();
+        let mut slots = Vec::with_capacity(plans.len());
+        let mut seen: HashMap<String, usize> = HashMap::new();
+
+        for plan in plans {
+            let mut of_this_plan = Vec::new();
+            for segment in plan.segments() {
+                let slot = match seen.get(segment.text()).copied() {
+                    Some(slot) => slot,
+                    None => {
+                        seen.insert(segment.text().to_owned(), segments.len());
+                        segments.push(segment);
+                        segments.len() - 1
+                    }
+                };
+                of_this_plan.push(slot);
+            }
+            slots.push(of_this_plan);
+        }
+
+        Self { segments, slots }
+    }
 }
 
 async fn send_refresh(name: &str, request: impl Future<Output = jsonrpc::Result<()>>) {
@@ -369,12 +457,20 @@ async fn send_refresh(name: &str, request: impl Future<Output = jsonrpc::Result<
     }
 }
 
-/// Cache key of `text` for the given engine.
+/// Cache key of the comment written as `source`, for the given engine.
+///
+/// IMPORTANT: what is hashed is the comment as the file has it, before any
+/// masking. The masked form would be the wrong key twice over: `Returns \`A\`.`
+/// and `Returns \`B\`. ` mask to the same string and would collide, and a
+/// lookup would have to re-run the masking to build the key at all - inside a
+/// request handler, and only to hand back a value it could not unmask without
+/// the table that mask produced. Hashing the source keeps the read path a plain
+/// map lookup, and what is stored is the finished, already unmasked gloss.
 ///
 /// Free-standing so that the model version cannot be left out of a key by
 /// accident: every path that builds one goes through here.
-fn key(model_version: &str, text: &str) -> GlossKey {
-    GlossKey::new(model_version, SOURCE_LANGUAGE, TARGET_LANGUAGE, text)
+fn key(model_version: &str, source: &str) -> GlossKey {
+    GlossKey::new(model_version, SOURCE_LANGUAGE, TARGET_LANGUAGE, source)
 }
 
 #[cfg(test)]
@@ -392,60 +488,92 @@ mod tests {
     }
 
     #[test]
-    fn cached_and_duplicate_texts_never_reach_the_engine() {
+    fn cached_and_duplicate_comments_never_reach_the_engine() {
         let cache = GlossCache::default();
-        cache.insert(key("m", "already done"), Arc::from("済み"));
+        cache.insert(key("m", "// already done"), Arc::from("済み"));
 
         let mut pending = HashMap::new();
         pending.insert(
             uri("file:///a.rs"),
             vec![
-                "already done".to_owned(),
-                "new".to_owned(),
-                "new".to_owned(),
+                "// already done".to_owned(),
+                "// new".to_owned(),
+                "// new".to_owned(),
             ],
         );
 
-        let segments = uncached_segments(&cache, "m", pending);
-        assert_eq!(segments, vec![Segment::new("new")]);
+        assert_eq!(
+            uncached_sources(&cache, "m", pending),
+            vec!["// new".to_owned()]
+        );
     }
 
     /// The same sentence in two files is one unit of work.
     #[test]
-    fn a_text_shared_by_two_documents_is_translated_once() {
+    fn a_comment_shared_by_two_documents_is_translated_once() {
         let cache = GlossCache::default();
         let mut pending = HashMap::new();
-        pending.insert(uri("file:///a.rs"), vec!["shared".to_owned()]);
-        pending.insert(uri("file:///b.rs"), vec!["shared".to_owned()]);
+        pending.insert(uri("file:///a.rs"), vec!["// shared".to_owned()]);
+        pending.insert(uri("file:///b.rs"), vec!["// shared".to_owned()]);
 
         assert_eq!(
-            uncached_segments(&cache, "m", pending),
-            vec![Segment::new("shared")]
+            uncached_sources(&cache, "m", pending),
+            vec!["// shared".to_owned()]
         );
     }
 
-    /// A batch whose texts are all cached leaves the engine alone entirely.
+    /// A batch whose comments are all glossed leaves the engine alone entirely.
     #[test]
     fn an_entirely_cached_batch_is_empty() {
         let cache = GlossCache::default();
-        cache.insert(key("m", "done"), Arc::from("済み"));
+        cache.insert(key("m", "// done"), Arc::from("済み"));
 
         let mut pending = HashMap::new();
-        pending.insert(uri("file:///a.rs"), vec!["done".to_owned()]);
+        pending.insert(uri("file:///a.rs"), vec!["// done".to_owned()]);
 
-        assert!(uncached_segments(&cache, "m", pending).is_empty());
+        assert!(uncached_sources(&cache, "m", pending).is_empty());
     }
 
-    /// Entries cached under another engine are not reused, so the same text
+    /// Entries cached under another engine are not reused, so the same comment
     /// has to be translated again after a model swap.
     #[test]
-    fn a_model_swap_makes_cached_texts_uncached_again() {
+    fn a_model_swap_makes_cached_comments_uncached_again() {
         let cache = GlossCache::default();
-        cache.insert(key("passthrough-1", "text"), Arc::from("text"));
+        cache.insert(key("passthrough-1", "// text"), Arc::from("text"));
 
         let mut pending = HashMap::new();
-        pending.insert(uri("file:///a.rs"), vec!["text".to_owned()]);
+        pending.insert(uri("file:///a.rs"), vec!["// text".to_owned()]);
 
-        assert!(uncached_segments(&cache, "fugumt-en-ja@1", pending).len() == 1);
+        assert!(uncached_sources(&cache, "fugumt-en-ja@1", pending).len() == 1);
+    }
+
+    /// What reaches the engine is the masked prose of each unit, not the
+    /// comment: the Javadoc stars, the `@return` and the identifier after it
+    /// are all gone by then.
+    #[test]
+    fn a_batch_hands_the_engine_masked_units() {
+        let plans = [GlossPlan::new(
+            "/**\n * Returns `UserDetails`.\n *\n * @throws AuthError if it failed\n */",
+        )];
+        let batch = Batch::of(&plans);
+
+        assert_eq!(
+            batch.segments.iter().map(Segment::text).collect::<Vec<_>>(),
+            ["Returns ⟦0⟧.", "if it failed"]
+        );
+        assert_eq!(batch.slots, vec![vec![0, 1]]);
+    }
+
+    /// Two comments that share a unit share the inference that produces it.
+    #[test]
+    fn a_unit_two_comments_have_in_common_is_translated_once() {
+        let plans = [
+            GlossPlan::new("/// @return the user"),
+            GlossPlan::new("    /// @return the user"),
+        ];
+        let batch = Batch::of(&plans);
+
+        assert_eq!(batch.segments.len(), 1);
+        assert_eq!(batch.slots, vec![vec![0], vec![0]]);
     }
 }
