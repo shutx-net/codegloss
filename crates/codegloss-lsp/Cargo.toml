@@ -19,6 +19,14 @@ tower-lsp-server.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+# IMPORTANT: candle は既定に入れない。既定の `cargo build` / `cargo test` は
+# candle 無しで通し、実モデルを積むリリースビルドだけ `--features candle` を
+# 付ける（CI を数分重くしないため）。モデルパックが無ければ、feature の有無に
+# かかわらず PassthroughTranslator にフォールバックする（src/config.rs）。
+[features]
+default = []
+candle = ["codegloss-translator/candle"]
+
 [dev-dependencies]
 # テスト用の Translator を書くために anyhow が要る（trait Translator の戻り値）。
 anyhow.workspace = true
