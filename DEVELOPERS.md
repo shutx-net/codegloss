@@ -93,8 +93,8 @@ cargo test --workspace
    cargo build -p codegloss-lsp
    ```
 
-2. Zed の `settings.json` にサーバの絶対パスを書く。開発中はサーバを PATH に
-   置かないため、これが無いと拡張はサーバを見つけられない。
+2. **プロジェクト設定** `<repo>/.zed/settings.json` にサーバの絶対パスを書く。
+   開発中はサーバを PATH に置かないため、これが無いと拡張はサーバを見つけられない。
 
    ```json
    {
@@ -112,11 +112,19 @@ cargo test --workspace
    `[language_servers.codegloss]` のテーブルキーであって、表示名の
    `name = "CodeGloss"` ではない。取り違えると設定が効かない。
 
-3. Zed のコマンドパレットから `zed: install dev extension` を実行し、
+   `.zed/settings.json` は環境ごとに絶対パスが変わるので `.gitignore` してある。
+
+3. Code Lens で見たいなら「表示方法の設定」のとおり**ユーザ設定**に
+   `"code_lens": "on"` を書く。**プロジェクト設定に書いても効かない。**
+
+   ホバーだけで疎通を見るならこの手順は要らない。ホバーは設定なしで動く唯一の
+   表示方法である。
+
+4. Zed のコマンドパレットから `zed: install dev extension` を実行し、
    `editors/zed/` を指定する。ローカルビルドの拡張はレジストリ経由では
    インストールしない。wasm へのビルドは Zed 側が実行する。
 
-4. Rust ファイルを開いてコメントの上にホバーする。そのコメントの本文が出れば
+5. Rust ファイルを開いてコメントの上にホバーする。そのコメントの本文が出れば
    疎通できている。rust-analyzer のホバーと同時に表示される。連続する `//` は
    1 つにまとめて出る。コードの上では CodeGloss のホバーは出ない。
 
@@ -138,7 +146,92 @@ cd editors/zed && cargo build --target wasm32-wasip2 --release
 `CODEGLOSS_LOG`（例 `CODEGLOSS_LOG=debug`）で変えられる。ログは stderr にしか
 出さない（stdout は LSP の JSON-RPC が占有している）。
 
+## 表示方法の設定
+
+**表示方法の設定はここが唯一の正である。** README からはこの節を参照しており、
+向こうに設定の書き方は載せない。
+
+| 表示方法 | 必要な設定 | 書く場所 | 言語ごとの上書き | 状況 |
+|---|---|---|---|---|
+| ホバー | 不要 | — | — | 実装済み |
+| Code Lens | `"code_lens": "on"` | **ユーザ設定のみ** | **できない** | 実装済み |
+| Inlay Hint | `"inlay_hints": { "enabled": true }` | どちらでも可 | できる | 未実装（P9） |
+
+- ユーザ設定 = `~/.config/zed/settings.json`（macOS も同じパス）
+- プロジェクト設定 = `<repo>/.zed/settings.json`
+
+Zed の既定は `"code_lens": "off"` と `"inlay_hints": { "enabled": false }` なので、
+**拡張を入れただけでは Code Lens も Inlay Hint も表示されない。**
+
+### Code Lens
+
+```jsonc
+{
+  "code_lens": "on"
+}
+```
+
+`"off"`（既定）では何も出ない。`"menu"` にすると行の上ではなくコードアクション
+メニュー（Linux は `Ctrl` + `.`）の中に入るが、**CodeGloss では使いものにならない。**
+行の上のブロックが消えて読んでいる最中に訳文が見えなくなるうえ、レンズの range が
+空なので**コメント先頭行の 0 桁目にカーソルがあるときしかメニューに現れない**
+（実機確認済み。詳細は `docs/zed-display-notes.md` 2.4）。行の上に出したいなら
+`"on"` を使うこと。
+
+**`languages.<name>.code_lens` は存在しないキーである。** `code_lens` は
+`EditorSettingsContent` にしかなく、`LanguageSettingsContent` には無い。
+`deny_unknown_fields` も付いていないので、書いてもエラーにならず黙って無視される。
+言語ごとに Code Lens を切り替えることはできない。
+
+### Inlay Hint（P9 で実装予定）
+
+```jsonc
+{
+  "inlay_hints": {
+    "enabled": true,
+    "show_type_hints": false,
+    "show_parameter_hints": false,
+    "show_other_hints": true
+  }
+}
+```
+
+`inlay_hints` は言語設定（`LanguageSettingsContent`）なので、`languages.Rust`
+の下に書いて言語ごとに絞れる。プロジェクト設定でも効く。
+
+有効にすると rust-analyzer の型ヒントや引数ヒントも一緒に出るため、不要なら
+`show_type_hints` / `show_parameter_hints` を `false` にする。CodeGloss のヒントは
+LSP の `kind` を持たないので `show_other_hints` の管轄になり、これを `false` に
+すると訳文も消える。
+
 ## つまずきやすい点
+
+- **`code_lens` がプロジェクト設定で効かない理由。** 規則そのものは「表示方法の
+  設定」にある。ここに書くのは、なぜそうなるのかだけ。何のエラーも警告も出ず、
+  ただ何も表示されないので原因にたどり着きにくい。
+
+  Zed 1.17.2（`c8e44cf`）でこの設定を読んでいるのは 3 箇所しかなく、すべて
+  `EditorSettings::get_global` である（`editor.rs:2622`、`editor.rs:9995`、
+  `code_actions.rs:543`）。`SettingsStore::value_for_path(None)` はグローバル値を
+  返すだけで、ローカル設定がグローバル値に合流するのは `disable_ai` だけ
+  （`settings_store.rs` の `recompute_values`）。
+
+  同じ `.zed/settings.json` に書いた `lsp.codegloss.binary.path` の方が効くのは、
+  あちらが `LspSettings::for_worktree()` という**ファイル位置を見る API** で
+  読まれるからである。**同じファイルに書いたのに片方だけ効く**ので、サーバは
+  起動しているのに Code Lens だけ出ない、という状態になる。`inlay_hints` が
+  プロジェクト設定でも効くのも同じ理由で、あちらは
+  `snapshot.language_settings_at(location, cx).inlay_hints` と位置つきで解決される。
+
+- **WSL や素の Linux コンテナでは日本語フォントを先に入れる。** 入っていないと
+  訳文がすべて □ になる。Ubuntu なら次のとおり。
+
+  ```sh
+  sudo apt install -y fonts-noto-cjk && fc-cache -f
+  ```
+
+  `fc-list ":charset=3042"` が空なら、システム上のどのフォントも仮名を持って
+  いない。
 
 - **rustup 1.28 以降、`rust-toolchain.toml` のツールチェーンは暗黙にはインストールされない。** 手動で入れる場合は rustup の CHANGELOG が案内している次の形を使う。
 

@@ -43,59 +43,9 @@ CodeGloss は 3 通りの表示方法を想定しています。
 Zed の既定値は `"code_lens": "off"` と `"inlay_hints": { "enabled": false }`
 です。**拡張をインストールしただけでは Code Lens と Inlay Hint は表示されません。**
 
-### Code Lens の設定
-
-Issue のモックアップに相当する見え方（コメント行の 1 つ上に訳文が独立した行として
-出る）はこれです。Zed の `settings.json` に次を書きます。
-
-```jsonc
-{
-  "code_lens": "on"
-}
-```
-
-言語ごとにも上書きできます。Rust のときだけ出したいなら次のようにします。
-
-```jsonc
-{
-  "languages": {
-    "Rust": {
-      "code_lens": "on"
-    }
-  }
-}
-```
-
-- `"off"`（既定）では何も出ません。`"menu"` にすると行の上ではなく
-  **コードアクションメニューの中**に訳文が並びます。行の上に出したいなら `"on"` です。
-- 訳文は 1 行に収まる必要があるため（レンズのブロックは高さ 1 行で固定）、
-  改行は空白に潰し、長すぎる訳文は `…` で切ります。**全文はホバーで読めます。**
-- レンズはクリックできますが、クリックしても何も起きません。Zed は
-  `command` を持たないレンズを描画しないため、表示のためだけにダミーのコマンド
-  （`codegloss.noop`）を付けています。
-- rust-analyzer などのレンズと同じ行に並ぶと、Zed がそれらを ` | ` で連結して
-  1 行にまとめます。
-
-### Inlay Hint の設定（P9 で実装予定）
-
-まだ実装していませんが、有効化の方法は Code Lens と違うのでここに書いておきます。
-
-```jsonc
-{
-  "inlay_hints": {
-    "enabled": true,
-    "show_type_hints": false,
-    "show_parameter_hints": false,
-    "show_other_hints": true
-  }
-}
-```
-
-- `inlay_hints.enabled` は**グローバル設定**です。有効にすると rust-analyzer の
-  型ヒントや引数ヒントも一緒に出ます。型ヒントが不要なら上のように
-  `show_type_hints` / `show_parameter_hints` を `false` にしてください。
-- CodeGloss のヒントは LSP の `kind` を持たないので、`show_other_hints` の
-  管轄になります。これを `false` にすると CodeGloss の訳文も消えます。
+設定の書き方は [DEVELOPERS.md の「表示方法の設定」](DEVELOPERS.md#表示方法の設定)
+にまとめてあります。**どのファイルに書くかで効いたり効かなかったりする**ので、
+設定の記述はそちらに一本化しています。
 
 ### 訳ができるまでの表示（ホバーと Code Lens で違います）
 
