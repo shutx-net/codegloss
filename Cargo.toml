@@ -19,6 +19,12 @@ repository = "https://github.com/shutx-net/codegloss"
 [workspace.dependencies]
 anyhow = "1.0"
 blake3 = "1.8"
+# feature = "candle" のときだけ引く。既定のビルドとテストは candle 無しで通す
+# （CI を重くしないため。AGENTS.md の「翻訳ランタイムは v0.1 では candle」は
+# 実行時の話であって、既定のビルドに含める意味ではない）。
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
 dashmap = "6"
 # tower-lsp-server が使う futures と同じ版。テストでサーバ発リクエスト
 # （workspace/*/refresh）を ClientSocket から読むためだけに使う。
@@ -33,6 +39,10 @@ tower = { version = "0.5", features = ["util"] }
 tower-lsp-server = "0.23"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Tokenizer::from_file で FuguMT の tokenizer.json を読む。既定 feature の
+# esaxx_fast は C++ のビルドを、progressbar は indicatif を引くのでどちらも切る。
+# onig は Regex 実装として必須（無効にすると tokenizers 自体がコンパイルできない）。
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 # tree-sitter 0.26 が受け付けるグラマーの ABI は 13〜15。tree-sitter-rust 0.24 は 15。
 # 新しいグラマーを足すときは src/parser.c の LANGUAGE_VERSION を確認する。
 tree-sitter = "0.26"

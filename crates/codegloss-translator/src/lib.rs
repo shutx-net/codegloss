@@ -12,10 +12,17 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "candle")]
+mod candle;
 mod passthrough;
 
 use codegloss_core::Segment;
 
+#[cfg(feature = "candle")]
+pub use candle::{
+    CONFIG_FILE, CandleTranslator, ENGINE_VERSION, MANIFEST_FILE, Manifest, PYTORCH_FILE,
+    SAFETENSORS_FILE, SOURCE_TOKENIZER_FILE, TARGET_TOKENIZER_FILE,
+};
 pub use passthrough::{PASSTHROUGH_MODEL_VERSION, PassthroughTranslator};
 
 /// An engine that turns source-language text into target-language text.

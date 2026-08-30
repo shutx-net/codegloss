@@ -11,9 +11,28 @@ publish = false
 # IMPORTANT: このクレートは codegloss-core にしか依存しない。前処理・後処理・
 # キャッシュを Translator 実装の中に書かないこと（AGENTS.md）。エンジンを
 # 差し替えたときに一緒に失われるため、それらは codegloss-core に置く。
-#
-# candle / tokenizers は実モデルを入れる段階（P7）で feature = "candle" の
-# 下に足す。まだ足さない。
 [dependencies]
 anyhow.workspace = true
 codegloss-core = { path = "../codegloss-core" }
+candle-core = { workspace = true, optional = true }
+candle-nn = { workspace = true, optional = true }
+candle-transformers = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+# IMPORTANT: candle は既定に入れない。既定の `cargo build` / `cargo test` が
+# candle 無しで通ることを維持する（ビルドが数分伸びるのを CI に持ち込まない）。
+# 実モデルを使うときだけ `--features candle` を付ける。
+[features]
+default = []
+candle = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tokenizers",
+    "dep:tracing",
+]
