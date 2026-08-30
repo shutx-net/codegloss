@@ -172,10 +172,11 @@ Zed の既定は `"code_lens": "off"` と `"inlay_hints": { "enabled": false }` 
 ```
 
 `"off"`（既定）では何も出ない。`"menu"` にすると行の上ではなくコードアクション
-メニュー（Linux は `ctrl-.`）の中に入る。ただし CodeGloss のレンズは range が空
-なので、**コメント先頭行の 0 桁目にカーソルがあるときしかメニューに現れない**
-（`Project::code_lens_actions` が選択範囲をレンズの range に含まれるかで絞るため。
-ソースから読んだ結論で、実機未確認）。行の上に出したいなら `"on"`。
+メニュー（Linux は `Ctrl` + `.`）の中に入るが、**CodeGloss では使いものにならない。**
+行の上のブロックが消えて読んでいる最中に訳文が見えなくなるうえ、レンズの range が
+空なので**コメント先頭行の 0 桁目にカーソルがあるときしかメニューに現れない**
+（実機確認済み。詳細は `docs/zed-display-notes.md` 2.4）。行の上に出したいなら
+`"on"` を使うこと。
 
 **`languages.<name>.code_lens` は存在しないキーである。** `code_lens` は
 `EditorSettingsContent` にしかなく、`LanguageSettingsContent` には無い。
