@@ -164,7 +164,7 @@ fn the_engine_sees_placeholders_instead_of_code() {
 #[test]
 fn a_gloss_whose_placeholders_moved_is_still_restored() {
     let plan = GlossPlan::new("/// Calls `load()` before find_user.");
-    let translated = plan.restore(&["⟦1⟧ の前に ⟦0⟧ を呼ぶ。".to_owned()]);
+    let translated = plan.restore(&["X1Q の前に X0Q を呼ぶ。".to_owned()]);
 
     assert_eq!(translated, "find_user の前に `load()` を呼ぶ。");
 }

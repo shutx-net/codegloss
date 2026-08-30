@@ -487,7 +487,7 @@ mod tests {
                 .iter()
                 .map(|segment| segment.text().to_owned())
                 .collect::<Vec<_>>(),
-            ["Returns ⟦0⟧ when authentication succeeds.".to_owned()]
+            ["Returns X0Q when authentication succeeds.".to_owned()]
         );
     }
 
@@ -527,7 +527,7 @@ mod tests {
         let plan = GlossPlan::new("/// Returns `UserDetails`.\n///\n/// @return the user");
         let gloss = plan.restore(&["返します。".to_owned(), "ユーザー".to_owned()]);
 
-        // The first unit lost `⟦0⟧` and keeps its English; the second is fine.
+        // The first unit lost `X0Q` and keeps its English; the second is fine.
         assert_eq!(gloss, "Returns `UserDetails`.\n\n@return ユーザー");
     }
 }
