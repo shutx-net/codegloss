@@ -9,3 +9,14 @@
 /.direnv
 # codegloss-lsp の絶対パスを書くので環境ごとに中身が変わる
 /.zed
+# モデルの重みと、その変換物は一切コミットしない（AGENTS.md）。FuguMT は
+# CC-BY-SA-4.0 で、MIT のコードとは別に配る。tools/convert-fugumt が吐く
+# モデルパックが手元にあっても git に入らないようにしておく。
+/models
+/model-pack
+/model-pack-*
+*.safetensors
+*.spm
+pytorch_model.bin
+tokenizer-source.json
+tokenizer-target.json
