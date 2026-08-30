@@ -36,3 +36,13 @@ candle = [
     "dep:tokenizers",
     "dep:tracing",
 ]
+
+# quality / placeholders は実モデル（モデルパック）が要るので #[ignore] 付き。
+# CODEGLOSS_MODEL_PACK が指すパックに対して `-- --ignored` で走らせる。
+[[test]]
+name = "quality"
+required-features = ["candle"]
+
+[[test]]
+name = "placeholders"
+required-features = ["candle"]

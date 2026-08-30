@@ -1,0 +1,50 @@
+{"language": "rust", "raw": "/// Returns `UserDetails` when authentication succeeds."}
+{"language": "rust", "raw": "/// Returns the currently authenticated user."}
+{"language": "rust", "raw": "/// Creates a new cache with the given capacity."}
+{"language": "rust", "raw": "/// The protocol is described at https://example.com/docs/auth."}
+{"language": "rust", "raw": "/// Panics when `find_user` is called before UserRepository::open()."}
+{"language": "rust", "raw": "// TODO: return the cached user when find_user hits."}
+{"language": "rust", "raw": "// FIXME: this drops the connection when the pool is empty."}
+{"language": "rust", "raw": "// SAFETY: the pointer comes from Box::into_raw and is never null."}
+{"language": "rust", "raw": "// NOTE: the order of these two calls matters."}
+{"language": "rust", "raw": "/// Removes the entry and returns its value, if it was present."}
+{"language": "rust", "raw": "/// An iterator over the keys of the map, in insertion order."}
+{"language": "rust", "raw": "/// Blocks until the worker has finished the current batch."}
+{"language": "rust", "raw": "/// This is a blocking call and must not run on the async executor."}
+{"language": "rust", "raw": "/// The caller owns the returned buffer and must free it."}
+{"language": "rust", "raw": "/// Returns an error when the file does not exist."}
+{"language": "rust", "raw": "/// Reads the whole file into memory. Prefer `read_lines` for large files."}
+{"language": "rust", "raw": "/// Splits the input on whitespace and drops empty fields."}
+{"language": "rust", "raw": "/// A handle to a document the editor currently has open."}
+{"language": "rust", "raw": "/// Nothing here may allocate: this runs on the audio thread."}
+{"language": "rust", "raw": "// Cached comments are filtered by the worker rather than here."}
+{"language": "rust", "raw": "// The first rule that matches at a position wins."}
+{"language": "rust", "raw": "// Fall back to the English source when a placeholder was lost."}
+{"language": "rust", "raw": "/// Sends the request and waits up to `timeout` for the answer."}
+{"language": "rust", "raw": "/// # Panics\n///\n/// Panics when the index is out of bounds."}
+{"language": "rust", "raw": "/// Returns `None` when the queue is empty.\n///\n/// The queue is unbounded, so this never blocks."}
+{"language": "java", "raw": "/**\n * Returns the currently authenticated user.\n *\n * @param id the id to look up\n * @return authenticated user\n * @throws AuthenticationException if authentication failed\n */"}
+{"language": "java", "raw": "/**\n * Loads the configuration from the classpath.\n *\n * @param name the resource name\n * @return the parsed configuration\n */"}
+{"language": "java", "raw": "/** Closes the underlying stream. Idempotent. */"}
+{"language": "java", "raw": "/**\n * Registers a listener that is notified on every change.\n *\n * @param listener the listener to add, must not be null\n */"}
+{"language": "java", "raw": "/**\n * @deprecated use {@code findUserById} instead\n */"}
+{"language": "java", "raw": "// Guarded by the monitor of this object."}
+{"language": "java", "raw": "// Package private on purpose: only the builder may call this."}
+{"language": "java", "raw": "/**\n * Compares two versions and returns a negative number, zero or a positive\n * number when this version is smaller, equal or larger.\n */"}
+{"language": "python", "raw": "# Return the cached user when the id is known."}
+{"language": "python", "raw": "# This function is called once per request, keep it cheap."}
+{"language": "python", "raw": "# Retry three times before giving up."}
+{"language": "python", "raw": "# The keys are sorted so that the output is reproducible."}
+{"language": "python", "raw": "# XXX: the upstream API returns a string here, not a number."}
+{"language": "python", "raw": "# HACK: work around a bug in the vendored library."}
+{"language": "python", "raw": "# Skip files that are not readable instead of failing the run."}
+{"language": "python", "raw": "# Everything below this line runs in the worker process."}
+{"language": "python", "raw": "# Build the index lazily: most callers never need it."}
+{"language": "python", "raw": "# The default is deliberately conservative."}
+{"language": "python", "raw": "# See the module docstring for the wire format."}
+{"language": "go", "raw": "// New returns a client that talks to the given endpoint."}
+{"language": "go", "raw": "// Close releases the resources held by the client."}
+{"language": "go", "raw": "// It is safe to call this from multiple goroutines."}
+{"language": "typescript", "raw": "/** The number of items the list can hold before it grows. */"}
+{"language": "typescript", "raw": "// Deliberately not exported: the shape is an implementation detail."}
+{"language": "typescript", "raw": "/**\n * Formats a duration as a human readable string.\n *\n * @param millis the duration in milliseconds\n * @returns the formatted duration\n */"}
