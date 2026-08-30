@@ -559,7 +559,7 @@ mod tests {
 
         assert_eq!(
             batch.segments.iter().map(Segment::text).collect::<Vec<_>>(),
-            ["Returns ⟦0⟧.", "if it failed"]
+            ["Returns X0Q.", "if it failed"]
         );
         assert_eq!(batch.slots, vec![vec![0, 1]]);
     }

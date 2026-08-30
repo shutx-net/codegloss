@@ -16,21 +16,30 @@ use serde::{Deserialize, Serialize};
 
 /// Opening delimiter of a placeholder.
 ///
-/// PROVISIONAL. Which form survives FuguMT's SentencePiece tokenizer without
-/// being split, dropped or reordered is measured in P7; the candidates are this
-/// pair of non-ASCII brackets and an underscore form such as `__CG0__`. Nothing
-/// outside this module knows what a placeholder looks like: [`placeholder`]
-/// writes them and [`placeholder_at`] reads them, and swapping the format means
-/// editing those two functions and nothing else.
+/// `X` and `Q` around a decimal index - `X0Q` - picked by measurement rather
+/// than by taste. `crates/codegloss-translator/tests/placeholders.rs` sends
+/// candidate formats through FuguMT and counts how many placeholders come back
+/// whole; the table is in `docs/model-runtime-notes.md`.
 ///
-/// The brackets are the provisional choice because they cannot collide with
-/// English prose, which is what makes masking safe in the first place. Their
-/// weakness is the other half of the question: a token outside the vocabulary
-/// may come back as `<unk>`. That is exactly what P7 has to measure.
-const PLACEHOLDER_OPEN: char = '⟦';
+/// The bracket form `\u{27e6}0\u{27e7}` that P6 used provisionally scores 0%:
+/// neither bracket is in the model's vocabulary, so both arrive as `<unk>` and
+/// every placeholder is lost. `X0Q` scores 97.4%, the best of the eight
+/// measured, and the underscore form `__CG0__` the open question named scores
+/// 87.2%.
+///
+/// Two letters around a number look like nothing a reader would write, and
+/// that is the whole trick: the model copies short Latin tokens through and
+/// rewrites punctuation freely, so a marker made of letters survives where one
+/// made of brackets does not. The closing letter earns its place by keeping
+/// the format unambiguous when the character after a placeholder is a digit.
+///
+/// Nothing outside this module knows what a placeholder looks like:
+/// [`placeholder`] writes them and [`placeholder_at`] reads them. Changing the
+/// format means editing those two functions and these two constants.
+const PLACEHOLDER_OPEN: char = 'X';
 
 /// Closing delimiter. See [`PLACEHOLDER_OPEN`].
-const PLACEHOLDER_CLOSE: char = '⟧';
+const PLACEHOLDER_CLOSE: char = 'Q';
 
 /// The placeholder that stands in for the `index`-th protected span.
 pub fn placeholder(index: usize) -> String {
@@ -403,18 +412,18 @@ mod tests {
             assert_eq!(placeholder_at(&written), Some((index, written.len())));
         }
         assert_eq!(placeholder_at("not a placeholder"), None);
-        assert_eq!(placeholder_at("⟦⟧"), None);
-        assert_eq!(placeholder_at("⟦x⟧"), None);
+        assert_eq!(placeholder_at("XQ"), None);
+        assert_eq!(placeholder_at("XxQ"), None);
     }
 
     /// The example Issue #1 singles out.
     #[test]
     fn inline_code_is_protected_with_its_back_quotes() {
         let masked = mask("Returns `UserDetails` when authentication succeeds.");
-        assert_eq!(masked.masked(), "Returns ⟦0⟧ when authentication succeeds.");
+        assert_eq!(masked.masked(), "Returns X0Q when authentication succeeds.");
         assert_eq!(masked.preserved()[0].text(), "`UserDetails`");
         assert_eq!(
-            masked.unmask("認証に成功すると ⟦0⟧ を返します。"),
+            masked.unmask("認証に成功すると X0Q を返します。"),
             "認証に成功すると `UserDetails` を返します。"
         );
     }
@@ -444,7 +453,7 @@ mod tests {
     #[test]
     fn doc_tags_are_protected_but_their_arguments_are_not() {
         let masked = mask("@return authenticated user");
-        assert_eq!(masked.masked(), "⟦0⟧ authenticated user");
+        assert_eq!(masked.masked(), "X0Q authenticated user");
         assert_eq!(masked.preserved()[0].text(), "@return");
     }
 
@@ -494,7 +503,7 @@ mod tests {
         let masked = mask("Calls `load()` before find_user.");
         assert_eq!(masked.preserved().len(), 2);
         assert_eq!(
-            masked.unmask("⟦1⟧ の前に ⟦0⟧ を呼ぶ。"),
+            masked.unmask("X1Q の前に X0Q を呼ぶ。"),
             "find_user の前に `load()` を呼ぶ。"
         );
     }
@@ -513,17 +522,17 @@ mod tests {
     #[test]
     fn a_placeholder_the_engine_invented_is_left_as_text() {
         let masked = mask("Returns `UserDetails`.");
-        // The one that was allocated comes back; `⟦7⟧` was never handed out.
-        assert_eq!(masked.unmask("⟦0⟧ ⟦7⟧"), "`UserDetails` ⟦7⟧");
+        // The one that was allocated comes back; `X7Q` was never handed out.
+        assert_eq!(masked.unmask("X0Q X7Q"), "`UserDetails` X7Q");
     }
 
     /// A comment that already contains something shaped like a placeholder is
     /// protected as itself, so restoring cannot substitute into it.
     #[test]
     fn a_comment_containing_a_placeholder_survives_it() {
-        let text = "The marker ⟦0⟧ is a placeholder.";
+        let text = "The marker X0Q is a placeholder.";
         let masked = mask(text);
-        assert_eq!(masked.preserved()[0].text(), "⟦0⟧");
+        assert_eq!(masked.preserved()[0].text(), "X0Q");
         assert_eq!(round_trip(text), text);
     }
 

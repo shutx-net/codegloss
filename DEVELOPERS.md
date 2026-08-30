@@ -70,9 +70,12 @@ wasm 向けのリンカは追加不要。rustc が lld を同梱しており、w
 ```
 Cargo.toml          ルートワークスペース（members = ["crates/*"]）
  └─ crates/
-     ├─ codegloss-core   ドメイン型・前処理・後処理・キャッシュ
-     └─ codegloss-lsp    LSP サーバ（配布するネイティブバイナリ）
+     ├─ codegloss-core        ドメイン型・前処理・後処理・キャッシュ
+     ├─ codegloss-parser      Tree-sitter によるコメント抽出
+     ├─ codegloss-translator  trait Translator と実装（Passthrough / candle）
+     └─ codegloss-lsp         LSP サーバ（配布するネイティブバイナリ）
 editors/zed         Zed 拡張。独立したワークスペース（ルートからは exclude）
+tools/convert-fugumt  モデルパックを作る Python スクリプト（配布物には入らない）
 ```
 
 `editors/zed` をルートワークスペースから外しているのは、Zed のビルダが拡張
@@ -83,6 +86,63 @@ editors/zed         Zed 拡張。独立したワークスペース（ルート�
 cargo build --workspace   # ネイティブ側（crates/*）
 cargo test --workspace
 ```
+
+**既定のビルドには翻訳モデルが入らない。**candle と tokenizers は
+`--features candle` を付けたときだけ引かれる（既定に入れるとビルドが数分伸び、
+CI が重くなるため）。モデル無しでもサーバは動き、コメントは英語のまま出る。
+
+## 翻訳モデルを入れて動かす
+
+1. モデルパックを作る。詳しくは
+   [tools/convert-fugumt/README.md](tools/convert-fugumt/README.md)。
+
+   ```sh
+   pip install -r tools/convert-fugumt/requirements.txt
+   python3 tools/convert-fugumt/convert.py ~/codegloss-model
+   ```
+
+   **できたパックはリポジトリに入れないこと。**FuguMT の重みは CC-BY-SA-4.0 で、
+   `.gitignore` にも弾く設定を入れてある（AGENTS.md「ライセンス」）。
+
+2. candle 付きでビルドして、パックを渡して起動する。
+
+   ```sh
+   cargo build --release -p codegloss-lsp --features candle
+   ./target/release/codegloss-lsp --model-pack ~/codegloss-model
+   ```
+
+   `CODEGLOSS_MODEL_PACK=~/codegloss-model` でも同じ（引数が優先）。
+
+   パックが見つからない・壊れている・`candle` 無しでビルドされている場合は、
+   ログに理由を出して Passthrough にフォールバックする。**モデルが理由で
+   サーバが落ちることはない。**
+
+3. Zed から使うときは `.zed/settings.json` の `binary.arguments` に渡す
+   （拡張はここをそのままサーバへ渡す）。
+
+   ```json
+   {
+     "lsp": {
+       "codegloss": {
+         "binary": {
+           "path": "/absolute/path/to/codegloss/target/release/codegloss-lsp",
+           "arguments": ["--model-pack", "/absolute/path/to/codegloss-model"]
+         }
+       }
+     }
+   }
+   ```
+
+   **この 3 の設定は実機の Zed では未確認**（サーバ側は stdio 越しに確認済み）。
+
+4. 実モデルが要るテストは `#[ignore]` 付き。速度が出ないので `--release` で。
+
+   ```sh
+   CODEGLOSS_MODEL_PACK=~/codegloss-model \
+     cargo test -p codegloss-translator --features candle --release -- --ignored --nocapture
+   ```
+
+   実測値は [docs/model-runtime-notes.md](docs/model-runtime-notes.md)。
 
 ## Zed 拡張の動作確認
 

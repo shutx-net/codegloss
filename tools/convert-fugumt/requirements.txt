@@ -1,0 +1,5 @@
+# 変換に必要なのはこの 3 つだけ。torch も transformers も要らない
+# （理由は README.md の「重みを変換しない理由」を参照）。
+protobuf>=4.25
+sentencepiece>=0.2
+tokenizers>=0.20

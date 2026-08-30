@@ -2,14 +2,24 @@
 
 #![forbid(unsafe_code)]
 
-use codegloss_lsp::Backend;
+use std::sync::Arc;
+
+use codegloss_lsp::{Backend, ServerConfig, config};
 use tower_lsp_server::{LspService, Server};
 
 #[tokio::main]
 async fn main() {
     init_tracing();
 
-    let (service, socket) = LspService::new(Backend::new);
+    // The engine is chosen once, before the first request: loading a model
+    // takes long enough that doing it inside `initialize` would delay the
+    // editor's first paint, and the choice cannot change while the server
+    // runs.
+    let engine = config::engine(&ServerConfig::from_environment());
+    tracing::info!(model_version = engine.model_version(), "starting");
+
+    let (service, socket) =
+        LspService::new(move |client| Backend::with_engine(client, Arc::clone(&engine)));
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
         .serve(service)
         .await;

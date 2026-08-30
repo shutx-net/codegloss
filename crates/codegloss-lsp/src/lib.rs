@@ -8,8 +8,10 @@
 
 pub mod backend;
 pub mod code_lens;
+pub mod config;
 pub mod documents;
 pub mod translation;
 
 pub use backend::Backend;
+pub use config::ServerConfig;
 pub use translation::TranslationService;
