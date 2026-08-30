@@ -152,24 +152,22 @@ impl Masked {
 /// 2. inline code between back quotes
 /// 3. an `http://` or `https://` URL
 /// 4. a doc tag: `@return`, `@param`, `@throws`, ...
-/// 5. a `TODO:` / `FIXME:` style prefix at the start of a line
+/// 5. a `TODO:` / `FIXME:` style marker
 /// 6. a word that reads as code rather than as prose - see [`looks_like_code`]
 pub fn mask(text: &str) -> Masked {
     let mut masked = String::with_capacity(text.len());
     let mut preserved: Vec<Preserved> = Vec::new();
     let mut cursor = 0;
     let mut previous: Option<char> = None;
-    let mut at_line_start = true;
 
     while cursor < text.len() {
-        if let Some(end) = protected_span(&text[cursor..], previous, at_line_start) {
+        if let Some(end) = protected_span(&text[cursor..], previous) {
             let span = &text[cursor..cursor + end];
             masked.push_str(&placeholder(preserved.len()));
             preserved.push(Preserved {
                 text: span.to_owned(),
             });
             previous = span.chars().next_back();
-            at_line_start = false;
             cursor += end;
             continue;
         }
@@ -179,7 +177,6 @@ pub fn mask(text: &str) -> Masked {
             .next()
             .expect("the cursor is on a character boundary");
         masked.push(character);
-        at_line_start = character == '\n' || (at_line_start && character.is_whitespace());
         previous = Some(character);
         cursor += character.len_utf8();
     }
@@ -192,9 +189,8 @@ pub fn mask(text: &str) -> Masked {
 }
 
 /// Length of the protected span starting at the front of `rest`, if there is
-/// one. `previous` is the character before it and `at_line_start` says whether
-/// only whitespace precedes it on its line.
-fn protected_span(rest: &str, previous: Option<char>, at_line_start: bool) -> Option<usize> {
+/// one. `previous` is the character before it.
+fn protected_span(rest: &str, previous: Option<char>) -> Option<usize> {
     if let Some((_, length)) = placeholder_at(rest) {
         return Some(length);
     }
@@ -211,7 +207,7 @@ fn protected_span(rest: &str, previous: Option<char>, at_line_start: bool) -> Op
     if previous.is_some_and(is_word_character) {
         return None;
     }
-    if at_line_start && let Some(length) = attention_prefix(rest) {
+    if let Some(length) = attention_prefix(rest) {
         return Some(length);
     }
     if let Some(length) = doc_tag(rest) {
@@ -284,6 +280,11 @@ const ATTENTION_MARKERS: [&str; 8] = [
 ];
 
 /// `TODO:`, `FIXME(alice):`, `SAFETY:` - marker, optional owner, colon.
+///
+/// Anywhere in the text, not only at the start of a line: P3 merges a run of
+/// `//` lines into one unit, so the second marker of
+/// `// TODO: ...` / `// FIXME: ...` is mid-sentence by the time it gets here,
+/// and it is exactly as much of a grep target as the first.
 ///
 /// The colon is required: `NOTE` in the middle of a sentence is a word, and
 /// `NOTEBOOK:` is not a marker at all.
@@ -448,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn attention_prefixes_are_protected_at_the_start_of_a_line() {
+    fn attention_markers_are_protected_wherever_they_appear() {
         assert_eq!(spans("TODO: drop this."), ["TODO:".to_owned()]);
         assert_eq!(
             spans("FIXME(alice): drop this."),
@@ -458,7 +459,12 @@ mod tests {
             spans("SAFETY: the pointer is aligned."),
             ["SAFETY:".to_owned()]
         );
-        // Mid-sentence, and without a colon, they are ordinary words.
+        // A merged run of `//` lines puts the second marker mid-sentence.
+        assert_eq!(
+            spans("TODO: one. FIXME: two."),
+            ["TODO:".to_owned(), "FIXME:".to_owned()]
+        );
+        // Lower case, and without a colon, they are ordinary words.
         assert!(spans("Please note: nothing.").is_empty());
         assert!(spans("NOTEBOOK: not a marker.").is_empty());
     }
