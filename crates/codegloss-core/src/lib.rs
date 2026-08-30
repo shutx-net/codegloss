@@ -8,7 +8,11 @@
 #![forbid(unsafe_code)]
 
 mod cache;
+mod docblock;
 mod model;
+mod preserve;
 
 pub use cache::{DEFAULT_CAPACITY, GlossCache};
+pub use docblock::{CommentShape, GlossPlan};
 pub use model::{CommentBlock, CommentStyle, Gloss, GlossKey, Segment};
+pub use preserve::{Masked, Preserved, mask, placeholder};

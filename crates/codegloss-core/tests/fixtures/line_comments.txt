@@ -1,0 +1,2 @@
+// TODO: return the cached user when find_user hits,
+// and fall back to UserRepository::load() otherwise.
