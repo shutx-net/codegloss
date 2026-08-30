@@ -20,13 +20,26 @@ public User findUser(String id) {
 
 開発初期です。Zed 拡張と LSP サーバの骨組みができ、Rust のコメントを Tree-sitter で
 抜き出して、ホバーと Code Lens（コメント行の上に出る独立した行）に返すところまで
-動きます。翻訳エンジンは差し替え可能な形
-（`trait Translator`）になっていますが、いま入っているのは入力をそのまま返す
-ダミー（Passthrough）で、**訳文はまだ英語のまま出ます**。実際のモデル（FuguMT）は
-これからです。
+動きます。**翻訳も実際に動きます**（candle + FuguMT。CPU で 1 段落あたり
+0.2 秒ほど）。
+
+ただし**モデルの自動取得はまだありません。**モデルパックを自分で作って
+`--model-pack` で渡す必要があり、渡さなければ英語のまま表示されます（サーバは
+落ちません）。作り方は
+[tools/convert-fugumt/README.md](tools/convert-fugumt/README.md) を参照してください。
+
+```sh
+pip install -r tools/convert-fugumt/requirements.txt
+python3 tools/convert-fugumt/convert.py ~/codegloss-model
+cargo build --release -p codegloss-lsp --features candle
+./target/release/codegloss-lsp --model-pack ~/codegloss-model
+```
+
+翻訳エンジンは差し替え可能な形（`trait Translator`）のままです。
 
 - 設計方針: [Issue #1](https://github.com/shutx-net/codegloss/issues/1)
 - 技術選定の根拠: [docs/tech-stack-evaluation.md](docs/tech-stack-evaluation.md)
+- 翻訳の実測値（速度・メモリ・訳文の例）: [docs/model-runtime-notes.md](docs/model-runtime-notes.md)
 
 最初のターゲットは Zed 拡張です。将来的には他のエディタや、GitHub 上でソースを読むためのブラウザ拡張も見据えています。
 
