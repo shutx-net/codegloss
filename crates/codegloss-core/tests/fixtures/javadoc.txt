@@ -1,0 +1,7 @@
+/**
+ * Returns the currently authenticated user.
+ *
+ * @param id the id to look up
+ * @return authenticated user
+ * @throws AuthenticationException if authentication failed
+ */

@@ -1,0 +1,11 @@
+/// Returns `UserDetails` when authentication succeeds.
+///
+/// The protocol is described at https://example.com/docs/auth.
+///
+/// # Panics
+///
+/// - Panics when `find_user` is called before UserRepository::open().
+///
+/// ```
+/// let details = find_user(id).unwrap();
+/// ```

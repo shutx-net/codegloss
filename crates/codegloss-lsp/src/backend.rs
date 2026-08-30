@@ -66,7 +66,7 @@ impl Backend {
     /// the pipeline's worker.
     fn request_glosses(&self, uri: &Uri) {
         self.glosses
-            .enqueue(uri.clone(), self.documents.comment_texts(uri));
+            .enqueue(uri.clone(), self.documents.comment_sources(uri));
     }
 }
 
@@ -175,7 +175,9 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let value = match self.glosses.lookup(&hit.block.text) {
+        // Keyed on the comment as written, which is what the gloss was built
+        // from; the flattened `text` is only what the popup quotes underneath.
+        let value = match self.glosses.lookup(&hit.block.raw) {
             Some(gloss) => gloss_markup(&gloss, &hit.block.text),
             None => {
                 self.request_glosses(&uri);
@@ -215,7 +217,7 @@ impl LanguageServer for Backend {
             let mut lenses = Vec::with_capacity(blocks.len());
             let mut missing = false;
             for block in blocks {
-                match self.glosses.lookup(&block.text) {
+                match self.glosses.lookup(&block.raw) {
                     Some(gloss) => lenses.push(code_lens::glossed(block, &gloss)),
                     None => {
                         missing = true;
@@ -262,7 +264,38 @@ impl LanguageServer for Backend {
 /// `source` is one line by construction - the parser joins a block's lines with
 /// a single space - so a single `> ` prefix quotes all of it.
 fn gloss_markup(gloss: &str, source: &str) -> String {
-    format!("{gloss}\n\n> {source}")
+    format!("{}\n\n> {source}", with_hard_breaks(gloss))
+}
+
+/// Keeps the line structure of a gloss visible once Markdown renders it.
+///
+/// The gloss of a doc comment is several lines - a paragraph, then a `@return`
+/// line, then a `@throws` line - and Markdown runs consecutive lines of a
+/// paragraph together. Two trailing spaces are CommonMark's hard line break,
+/// which is what keeps each tag on a line of its own.
+///
+/// Blank lines already separate paragraphs and need nothing, and a fenced code
+/// block is verbatim: adding spaces inside one would add them to the code.
+fn with_hard_breaks(gloss: &str) -> String {
+    let lines: Vec<&str> = gloss.lines().collect();
+    let mut rendered = String::with_capacity(gloss.len());
+    let mut fenced = false;
+
+    for (index, line) in lines.iter().enumerate() {
+        rendered.push_str(line);
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        }
+
+        let Some(next) = lines.get(index + 1) else {
+            break;
+        };
+        if !fenced && !line.is_empty() && !next.is_empty() {
+            rendered.push_str("  ");
+        }
+        rendered.push('\n');
+    }
+    rendered
 }
 
 #[cfg(test)]
@@ -278,5 +311,27 @@ mod tests {
             ),
             "キャッシュされたユーザーを返す。\n\n> Return the cached user."
         );
+    }
+
+    /// A one-line gloss is left exactly as it is: the hard break is only for
+    /// the lines a doc comment's structure produces.
+    #[test]
+    fn a_single_line_gloss_gains_nothing() {
+        assert_eq!(with_hard_breaks("一行だけ。"), "一行だけ。");
+    }
+
+    #[test]
+    fn the_lines_of_a_doc_comment_gloss_stay_apart() {
+        assert_eq!(
+            with_hard_breaks("本文。\n\n@return ユーザー\n@throws AuthError 失敗した場合"),
+            "本文。\n\n@return ユーザー  \n@throws AuthError 失敗した場合"
+        );
+    }
+
+    /// Inside a fence the text is code, and two spaces are two spaces.
+    #[test]
+    fn a_fenced_example_is_left_alone() {
+        let gloss = "例:\n\n```\nlet user = find_user(id);\nlet name = user.name;\n```";
+        assert_eq!(with_hard_breaks(gloss), gloss);
     }
 }

@@ -116,17 +116,23 @@ impl DocumentStore {
         self.documents.get(uri).map(|entry| read(&entry.blocks))
     }
 
-    /// Every comment of a document, in source order.
+    /// Every comment of a document, in source order, each exactly as the file
+    /// has it.
     ///
-    /// This is what gets queued for translation. The whole document goes at
-    /// once, even when a single hover prompted it: a job carrying only part of
-    /// a document could not safely replace an earlier job for the same one.
-    pub fn comment_texts(&self, uri: &Uri) -> Vec<String> {
+    /// This is what gets queued for translation. `raw` rather than `text`: the
+    /// pre-processing reads the structure of a block - its blank lines, its
+    /// `@return` lines, its fenced examples - off the comment as written, and
+    /// `text` has already been flattened into a single line by then.
+    ///
+    /// The whole document goes at once, even when a single hover prompted it: a
+    /// job carrying only part of a document could not safely replace an earlier
+    /// job for the same one.
+    pub fn comment_sources(&self, uri: &Uri) -> Vec<String> {
         self.documents.get(uri).map_or_else(Vec::new, |document| {
             document
                 .blocks
                 .iter()
-                .map(|block| block.text.clone())
+                .map(|block| block.raw.clone())
                 .collect()
         })
     }
@@ -259,21 +265,23 @@ mod tests {
         assert!(store.is_empty());
     }
 
+    /// The markers are part of what is queued: the gloss of a `/** */` block is
+    /// not the gloss of the same sentence written as `//`.
     #[test]
-    fn comment_texts_lists_every_comment_in_order() {
+    fn comment_sources_lists_every_comment_as_written_in_order() {
         let store = DocumentStore::new();
-        let text = "// First.\nfn f() {}\n// Second.\nfn g() {}\n";
+        let text = "// First.\nfn f() {}\n/// Second.\nfn g() {}\n";
         store.open(uri(), "rust".to_owned(), 1, text.to_owned());
 
         assert_eq!(
-            store.comment_texts(&uri()),
-            vec!["First.".to_owned(), "Second.".to_owned()]
+            store.comment_sources(&uri()),
+            vec!["// First.".to_owned(), "/// Second.".to_owned()]
         );
     }
 
     #[test]
-    fn comment_texts_of_an_unknown_document_is_empty() {
-        assert!(DocumentStore::new().comment_texts(&uri()).is_empty());
+    fn comment_sources_of_an_unknown_document_is_empty() {
+        assert!(DocumentStore::new().comment_sources(&uri()).is_empty());
     }
 
     #[test]
