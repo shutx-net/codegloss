@@ -11,7 +11,8 @@ codegloss-lsp --model-pack /path/to/pack
 ```
 
 それ以外の環境では venv を切る。**システムの Python に `pip install` しないこと。**
-Debian 12 系は PEP 668 でこれを拒むし、Nix の Python は書き込めない。
+Debian 12 / Ubuntu 24.04 以降は PEP 668 でこれを拒み、
+`error: externally-managed-environment` になる。Nix の Python は書き込めない。
 
 ```sh
 python3 -m venv .venv
@@ -19,6 +20,13 @@ python3 -m venv .venv
 .venv/bin/python convert.py /path/to/pack
 codegloss-lsp --model-pack /path/to/pack
 ```
+
+`python3 -m venv` 自体が「ensurepip is not available」で失敗するときは、
+venv が別パッケージになっている。Debian / Ubuntu なら
+`sudo apt install python3-venv` を先に入れる（Dev Container では
+`post-create.sh` が入れているので不要）。
+
+`.venv` と `__pycache__` は `.gitignore` に入れてある。
 
 依存を足したり版を上げたりするときは、`requirements.txt` と `flake.nix` の
 `python3.withPackages` の両方を直す。片方だけ直すと Nix と非 Nix で挙動が変わる。

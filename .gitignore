@@ -9,6 +9,11 @@
 /.direnv
 # codegloss-lsp の絶対パスを書くので環境ごとに中身が変わる
 /.zed
+# tools/convert-fugumt を Nix の外で動かすときに切る venv と、その副産物。
+# Nix の devShell では flake.nix が Python を宣言しているので venv は要らない。
+.venv/
+__pycache__/
+*.pyc
 # モデルの重みと、その変換物は一切コミットしない（AGENTS.md）。FuguMT は
 # CC-BY-SA-4.0 で、MIT のコードとは別に配る。tools/convert-fugumt が吐く
 # モデルパックが手元にあっても git に入らないようにしておく。
