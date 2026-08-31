@@ -1,4 +1,5 @@
-//! In-memory cache of finished translations.
+//! Cache of finished translations: a bounded map, optionally over a directory
+//! that survives the process.
 //!
 //! Every LSP request is answered from here: running the engine takes hundreds
 //! of milliseconds, and a request handler is not allowed to wait that long
@@ -7,12 +8,13 @@
 //!
 //! IMPORTANT: this crate must keep building without an async runtime, so the
 //! shared state is a `std::sync::Mutex` and never a `tokio` one. The lock is
-//! only ever held for a hash lookup, so no `.await` can happen underneath it.
+//! only ever held for a hash lookup - never across the store's file IO - so no
+//! `.await` can happen underneath it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::GlossKey;
+use crate::{GlossKey, GlossStore};
 
 /// How many translations to keep before the least recently used one is dropped.
 ///
@@ -29,13 +31,18 @@ pub const DEFAULT_CAPACITY: usize = 4096;
 /// Values are `Arc<str>` so that handing one to a request handler costs a
 /// refcount bump rather than a copy.
 ///
-/// A disk-backed cache is a plausible next step. Nothing in this API stands in
-/// its way: `get` and `insert` are already fallible-free, so the same methods
-/// can consult a store on disk before falling back to the map.
+/// With a [`GlossStore`] behind it the map becomes the hot half of a two-level
+/// cache: a miss consults the directory, and what is found there is promoted
+/// into the map so the next lookup is a hash lookup again. Both halves stay
+/// infallible - a store that cannot be read or written is a miss, never an
+/// error a request handler has to deal with.
 #[derive(Debug)]
 pub struct GlossCache {
     entries: Mutex<Entries>,
     capacity: usize,
+    /// Where glosses outlive the process, when the server was given somewhere
+    /// to put them.
+    store: Option<GlossStore>,
 }
 
 #[derive(Debug, Default)]
@@ -61,16 +68,41 @@ impl GlossCache {
         Self {
             entries: Mutex::new(Entries::default()),
             capacity: capacity.max(1),
+            store: None,
         }
     }
 
+    /// A cache of `capacity` entries in memory, over glosses kept in `store`.
+    ///
+    /// The store is not bounded by `capacity`: it holds what it was opened
+    /// with, and evicting from memory does not delete from disk. That is the
+    /// point - the map is what makes a lookup fast, the directory is what
+    /// makes a restart free.
+    pub fn with_store(capacity: usize, store: GlossStore) -> Self {
+        Self {
+            store: Some(store),
+            ..Self::new(capacity)
+        }
+    }
+
+    /// The directory glosses are kept in, if there is one.
+    pub fn store(&self) -> Option<&GlossStore> {
+        self.store.as_ref()
+    }
+
     /// The translation stored under `key`, marking it as recently used.
+    ///
+    /// A miss in memory falls through to the store, which is a file read - on
+    /// the order of microseconds, against the hundreds of milliseconds not
+    /// finding it would cost. What comes back is promoted into the map.
     pub fn get(&self, key: &GlossKey) -> Option<Arc<str>> {
-        let mut entries = self.lock();
-        let tick = entries.next_tick();
-        let entry = entries.map.get_mut(key)?;
-        entry.used_at = tick;
-        Some(Arc::clone(&entry.value))
+        if let Some(value) = self.remembered(key) {
+            return Some(value);
+        }
+
+        let value: Arc<str> = Arc::from(self.store.as_ref()?.get(key)?);
+        self.remember(*key, Arc::clone(&value));
+        Some(value)
     }
 
     /// Whether `key` has a translation, without disturbing the eviction order.
@@ -79,11 +111,24 @@ impl GlossCache {
     /// and answering it must not make an entry look freshly read.
     pub fn contains(&self, key: &GlossKey) -> bool {
         self.lock().map.contains_key(key)
+            || self.store.as_ref().is_some_and(|store| store.contains(key))
     }
 
     /// Stores a translation, evicting the least recently used entry if the
     /// cache is full.
+    ///
+    /// A store that refuses the write is ignored: the gloss is still in memory
+    /// and still correct, and a read-only cache directory must not turn into
+    /// an error on the path that has just produced a translation.
     pub fn insert(&self, key: GlossKey, value: Arc<str>) {
+        if let Some(store) = &self.store {
+            let _ = store.insert(&key, &value);
+        }
+        self.remember(key, value);
+    }
+
+    /// Puts a gloss in the map alone, leaving the store as it is.
+    fn remember(&self, key: GlossKey, value: Arc<str>) {
         let mut entries = self.lock();
         let tick = entries.next_tick();
 
@@ -99,6 +144,17 @@ impl GlossCache {
         );
     }
 
+    /// The gloss the map holds for `key`, marking it as recently used.
+    fn remembered(&self, key: &GlossKey) -> Option<Arc<str>> {
+        let mut entries = self.lock();
+        let tick = entries.next_tick();
+        let entry = entries.map.get_mut(key)?;
+        entry.used_at = tick;
+        Some(Arc::clone(&entry.value))
+    }
+
+    /// How many translations are held **in memory**. The store, if there is
+    /// one, has its own [`len`](GlossStore::len).
     pub fn len(&self) -> usize {
         self.lock().map.len()
     }
@@ -247,6 +303,57 @@ mod tests {
 
         cache.insert(key("a"), Arc::from("A"));
         assert_eq!(cache.get(&key("a")).as_deref(), Some("A"));
+    }
+
+    /// A restart is what the store exists for: a fresh cache over the same
+    /// directory answers without the engine.
+    #[test]
+    fn a_cache_over_a_store_answers_from_it_after_a_restart() {
+        let directory = std::env::temp_dir().join(format!(
+            "codegloss-cache-{}-{}",
+            std::process::id(),
+            "restart"
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let store = || crate::GlossStore::open(&directory, 64).expect("the directory is writable");
+
+        let first = GlossCache::with_store(DEFAULT_CAPACITY, store());
+        first.insert(key("Return the cached user."), Arc::from("訳"));
+
+        let second = GlossCache::with_store(DEFAULT_CAPACITY, store());
+        assert!(second.is_empty(), "nothing is in memory yet");
+        assert!(second.contains(&key("Return the cached user.")));
+        assert_eq!(
+            second.get(&key("Return the cached user.")).as_deref(),
+            Some("訳")
+        );
+        // The hit was promoted, so the next one is a map lookup.
+        assert_eq!(second.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Evicting from memory must not delete from disk: the map is bounded, the
+    /// directory is not.
+    #[test]
+    fn an_entry_evicted_from_memory_is_still_on_disk() {
+        let directory = std::env::temp_dir().join(format!(
+            "codegloss-cache-{}-{}",
+            std::process::id(),
+            "eviction"
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let cache = GlossCache::with_store(
+            1,
+            crate::GlossStore::open(&directory, 64).expect("the directory is writable"),
+        );
+
+        cache.insert(key("a"), Arc::from("A"));
+        cache.insert(key("b"), Arc::from("B"));
+        assert_eq!(cache.len(), 1, "the map holds one");
+        assert_eq!(cache.get(&key("a")).as_deref(), Some("A"));
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// The LSP handlers read the cache while a worker thread writes it, so
