@@ -1,17 +1,17 @@
 //! What the real model does to a comment: does the pre- and post-processing
-//! still hold, what does the Japanese look like, and how long does it take.
+//! still hold, and what does the Japanese look like. What it costs in time and
+//! memory is `examples/measure.rs`, which loads exactly one model.
 //!
 //! P6 fixed these fixtures against an engine that returns its input, precisely
 //! so that a failure here can be attributed. If a fixture that passes in
 //! `codegloss-core` fails here, the model is at fault; if it fails in both,
 //! this crate is not the place to look.
 //!
-//! All of it is `#[ignore]`d and needs `CODEGLOSS_MODEL_PACK`. See
+//! All of it is `#[ignore]`d and needs `CODEGLOSS_MODEL_PACK`. Set
+//! `CODEGLOSS_MODEL_PRECISION=f16` to hold the same bar up against F16. See
 //! `support/mod.rs`.
 
 mod support;
-
-use std::time::Instant;
 
 use codegloss_core::{CommentShape, GlossPlan, Segment, mask};
 use codegloss_translator::Translator;
@@ -184,62 +184,4 @@ fn the_corpus_keeps_every_protected_span() {
 
     eprintln!("{glossed} comments, {} failures", failures.len());
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-/// The measurement Issue #1 and the plan both ask for: what one comment costs.
-#[test]
-#[ignore = "needs a model pack"]
-fn latency_and_memory_are_measured() {
-    let before = support::resident_mib();
-    let translator = support::translator();
-    let after_load = support::resident_mib();
-
-    let sentences: Vec<Segment> = corpus()
-        .iter()
-        .flat_map(|fixture| GlossPlan::new(&fixture.raw).segments())
-        .collect();
-
-    // Warm up: the first inference pays for lazily faulted pages.
-    translator
-        .translate(&sentences[..1.min(sentences.len())])
-        .expect("the engine answers");
-
-    let mut singles = Vec::with_capacity(sentences.len());
-    for sentence in &sentences {
-        let started = Instant::now();
-        translator
-            .translate(std::slice::from_ref(sentence))
-            .expect("the engine answers");
-        singles.push(started.elapsed().as_secs_f64() * 1000.0);
-    }
-
-    let started = Instant::now();
-    translator
-        .translate(&sentences)
-        .expect("the engine answers");
-    let batch = started.elapsed().as_secs_f64() * 1000.0;
-
-    singles.sort_by(f64::total_cmp);
-    let total: f64 = singles.iter().sum();
-    let percentile = |p: f64| singles[((singles.len() as f64 - 1.0) * p).round() as usize];
-
-    eprintln!("segments: {}", singles.len());
-    eprintln!("per segment: mean {:.0} ms", total / singles.len() as f64);
-    eprintln!(
-        "per segment: p50 {:.0} ms, p90 {:.0} ms, max {:.0} ms, min {:.0} ms",
-        percentile(0.5),
-        percentile(0.9),
-        singles[singles.len() - 1],
-        singles[0]
-    );
-    eprintln!(
-        "whole batch: {batch:.0} ms ({:.0} ms per segment)",
-        batch / singles.len() as f64
-    );
-    eprintln!(
-        "resident: {:?} MiB before load, {:?} MiB after load, {:?} MiB after inference",
-        before,
-        after_load,
-        support::resident_mib()
-    );
 }
