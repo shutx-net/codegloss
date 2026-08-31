@@ -11,24 +11,36 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use codegloss_translator::CandleTranslator;
+use codegloss_translator::{CandleTranslator, Precision, Translator};
 
 /// Environment variable naming the model pack to test against.
 pub const MODEL_PACK_VARIABLE: &str = "CODEGLOSS_MODEL_PACK";
+/// Environment variable choosing the precision, so that the same quality bar
+/// can be held up against F16 as against the default F32. Same name the server
+/// reads.
+pub const PRECISION_VARIABLE: &str = "CODEGLOSS_MODEL_PRECISION";
 
 /// Loads the pack named by the environment, and says how to get one when the
 /// variable is unset rather than failing with a path error.
 pub fn translator() -> CandleTranslator {
     let pack = pack();
     let started = Instant::now();
-    let translator = CandleTranslator::load(&pack)
+    let translator = CandleTranslator::load_with(&pack, precision())
         .unwrap_or_else(|error| panic!("{} is not a usable model pack: {error:?}", pack.display()));
     eprintln!(
         "loaded {} in {:?}",
-        translator.manifest().model_version,
+        translator.model_version(),
         started.elapsed()
     );
     translator
+}
+
+fn precision() -> Precision {
+    match std::env::var(PRECISION_VARIABLE) {
+        Ok(text) if !text.is_empty() => Precision::parse(&text)
+            .unwrap_or_else(|| panic!("{PRECISION_VARIABLE}={text:?} is not f32, f16 or bf16")),
+        _ => Precision::default(),
+    }
 }
 
 pub fn pack() -> PathBuf {
@@ -40,27 +52,4 @@ pub fn pack() -> PathBuf {
              {MODEL_PACK_VARIABLE}=<dir>."
         ),
     }
-}
-
-/// Resident set size of this process, in mebibytes.
-///
-/// The number that matters for an editor plugin is what the server holds while
-/// it sits there, so it is read after the model is loaded rather than
-/// estimated from the file size.
-#[cfg(target_os = "linux")]
-pub fn resident_mib() -> Option<f64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let line = status
-        .lines()
-        .find(|line| line.starts_with("VmRSS:"))?
-        .split_whitespace()
-        .nth(1)?
-        .parse::<f64>()
-        .ok()?;
-    Some(line / 1024.0)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn resident_mib() -> Option<f64> {
-    None
 }

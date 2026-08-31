@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use codegloss_core::GlossCache;
 use codegloss_translator::{PassthroughTranslator, Translator};
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::{
@@ -47,9 +48,17 @@ impl Backend {
     /// because its output is its input. P7 will use it to pick candle when a
     /// model pack is installed and to fall back when it is not.
     pub fn with_engine(client: Client, engine: Arc<dyn Translator>) -> Self {
+        Self::with_cache(client, engine, Arc::new(GlossCache::default()))
+    }
+
+    /// The same server again, over a cache the caller built.
+    ///
+    /// `main.rs` uses it to hand in a cache backed by a directory, so that a
+    /// restart does not re-translate what the last run already translated.
+    pub fn with_cache(client: Client, engine: Arc<dyn Translator>, cache: Arc<GlossCache>) -> Self {
         Self {
             documents: DocumentStore::new(),
-            glosses: TranslationService::spawn(client.clone(), engine),
+            glosses: TranslationService::spawn(client.clone(), engine, cache),
             client,
         }
     }
