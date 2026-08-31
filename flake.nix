@@ -40,6 +40,20 @@
             # tree-sitter のグラマークレートは C をコンパイルするため cc が要る。
             # cc は stdenv 経由で入るので、ここでは pkg-config だけ足す。
             pkgs.pkg-config
+
+            # tools/convert-fugumt がモデルパックを作るのに使う。Nix の Python は
+            # 書き込めないので pip install ではなくここで宣言する。この shell に
+            # 入れば追加の手順は要らない。
+            #
+            # IMPORTANT: 版を上げるときは tools/convert-fugumt/requirements.txt も
+            # 合わせること。両者がずれると Nix と非 Nix で挙動が変わる。
+            (pkgs.python3.withPackages (
+              ps: with ps; [
+                protobuf
+                sentencepiece
+                tokenizers
+              ]
+            ))
           ];
 
           buildInputs = [
