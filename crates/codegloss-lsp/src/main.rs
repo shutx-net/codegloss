@@ -15,11 +15,17 @@ async fn main() {
     // takes long enough that doing it inside `initialize` would delay the
     // editor's first paint, and the choice cannot change while the server
     // runs.
-    let engine = config::engine(&ServerConfig::from_environment());
+    let settings = ServerConfig::from_environment();
+    let engine = config::engine(&settings);
     tracing::info!(model_version = engine.model_version(), "starting");
 
-    let (service, socket) =
-        LspService::new(move |client| Backend::with_engine(client, Arc::clone(&engine)));
+    // Built here rather than inside the closure: `LspService::new` may call it
+    // more than once, and every call has to answer from the same glosses.
+    let cache = Arc::new(config::cache(&settings));
+
+    let (service, socket) = LspService::new(move |client| {
+        Backend::with_cache(client, Arc::clone(&engine), Arc::clone(&cache))
+    });
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
         .serve(service)
         .await;

@@ -135,11 +135,34 @@ CI が重くなるため）。モデル無しでもサーバは動き、コメ�
 
    **この 3 の設定は実機の Zed では未確認**（サーバ側は stdio 越しに確認済み）。
 
-4. 実モデルが要るテストは `#[ignore]` 付き。速度が出ないので `--release` で。
+4. 重みの精度と訳のキャッシュは引数で変えられる。
+
+   | 引数 | 環境変数 | 既定 | 何が変わるか |
+   |---|---|---|---|
+   | `--precision f32\|f16` | `CODEGLOSS_MODEL_PRECISION` | `f32` | `f16` は常駐が 281 → 158 MiB に減り、1 セグメントが 6〜8% 遅くなる |
+   | `--cache-dir <dir>` | `CODEGLOSS_CACHE_DIR` | `$XDG_CACHE_HOME/codegloss/glosses` | 訳を置く場所。**再起動しても訳し直さない** |
+   | `--no-cache` | — | 無効 | 訳をディスクに書かない（メモリのみ） |
+
+   数字の根拠は [docs/model-runtime-notes.md](docs/model-runtime-notes.md) の §6。
+   キャッシュのディレクトリが作れない・書けないときは、ログを出してメモリのみで
+   動く（モデルパックと同じで、**キャッシュが理由でサーバは落ちない**）。
+
+5. 実モデルが要るテストは `#[ignore]` 付き。速度が出ないので `--release` で。
 
    ```sh
    CODEGLOSS_MODEL_PACK=~/codegloss-model \
      cargo test -p codegloss-translator --features candle --release -- --ignored --nocapture
+   ```
+
+   `CODEGLOSS_MODEL_PRECISION=f16` を足すと同じ基準を f16 に対して当てられる。
+
+6. レイテンシとメモリは**テストではなく example で測る。**テストハーネスは
+   `#[ignore]` のテストを 1 プロセス内で並列に走らせるので、モデルが同時に何本も
+   常駐して RSS がその合計になる（`docs/model-runtime-notes.md` §6.1）。
+
+   ```sh
+   CODEGLOSS_MODEL_PACK=~/codegloss-model \
+     cargo run -p codegloss-translator --features candle --release --example measure
    ```
 
    実測値は [docs/model-runtime-notes.md](docs/model-runtime-notes.md)。

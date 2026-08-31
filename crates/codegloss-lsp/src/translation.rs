@@ -114,8 +114,7 @@ impl TranslationService {
     /// `spawn_blocking`'s pool would otherwise happily start hundreds.
     ///
     /// Must be called from inside a tokio runtime.
-    pub fn spawn(client: Client, translator: Arc<dyn Translator>) -> Self {
-        let cache = Arc::new(GlossCache::default());
+    pub fn spawn(client: Client, translator: Arc<dyn Translator>, cache: Arc<GlossCache>) -> Self {
         let initialized = Arc::new(AtomicBool::new(false));
         let (jobs, queue) = mpsc::unbounded_channel();
         let (completed, batches) = watch::channel(0);
