@@ -4,13 +4,29 @@ FuguMT（[staka/fugumt-en-ja](https://huggingface.co/staka/fugumt-en-ja)）を
 CodeGloss の**モデルパック**に変換する。
 
 Nix の devShell（`nix develop`）に入っているなら、依存はすでに入っている。
+**`pip install` は実行しない。**
 
 ```sh
 python3 convert.py /path/to/pack
 codegloss-lsp --model-pack /path/to/pack
 ```
 
-それ以外の環境では venv を切る。**システムの Python に `pip install` しないこと。**
+Nix の中で `pip install` を試すと `error: externally-managed-environment` に
+なるが、これは異常ではない。nixpkgs は `/nix/store` が不変であることを理由に
+PEP 668 のマーカーを置いて pip を意図的に無効化している
+（`pkgs/development/interpreters/python/cpython/default.nix` の
+"Disable system-wide pip installation"）。**Nix では venv も要らない。**
+
+依存が見つからない場合は、flake の変更がシェルに反映されていない。devShell は
+入った時点で構築されるので、`git pull` しただけでは古いままになる。いったん
+抜けて入り直す（direnv なら `direnv reload`）。入っているかは次で分かる。
+
+```sh
+python3 -c "import sentencepiece, tokenizers, google.protobuf; print('ok')"
+```
+
+**Nix の外**（素の Ubuntu / WSL / Dev Container など）では venv を切る。
+**システムの Python に `pip install` しないこと。**
 Debian 12 / Ubuntu 24.04 以降は PEP 668 でこれを拒み、
 `error: externally-managed-environment` になる。Nix の Python は書き込めない。
 
