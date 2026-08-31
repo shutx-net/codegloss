@@ -62,6 +62,9 @@ scripts/verify-toolchain.sh
 | `wasm32-wasip2` ターゲット | Zed 拡張は WebAssembly にコンパイルされる |
 | C コンパイラ（Nix では stdenv 由来） | tree-sitter のグラマークレートが C をコンパイルする |
 | `pkg-config` / `openssl` | ネットワーク系クレートが native-tls を引いたときに必要 |
+| Python（`protobuf` / `sentencepiece` / `tokenizers`） | `tools/convert-fugumt` がモデルパックを作るのに使う。翻訳の実行には要らない |
+
+Nix ではこの Python は `python3.withPackages` で宣言してある。**`pip install` は使わない**（Nix の Python は書き込めない）。Dev Container 側は PEP 668 によりシステムの Python への `pip install` が拒まれるので、`python3 -m venv` で切る。手順は `tools/convert-fugumt/README.md` にある。
 
 wasm 向けのリンカは追加不要。rustc が lld を同梱しており、wasm ターゲットでは自動的に使われる。
 

@@ -3,11 +3,25 @@
 FuguMT（[staka/fugumt-en-ja](https://huggingface.co/staka/fugumt-en-ja)）を
 CodeGloss の**モデルパック**に変換する。
 
+Nix の devShell（`nix develop`）に入っているなら、依存はすでに入っている。
+
 ```sh
-pip install -r requirements.txt
 python3 convert.py /path/to/pack
 codegloss-lsp --model-pack /path/to/pack
 ```
+
+それ以外の環境では venv を切る。**システムの Python に `pip install` しないこと。**
+Debian 12 系は PEP 668 でこれを拒むし、Nix の Python は書き込めない。
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python convert.py /path/to/pack
+codegloss-lsp --model-pack /path/to/pack
+```
+
+依存を足したり版を上げたりするときは、`requirements.txt` と `flake.nix` の
+`python3.withPackages` の両方を直す。片方だけ直すと Nix と非 Nix で挙動が変わる。
 
 Python を使うのは変換のときだけで、動くもの（`codegloss-lsp`）には入らない
 （Issue #1 の "Python may be used during model evaluation/conversion, but should
