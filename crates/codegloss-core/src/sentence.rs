@@ -1,7 +1,7 @@
 //! Cutting a paragraph into the sentences the engine is meant to see.
 //!
 //! FuguMT is a sentence-level model, and [`CommentShape`] hands it paragraphs:
-//! P3 merges a run of `//` lines into one unit so that a sentence spread over
+//! a run of `//` lines is merged into one unit so that a sentence spread over
 //! three lines reaches the engine whole, which is right, but it also means a
 //! five-sentence paragraph arrives as one input. Greedy decoding on such an
 //! input drops clauses - fluently, so the reader cannot tell:

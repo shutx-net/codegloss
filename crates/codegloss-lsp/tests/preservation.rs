@@ -7,7 +7,7 @@
 //! in is the pre-processing or the post-processing, because nothing else in the
 //! pipeline is allowed to change a character.
 //!
-//! P7 swaps the engine for candle. These fixtures are the ones to re-run first
+//! Swapping the engine for candle re-runs these fixtures first
 //! when a gloss then comes out wrong: if they still hold, the model is at fault
 //! and not this code.
 
@@ -225,7 +225,7 @@ async fn a_javadoc_block_keeps_its_line_structure_and_its_tags() {
 }
 
 /// The same glosses reach the other display mode. A lens is one line high, so
-/// the Javadoc block is folded and cut - that is P5's doing, and everything
+/// the Javadoc block is folded and cut - that is the code lens doing it, and everything
 /// that fits is still exact.
 #[tokio::test(flavor = "current_thread")]
 async fn the_lenses_carry_the_same_glosses() {

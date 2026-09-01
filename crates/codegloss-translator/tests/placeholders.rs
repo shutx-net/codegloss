@@ -1,6 +1,6 @@
 //! Which placeholder format survives FuguMT.
 //!
-//! P6 had to pick one before there was a model to ask, picked the bracket form
+//! The format had to be picked before there was a model to ask, and the bracket form
 //! `\u{27e6}0\u{27e7}` and left a note saying the choice was provisional. This
 //! is the measurement that note asks for: candidate formats, the same
 //! sentences, and a count of how many placeholders come back out of the model

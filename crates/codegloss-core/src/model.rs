@@ -125,7 +125,7 @@ pub struct GlossKey(pub [u8; 32]);
 /// out of the pipeline.** The stability test in this module fails when the key
 /// encoding moves, so a bump is a deliberate act rather than a side effect.
 ///
-/// - `1` - as P6 shipped: one segment per unit.
+/// - `1` - one segment per unit.
 /// - `2` - one segment per sentence.
 pub const PIPELINE_VERSION: &str = "2";
 

@@ -3,7 +3,7 @@
 //!
 //! The property under test is `restore(translate(mask(x))) == x` for an engine
 //! that returns its input. It is checkable exactly once: while the engine is a
-//! passthrough. After P7 the same fixtures go through candle, where a failure
+//! passthrough. The same fixtures also go through candle, where a failure
 //! could be the model or could be this code - and telling those apart is only
 //! possible if this half is known to be right first.
 //!
@@ -26,7 +26,7 @@ fn fixtures() -> [&'static str; 3] {
     [fixture(JAVADOC), fixture(RUSTDOC), fixture(LINE_COMMENTS)]
 }
 
-/// The engine of P4: every segment comes back as it went in.
+/// The passthrough engine: every segment comes back as it went in.
 fn passthrough(plan: &GlossPlan) -> Vec<String> {
     plan.segments()
         .iter()
@@ -84,7 +84,7 @@ fn a_rustdoc_block_keeps_its_heading_its_list_and_its_fence() {
     );
 }
 
-/// A run of `//` lines is one sentence, as P3 decided, and it comes back as
+/// A run of `//` lines is one sentence, and it comes back as
 /// one line.
 #[test]
 fn a_run_of_line_comments_comes_back_as_one_line() {
