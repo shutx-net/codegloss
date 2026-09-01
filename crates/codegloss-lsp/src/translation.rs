@@ -49,7 +49,7 @@ use tower_lsp_server::{Client, jsonrpc};
 
 /// The only language pair v0.1 handles.
 ///
-/// Both halves go into the cache key, so widening this later (P9) cannot serve
+/// Both halves go into the cache key, so widening this later cannot serve
 /// an English-to-Japanese translation for another target language.
 pub const SOURCE_LANGUAGE: &str = "en";
 /// Target language. See [`SOURCE_LANGUAGE`].

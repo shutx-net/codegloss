@@ -22,7 +22,7 @@
 //! The parser joins a block's lines with a single space to build `text`, so by
 //! then the structure is gone; `raw` is kept beside it for exactly this.
 //!
-//! Consecutive prose lines are still merged into one unit, as P3 decided: a
+//! Consecutive prose lines are still merged into one unit: a
 //! sentence spread over three `//` lines has to reach the engine whole. The
 //! unit is then asked for one sentence at a time - see
 //! [`split_sentences`](crate::split_sentences) for why - but it stays one unit
@@ -511,7 +511,7 @@ mod tests {
         );
     }
 
-    /// P3 merges a run of `//` lines into one sentence, and that decision holds
+    /// The parser merges a run of `//` lines into one sentence, and that holds
     /// here: the engine must see the sentence, not three fragments.
     #[test]
     fn consecutive_prose_lines_are_one_unit() {

@@ -2,7 +2,7 @@
 //! answers.
 //!
 //! `measure.rs` reports what the engine costs; this reports what it says. For
-//! each probe it prints the segments P6 cut the comment into, the masked text
+//! each probe it prints the segments the comment was cut into, the masked text
 //! the engine receives, the raw Japanese it returns and the finished gloss, and
 //! then translates the same segment with masking undone so the two can be
 //! compared side by side.

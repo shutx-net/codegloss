@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// candidate formats through FuguMT and counts how many placeholders come back
 /// whole; the table is in `docs/model-runtime-notes.md`.
 ///
-/// The bracket form `\u{27e6}0\u{27e7}` that P6 used provisionally scores 0%:
+/// The bracket form `\u{27e6}0\u{27e7}` this used provisionally scores 0%:
 /// neither bracket is in the model's vocabulary, so both arrive as `<unk>` and
 /// every placeholder is lost. `X0Q` scores 97.4%, the best of the eight
 /// measured, and the underscore form `__CG0__` the open question named scores
@@ -320,7 +320,7 @@ const ATTENTION_MARKERS: [&str; 8] = [
 
 /// `TODO:`, `FIXME(alice):`, `SAFETY:` - marker, optional owner, colon.
 ///
-/// Anywhere in the text, not only at the start of a line: P3 merges a run of
+/// Anywhere in the text, not only at the start of a line: the parser merges a run of
 /// `//` lines into one unit, so the second marker of
 /// `// TODO: ...` / `// FIXME: ...` is mid-sentence by the time it gets here,
 /// and it is exactly as much of a grep target as the first.
