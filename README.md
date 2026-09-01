@@ -22,20 +22,26 @@ public User findUser(String id) {
 抜き出して、ホバーと Code Lens（コメント行の上に出る独立した行）に返すところまで
 動きます。**翻訳も実際に動きます**（candle + FuguMT。CPU で 1 文あたり 0.15 秒ほど。ファイルを開いたときのようにまとめて訳す場合）。
 
-モデルパックは 1 回取ってくれば、あとは引数なしで見つかります。**まだ配布先の
-リリースを作っていない**ので、いまは自分で変換する必要があります（作り方は
-[tools/convert-fugumt/README.md](tools/convert-fugumt/README.md)、配る側の手順は
-[docs/model-pack.md](docs/model-pack.md)）。パックが無ければ英語のまま表示され、
-サーバは落ちません。
+### 使うのに要ること
+
+拡張は `codegloss-lsp` を自分で取ってきます。Rust のツールチェインも手動の
+ビルドも要りません。取ってくるのは**拡張と同じ版のリリース**で、拡張が古い
+ままサーバだけ新しくなることはありません。`PATH` に `codegloss-lsp` があれば
+そちらが優先されるので、自分でビルドしたものを使う手は塞がりません。
+
+**翻訳モデルだけは、まだ 1 回手で取ってくる必要があります**（自動化は
+[Issue #28](https://github.com/shutx-net/codegloss/issues/28)）。パックは
+`~/.cache/codegloss/model-packs/` に置かれ、拡張が落としたサーバもそこを見るので、
+取ってくるのはどの `codegloss-lsp` でも構いません。
 
 ```sh
-cargo build --release -p codegloss-lsp --features candle
-./target/release/codegloss-lsp --fetch-model   # 1 回だけ。以後は引数不要
-./target/release/codegloss-lsp
+# リリースの書庫を展開したもの、または自分でビルドしたもの
+codegloss-lsp --fetch-model   # 1 回だけ。以後は引数不要
 ```
 
-自分で変換したパックを使うなら `--model-pack <dir>` で渡します（明示したほうが
-優先されます）。
+パックが無いあいだは英語のまま表示され、サーバは落ちません。自分で変換した
+パックを使うなら `--model-pack <dir>` で渡します（明示したほうが優先されます。
+作り方は [tools/convert-fugumt/README.md](tools/convert-fugumt/README.md)）。
 
 訳の速さより正しさを優先して、既定ではビームサーチ（幅 4）を使います。貪欲デコードは文を途中で打ち切ることがあり、**訳文は日本語として自然なままなので読者が気づけません**。貪欲法（`--beams 1`）に対する上乗せは 1.07 倍しかないので、速さのために質を落とす理由はほぼありません。実測値は下記のドキュメントに。
 
