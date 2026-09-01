@@ -73,7 +73,7 @@ pub fn base_url() -> String {
 /// failure worth noticing.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Where a downloaded pack lives, under `cache`.
+/// Where a downloaded pack lives, under the cache root.
 ///
 /// Named after the version so that two of them can sit side by side: a build
 /// that expects one must not find the other and load it.
