@@ -23,7 +23,10 @@
 //! then the structure is gone; `raw` is kept beside it for exactly this.
 //!
 //! Consecutive prose lines are still merged into one unit, as P3 decided: a
-//! sentence spread over three `//` lines has to reach the engine whole.
+//! sentence spread over three `//` lines has to reach the engine whole. The
+//! unit is then asked for one sentence at a time - see
+//! [`split_sentences`](crate::split_sentences) for why - but it stays one unit
+//! for masking and for the line it is rebuilt into.
 //!
 //! What comes back out is the translated prose in the original structure, not a
 //! translated copy of the source line. The comment markers (`/**`, ` * `,
@@ -35,6 +38,7 @@
 
 use crate::Segment;
 use crate::preserve::{Masked, mask};
+use crate::sentence::{join_sentences, split_sentences};
 
 /// Openers of a block comment, longest first so that `/**` is not read as `/*`.
 const BLOCK_OPENERS: [&str; 3] = ["/**", "/*!", "/*"];
@@ -185,28 +189,55 @@ impl CommentShape {
 #[derive(Debug, Clone)]
 pub struct GlossPlan {
     shape: CommentShape,
-    units: Vec<Masked>,
+    units: Vec<Unit>,
+}
+
+/// One unit of the block: its masking table, and the sentences of its masked
+/// prose.
+///
+/// The engine is asked for one sentence at a time even though the masking and
+/// the caching stay per unit. FuguMT is a sentence-level model and drops
+/// clauses out of a paragraph (see [`split_sentences`]), but a placeholder is
+/// only meaningful against the table that produced it, so the table cannot be
+/// cut up with the text.
+#[derive(Debug, Clone)]
+struct Unit {
+    masked: Masked,
+    sentences: Vec<String>,
 }
 
 impl GlossPlan {
     /// Prepares the comment written as `raw`.
     pub fn new(raw: &str) -> Self {
         let shape = CommentShape::parse(raw);
-        let units = shape.units().into_iter().map(mask).collect();
+        let units = shape
+            .units()
+            .into_iter()
+            .map(|text| {
+                let masked = mask(text);
+                let sentences = split_sentences(masked.masked())
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                Unit { masked, sentences }
+            })
+            .collect();
         Self { shape, units }
     }
 
-    /// What the engine is asked to translate: one masked segment per unit.
+    /// What the engine is asked to translate: one masked segment per sentence,
+    /// units in order.
     pub fn segments(&self) -> Vec<Segment> {
         self.units
             .iter()
-            .map(|unit| Segment::new(unit.masked()))
+            .flat_map(|unit| unit.sentences.iter().map(String::as_str))
+            .map(Segment::new)
             .collect()
     }
 
     /// Whether there is anything to translate at all.
     pub fn is_empty(&self) -> bool {
-        self.units.is_empty()
+        self.units.iter().all(|unit| unit.sentences.is_empty())
     }
 
     /// The English prose in the block's own structure.
@@ -214,25 +245,56 @@ impl GlossPlan {
         self.shape.source()
     }
 
-    /// Puts the translations back: placeholders first, then the structure.
+    /// Puts the translations back: sentences first, then placeholders, then
+    /// the structure.
     ///
     /// `translations` has one entry per [`Self::segments`], in the same order.
     /// A batch of the wrong length is a broken engine rather than a bad
     /// translation, so the block falls back to its English wholesale; a single
     /// unit that lost a placeholder falls back on its own, in
     /// [`Masked::unmask`].
+    ///
+    /// A sentence that lost a placeholder falls back to its own English, not
+    /// to its neighbours': a paragraph is glossed one sentence at a time, and
+    /// one bad sentence taking three good ones back to English costs the
+    /// reader more than the mixed line does.
     pub fn restore(&self, translations: &[String]) -> String {
-        if translations.len() != self.units.len() {
+        if translations.len() != self.segments().len() {
             return self.shape.source();
         }
 
+        let mut rest = translations;
         let restored: Vec<String> = self
             .units
             .iter()
-            .zip(translations)
-            .map(|(unit, translated)| unit.unmask(translated))
+            .map(|unit| {
+                let (mine, tail) = rest.split_at(unit.sentences.len());
+                rest = tail;
+                let sentences: Vec<String> = unit
+                    .sentences
+                    .iter()
+                    .zip(mine)
+                    .map(|(sentence, translated)| unit.masked.unmask_fragment(sentence, translated))
+                    .collect();
+                join_sentences(&sentences)
+            })
             .collect();
         self.shape.rebuild(&restored)
+    }
+
+    /// The English of each segment, in the order of [`Self::segments`].
+    ///
+    /// What a segment falls back to when its translation loses a placeholder,
+    /// and what a translation of the masked form has to be judged against.
+    pub fn sources(&self) -> Vec<String> {
+        self.units
+            .iter()
+            .flat_map(|unit| {
+                unit.sentences
+                    .iter()
+                    .map(|sentence| unit.masked.unmask_fragment(sentence, sentence))
+            })
+            .collect()
     }
 }
 
@@ -389,6 +451,63 @@ mod tests {
                 "@return 認証済みのユーザー\n",
                 "@throws AuthenticationException 認証に失敗した場合",
             )
+        );
+    }
+
+    /// A paragraph reaches the engine one sentence at a time, and comes back as
+    /// the single line it was written as.
+    #[test]
+    fn a_unit_is_asked_for_one_sentence_at_a_time() {
+        let plan =
+            GlossPlan::new("/// Returns the user. Fails when `id` is unknown. Nothing is cached.");
+        assert_eq!(
+            plan.segments()
+                .iter()
+                .map(|segment| segment.text().to_owned())
+                .collect::<Vec<_>>(),
+            [
+                "Returns the user.",
+                "Fails when X0Q is unknown.",
+                "Nothing is cached.",
+            ]
+        );
+        assert_eq!(
+            plan.restore(&[
+                "ユーザを返します。".to_owned(),
+                "X0Q が不明な場合は失敗します。".to_owned(),
+                "何もキャッシュされません。".to_owned(),
+            ]),
+            "ユーザを返します。`id` が不明な場合は失敗します。何もキャッシュされません。"
+        );
+    }
+
+    /// A sentence that dropped a placeholder takes only itself back to English:
+    /// the sentence beside it was fine and stays glossed.
+    #[test]
+    fn only_the_sentence_that_lost_a_placeholder_falls_back() {
+        let plan = GlossPlan::new("/// Returns the user. Fails when `id` is unknown.");
+        assert_eq!(
+            plan.sources(),
+            ["Returns the user.", "Fails when `id` is unknown."]
+        );
+        assert_eq!(
+            plan.restore(&[
+                "ユーザを返します。".to_owned(),
+                "不明な場合は失敗します。".to_owned(),
+            ]),
+            "ユーザを返します。Fails when `id` is unknown."
+        );
+    }
+
+    /// A batch of the wrong length is a broken engine: the count to match is
+    /// the number of sentences now, not the number of units.
+    #[test]
+    fn a_batch_of_the_wrong_length_falls_back() {
+        let plan = GlossPlan::new("/// Returns the user. Nothing is cached.");
+        assert_eq!(plan.segments().len(), 2);
+        assert_eq!(
+            plan.restore(&["ユーザを返します。".to_owned()]),
+            "Returns the user. Nothing is cached."
         );
     }
 

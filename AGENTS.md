@@ -17,8 +17,10 @@ Cargo ワークスペースがあり、`cargo build --workspace` / `cargo test -
 
 - `crates/codegloss-core` — ドメイン型（`CommentBlock` / `Segment` / `Gloss` / `GlossKey`）、翻訳キャッシュ（`GlossCache`。LRU。`GlossStore` を渡すとディスクが後ろに付く）、前処理・後処理。`CommentBlock` は `text`（コメント記号を剥がした本文）と `raw`（元のソーステキストそのまま＝前処理・後処理の入力）の両方を持つ。
   - `preserve.rs` — `mask` / `Masked::unmask`。インラインコード・URL・doc タグ・`TODO:` 系接頭辞・識別子をプレースホルダへ退避し、訳文へ戻す。プレースホルダの形式は `X0Q`（`X` ＋ 十進の添字 ＋ `Q`）。P7 で 8 候補を FuguMT に通して実測して決めた（`X0Q` が 97.4%、暫定だった `⟦0⟧` は語彙に無く 0%。表は `docs/model-runtime-notes.md`）。生成と読み取りは同ファイルの 2 関数に閉じてあり、差し替えるのは `PLACEHOLDER_OPEN` / `PLACEHOLDER_CLOSE` の 2 定数だけ。訳文からプレースホルダが消えていたらその単位は原文へフォールバックする。
+  - `model.rs` — `PIPELINE_VERSION`。**前処理・後処理の版**で、`GlossKey` にモデル版と並べてハッシュされる。キャッシュに入るのは完成した訳文なので、エンジンが同じでも `preserve` / `sentence` / `docblock` の出力が変われば古い訳が出続ける。**それらを変えたら上げること。**`model.rs` の `the_key_encoding_is_stable` が固定値で守っているので、上げるのは意図的な操作になる。
   - `store.rs` — `GlossStore`。訳 1 件 1 ファイル（ファイル名は `GlossKey::to_hex()`）でディレクトリに置く。`GlossCache::with_store` を通すと、メモリで外れたときにディスクを引き、当たったらメモリへ昇格する。**読み書きの失敗はすべてキャッシュミス扱い**（キャッシュが理由でサーバが止まってはいけない）。上限超過ぶんは `GlossStore::open` が起動時に 1 回だけ古い順に消す。
-  - `docblock.rs` — `CommentShape` / `GlossPlan`。`raw` から Javadoc / Rustdoc の行構造を読み、段落・タグ行・箇条書き・見出し・コードフェンスを別々の翻訳単位に分けて、訳文を同じ行構造へ組み直す。連続する散文行は 1 単位にまとめる。組み直した訳文にコメント記号（`/**`・` * `・`///`）は含めない。
+  - `sentence.rs` — `split_sentences` / `join_sentences`。**マスク済みの**本文を文に切り、訳文を 1 行へ戻す。FuguMT は文単位のモデルで、段落を丸ごと渡すと節を黙って落とす。原文ではなくマスク後に切るのは、URL・`a.b()`・インラインコードの中のピリオドが原文には残っているため（マスク後はすべてプレースホルダ）。略語表と「文の始まりに見えるか」の 2 つで境界を決める。
+  - `docblock.rs` — `CommentShape` / `GlossPlan`。`raw` から Javadoc / Rustdoc の行構造を読み、段落・タグ行・箇条書き・見出し・コードフェンスを別々の翻訳単位に分けて、訳文を同じ行構造へ組み直す。連続する散文行は 1 単位にまとめ、その単位を**文ごとに**エンジンへ渡す（マスクとキャッシュは単位のまま）。プレースホルダを落とした文はその文だけ原文へ戻る（`Masked::unmask_fragment`）。組み直した訳文にコメント記号（`/**`・` * `・`///`）は含めない。
   - `cargo build -p codegloss-core --target wasm32-unknown-unknown` が通ることを確認済み（将来のブラウザ拡張との共有のため）。ただしこのターゲットは `rust-toolchain.toml` にも CI にも入れていない。
 - `crates/codegloss-parser` — Tree-sitter によるコメント抽出。対応言語は Rust のみ。連続する行コメントを 1 ブロックに連結し、区切り線と空コメントは落とす。**空の `///` 行はここで落ちて連結も切れる**ため、`///` の doc コメントは空行のたびに別ブロックになる。`docblock.rs` の行構造の復元（空行・コードフェンス）が効くのは `/* */` 系のブロックコメントと、空行を挟まない `///` の連なりだけ。
 - `crates/codegloss-translator` — `trait Translator`（`translate(&[Segment]) -> Vec<String>` と `model_version()`）と 2 つの実装。

@@ -112,17 +112,52 @@ impl Masked {
     /// returned instead, which is wrong in an obvious way rather than in a
     /// subtle one.
     pub fn unmask(&self, translated: &str) -> String {
-        if self.preserved.is_empty() {
-            return translated.to_owned();
+        let (restored, seen) = self.substitute(translated);
+        if seen.iter().all(|found| *found) {
+            restored
+        } else {
+            self.source.clone()
         }
+    }
 
-        let mut restored = String::with_capacity(translated.len());
+    /// Puts the protected spans back into a translation of one `fragment` of
+    /// [`Self::masked`].
+    ///
+    /// Sentence splitting hands the engine a fragment at a time, and a fragment
+    /// can only lose what it was carrying. Requiring the whole comment's
+    /// placeholders here would fail a sentence for one its neighbour dropped,
+    /// and take three good sentences back to English for the sake of one bad
+    /// one; requiring the fragment's own restores the rest and falls back only
+    /// where the loss is.
+    ///
+    /// The English a lost fragment falls back to is the fragment unmasked,
+    /// which is the prose it was cut from.
+    pub fn unmask_fragment(&self, fragment: &str, translated: &str) -> String {
+        let (english, needed) = self.substitute(fragment);
+        let (restored, seen) = self.substitute(translated);
+
+        if needed
+            .iter()
+            .zip(&seen)
+            .all(|(wanted, found)| !wanted || *found)
+        {
+            restored
+        } else {
+            english
+        }
+    }
+
+    /// Replaces every placeholder of `text` with the span it stands for, and
+    /// reports which spans that used.
+    ///
+    /// One pass, never a repeated `replace`: a restored span may itself look
+    /// like a placeholder - a comment quoting one - and a second pass would
+    /// substitute into what the first pass just wrote.
+    fn substitute(&self, text: &str) -> (String, Vec<bool>) {
+        let mut restored = String::with_capacity(text.len());
         let mut seen = vec![false; self.preserved.len()];
-        let mut rest = translated;
+        let mut rest = text;
 
-        // One pass, never a repeated `replace`: a restored span may itself look
-        // like a placeholder - a comment quoting one - and a second pass would
-        // substitute into what the first pass just wrote.
         while let Some(offset) = rest.find(PLACEHOLDER_OPEN) {
             restored.push_str(&rest[..offset]);
             rest = &rest[offset..];
@@ -133,8 +168,8 @@ impl Masked {
                     seen[index] = true;
                     rest = &rest[length..];
                 }
-                // An index nobody allocated, or a stray bracket: copied through
-                // as the text it is.
+                // An index nobody allocated, or a stray delimiter: copied
+                // through as the text it is.
                 _ => {
                     restored.push(PLACEHOLDER_OPEN);
                     rest = &rest[PLACEHOLDER_OPEN.len_utf8()..];
@@ -142,12 +177,7 @@ impl Masked {
             }
         }
         restored.push_str(rest);
-
-        if seen.iter().all(|found| *found) {
-            restored
-        } else {
-            self.source.clone()
-        }
+        (restored, seen)
     }
 }
 
@@ -516,6 +546,36 @@ mod tests {
         assert_eq!(
             masked.unmask("成功時に返します。"),
             "Returns `UserDetails` on success."
+        );
+    }
+
+    /// A fragment answers for its own placeholders and for no others: the
+    /// sentence that kept `X0Q` is restored even though its neighbour lost
+    /// `X1Q`.
+    #[test]
+    fn a_fragment_falls_back_on_its_own() {
+        let masked = mask("Returns `UserDetails`. Calls find_user first.");
+        let (first, second) = ("Returns X0Q.", "Calls X1Q first.");
+
+        assert_eq!(
+            masked.unmask_fragment(first, "X0Q を返します。"),
+            "`UserDetails` を返します。"
+        );
+        // The second lost its own, so the second - and only the second - is
+        // English again.
+        assert_eq!(
+            masked.unmask_fragment(second, "最初に呼び出します。"),
+            "Calls find_user first."
+        );
+    }
+
+    /// A fragment carrying nothing to protect cannot fail.
+    #[test]
+    fn a_fragment_without_placeholders_is_never_failed_by_its_neighbours() {
+        let masked = mask("Thread-safe. Calls find_user first.");
+        assert_eq!(
+            masked.unmask_fragment("Thread-safe.", "スレッドセーフ。"),
+            "スレッドセーフ。"
         );
     }
 

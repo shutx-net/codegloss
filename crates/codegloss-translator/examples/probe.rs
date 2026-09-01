@@ -2,9 +2,9 @@
 //! answers.
 //!
 //! `measure.rs` reports what the engine costs; this reports what it says. For
-//! each probe it prints the units P6 cut the comment into, the masked text the
-//! engine receives, the raw Japanese it returns and the finished gloss, and
-//! then translates the same sentence with masking turned off so the two can be
+//! each probe it prints the segments P6 cut the comment into, the masked text
+//! the engine receives, the raw Japanese it returns and the finished gloss, and
+//! then translates the same segment with masking undone so the two can be
 //! compared side by side.
 //!
 //! ```sh
@@ -19,7 +19,7 @@ use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use codegloss_core::{CommentShape, GlossPlan, Segment};
+use codegloss_core::{GlossPlan, Segment};
 use codegloss_translator::{CandleTranslator, Precision, Translator};
 
 /// Comments chosen to stress the cases a reader complains about: fragments,
@@ -99,8 +99,7 @@ fn main() -> ExitCode {
         println!("----------------------------------------------------------------");
 
         let plan = GlossPlan::new(raw);
-        let shape = CommentShape::parse(raw);
-        let bare_units = shape.units();
+        let sources = plan.sources();
         let segments = plan.segments();
         let masked: Vec<&str> = segments.iter().map(Segment::text).collect();
 
@@ -112,14 +111,14 @@ fn main() -> ExitCode {
             }
         };
 
-        for (unit, (input, output)) in masked.iter().zip(&translations).enumerate() {
-            println!("  unit {unit}");
+        for (index, (input, output)) in masked.iter().zip(&translations).enumerate() {
+            println!("  segment {index}");
             println!("    masked  {input:?}");
             println!("    engine  {output:?}");
 
             // The same unit with the masking undone: if this reads well and
             // the masked one does not, the placeholders are what broke it.
-            let bare = Segment::new(bare_units.get(unit).copied().unwrap_or_default());
+            let bare = Segment::new(sources[index].as_str());
             match translator.translate(std::slice::from_ref(&bare)) {
                 Ok(plain) => {
                     println!("    bare in {:?}", bare.text());
