@@ -25,7 +25,9 @@ blake3 = "1.8"
 candle-core = "0.11"
 candle-nn = "0.11"
 sha2 = "0.10"
-ureq = { version = "3", default-features = false, features = ["rustls", "rustls-no-provider", "rustls-webpki-roots", "gzip"] }
+# platform-verifier は OS の証明書ストアを使う。webpki-roots（コンパイル時に
+# 埋め込む集合）だと、TLS を傍受するプロキシの下で UnknownIssuer になる。
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "gzip"] }
 dashmap = "6"
 # tower-lsp-server が使う futures と同じ版。テストでサーバ発リクエスト
 # （workspace/*/refresh）を ClientSocket から読むためだけに使う。

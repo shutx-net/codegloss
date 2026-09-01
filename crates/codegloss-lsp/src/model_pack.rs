@@ -170,7 +170,18 @@ fn download(url: &str, into: &Path) -> anyhow::Result<()> {
 }
 
 fn agent() -> ureq::Agent {
+    // The operating system's certificate store, not the set compiled into the
+    // binary. A machine behind a TLS-inspecting proxy - a corporate network,
+    // and the environment this was developed in - presents a certificate whose
+    // issuer is in the system store and in no compiled-in set, and the download
+    // fails with `UnknownIssuer`. Trusting what the machine already trusts is
+    // what makes the download work where everything else on that machine does.
+    let tls = ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .build();
+
     ureq::Agent::config_builder()
+        .tls_config(tls)
         .timeout_recv_body(Some(READ_TIMEOUT))
         .user_agent(concat!("codegloss-lsp/", env!("CARGO_PKG_VERSION")))
         .build()
