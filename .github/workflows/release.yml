@@ -1,0 +1,162 @@
+name: リリース
+
+# タグを打つとバイナリが出る。タグを打つ前に、Actions タブの Run workflow から
+# ビルドだけ回せる（リリースは作らない）。**新しい構成を足したらまずそちらで
+# 回すこと。**5 つのうち 1 つでも落ちるタグは、消して打ち直すしかない。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# リリースの作成とアセットのアップロードに要る。ビルドだけの回でも同じ
+# ワークフローなので、ここで一度に宣言する。
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # 1 つが落ちても残りの結果は見たい。どれが通ってどれが落ちるかが
+      # 分からないと、直す順番が決められない。
+      fail-fast: false
+      matrix:
+        include:
+          # Linux は 22.04 で作る。ビルドした環境より新しい glibc は要求
+          # できないので、古いほうで作ったバイナリのほうが広く動く。
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          # macOS のランナーは arm64。x86_64 は同じランナーからクロスで作る
+          # （Xcode が両方の SDK を持っているので追加の設定は要らない）。
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # CI と同じく toolchain 入力は書かない。rust-toolchain.toml が唯一の版の
+      # 定義であり、ここに書くと二重管理になる。target だけ足す。
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+
+      # `--features candle` が本番の構成。これを外したバイナリは英語しか
+      # 出せないので、リリースに載せる意味がない。
+      - name: build
+        run: cargo build --release -p codegloss-lsp --features candle --target ${{ matrix.target }}
+
+      - name: package (unix)
+        if: matrix.runner != 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="codegloss-lsp-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/codegloss-lsp" "dist/$name/"
+          cp LICENSE README.md "dist/$name/"
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+
+      - name: package (windows)
+        if: matrix.runner == 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="codegloss-lsp-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/codegloss-lsp.exe" "dist/$name/"
+          cp LICENSE README.md "dist/$name/"
+          (cd dist && 7z a "$name.zip" "$name")
+
+      # サーバが起動して版を名乗るところまでは、作ったその場で見る。実行
+      # できないバイナリを配ってしまう事故は、これだけで防げる。
+      # クロスで作ったものは動かせないので飛ばす。
+      - name: smoke test
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/codegloss-lsp"
+          if [ -f "$binary.exe" ]; then
+            binary="$binary.exe"
+          fi
+          # モデルパックは無いので Passthrough になる。見たいのは「起動して、
+          # engine を選んで、stdin が閉じたら終わる」ことだけ。判定はログで
+          # するので、終了コードは問わない。
+          printf '' | "$binary" > log 2>&1 || true
+          cat log
+          grep -q "starting" log
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codegloss-lsp-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: リリースを作る
+    needs: build
+    runs-on: ubuntu-latest
+    # タグを打ったときだけ。Run workflow から回した回はビルドで終わる。
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v7
+
+      # タグと Cargo.toml の版がずれたまま配ると、あとから何が入っている
+      # のか分からなくなる。ここで止めるほうが、消して打ち直すより安い。
+      - name: check the tag against the workspace version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
+            | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "タグ $GITHUB_REF_NAME に対して Cargo.toml は $version です" >&2
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          # SHA256SUMS 自身を数えないよう、書庫だけを名指しする。nullglob が
+          # 無いと、当たらなかったパターンがそのまま引数になって落ちる。
+          shopt -s nullglob
+          sha256sum -- *.tar.gz *.zip > SHA256SUMS
+          test -s SHA256SUMS
+          cat SHA256SUMS
+
+      # 下書きで作る。**このワークフローは一度も通ったことがない**ので、
+      # 5 つのアセットを目で見てから公開できるようにしておく。何度か通って
+      # 中身が信用できるようになったら --draft を外してよい。
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*
