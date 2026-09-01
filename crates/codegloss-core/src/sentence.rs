@@ -24,6 +24,28 @@
 /// Characters that can end a sentence.
 const TERMINATORS: [char; 3] = ['.', '!', '?'];
 
+/// Characters that can end a clause without ending a sentence.
+///
+/// A long sentence hinged on one of these is truncated exactly like a
+/// paragraph is - the engine translates one side and stops:
+///
+/// ```text
+/// The deduplication is a second one, below the one X0Q does: two comments that
+/// differ only in their indentation share a single segment.
+///   whole -> インデントのみが異なる2つのコメント…       (everything before the colon is gone)
+///   split -> 重複排除は2番目のもので、X0Qが行うものです。
+///            インデントのみが異なる2つのコメントは…
+/// ```
+const CLAUSE_TERMINATORS: [char; 2] = [';', ':'];
+
+/// How many words each side of a clause break needs before it is one.
+///
+/// `IMPORTANT: what is hashed ...` and `v0.1: cache, then translate` hinge on a
+/// colon that introduces the sentence rather than dividing it, and the give-away
+/// is that there is nearly nothing on the left. The same count guards the right,
+/// so a trailing `see:` does not become a unit of its own.
+const MIN_CLAUSE_WORDS: usize = 4;
+
 /// Words that take a full stop without ending a sentence.
 ///
 /// Deliberately short. A list long enough to be complete would also be long
@@ -53,7 +75,7 @@ pub fn split_sentences(text: &str) -> Vec<&str> {
             .chars()
             .next()
             .expect("the cursor is on a character boundary");
-        if !TERMINATORS.contains(&character) {
+        if !TERMINATORS.contains(&character) && !CLAUSE_TERMINATORS.contains(&character) {
             cursor += character.len_utf8();
             continue;
         }
@@ -63,14 +85,15 @@ pub fn split_sentences(text: &str) -> Vec<&str> {
         while text[end..].starts_with(TERMINATORS) {
             end += 1;
         }
+        if end == cursor {
+            end += character.len_utf8();
+        }
 
         let rest = &text[end..];
         let next = rest.trim_start();
-        // A boundary needs white space after it - `v0.1` and `a.b` are one
-        // token - and something that reads as the start of a sentence after
-        // that.
-        if next.len() == rest.len() || !opens_a_sentence(next) || is_abbreviation(&text[start..end])
-        {
+        // Every boundary needs white space after it: `v0.1` and `a.b` are one
+        // token.
+        if next.len() == rest.len() || !is_a_boundary(&text[start..end], next) {
             cursor = end;
             continue;
         }
@@ -88,6 +111,25 @@ pub fn split_sentences(text: &str) -> Vec<&str> {
         pieces.push(tail);
     }
     pieces
+}
+
+/// Whether the terminator between `before` and `after` divides two units.
+///
+/// A sentence end and a clause end are told apart by different things. After a
+/// full stop the next word is capitalised, which is nearly proof on its own;
+/// after a semicolon or a colon it is not, so the length of the two sides is
+/// all there is to go on.
+fn is_a_boundary(before: &str, after: &str) -> bool {
+    if before.ends_with(CLAUSE_TERMINATORS) {
+        return words(before) >= MIN_CLAUSE_WORDS && words(after) >= MIN_CLAUSE_WORDS;
+    }
+    opens_a_sentence(after) && !is_abbreviation(before)
+}
+
+fn words(text: &str) -> usize {
+    text.split_whitespace()
+        .filter(|word| word.chars().any(char::is_alphanumeric))
+        .count()
 }
 
 fn opens_a_sentence(rest: &str) -> bool {
@@ -208,6 +250,43 @@ mod tests {
             split_sentences("Really?! It does."),
             ["Really?!", "It does."]
         );
+    }
+
+    /// A long sentence hinged on a semicolon or a colon is two units.
+    #[test]
+    fn a_clause_break_with_enough_on_both_sides_is_a_boundary() {
+        assert_eq!(
+            split_sentences(
+                "Translation is serialised so that one inference runs at a time; X0Q's pool \
+                 would otherwise start hundreds."
+            ),
+            [
+                "Translation is serialised so that one inference runs at a time;",
+                "X0Q's pool would otherwise start hundreds.",
+            ]
+        );
+        assert_eq!(
+            split_sentences("The shutdown is not graceful: requests in flight are abandoned."),
+            [
+                "The shutdown is not graceful:",
+                "requests in flight are abandoned.",
+            ]
+        );
+    }
+
+    /// A colon that introduces a sentence rather than dividing it has nearly
+    /// nothing on its left, and a trailing one has nothing on its right.
+    #[test]
+    fn a_colon_with_too_little_on_one_side_is_not_a_boundary() {
+        for text in [
+            "X0Q what is hashed is the comment as the file has it.",
+            "v0.1: cache, then translate, then refresh.",
+            "Shape of one round trip:",
+            "Uses a map; nothing else.",
+        ] {
+            let pieces = split_sentences(text);
+            assert_eq!(pieces[0], text.trim(), "cut {text:?} into {pieces:?}");
+        }
     }
 
     #[test]

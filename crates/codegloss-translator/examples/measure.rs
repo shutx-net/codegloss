@@ -14,6 +14,7 @@
 //! Options:
 //!
 //! - `--dtype f32|f16|bf16` - how the weights are held (default `f32`).
+//! - `--beams <n>` - hypotheses the search keeps; `1` is greedy.
 //! - `--pack <dir>` - the model pack, overriding `CODEGLOSS_MODEL_PACK`.
 //! - `--segments <n>` - stop after this many segments of the corpus.
 //! - `--load-only` - load the model and report memory, skipping inference.
@@ -23,7 +24,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use codegloss_core::{GlossPlan, Segment};
-use codegloss_translator::{CandleTranslator, Precision, Translator};
+use codegloss_translator::{CandleTranslator, DEFAULT_BEAMS, Precision, Translator};
 
 /// The corpus `tests/quality.rs` checks against, so that the timings and the
 /// quality results describe the same text.
@@ -40,20 +41,22 @@ fn main() -> ExitCode {
 
     println!("pack:    {}", options.pack.display());
     println!("dtype:   {}", options.precision);
+    println!("beams:   {}", options.beams);
     report("before load");
 
     reset_peak();
     let started = Instant::now();
-    let translator = match CandleTranslator::load_with(&options.pack, options.precision) {
-        Ok(translator) => translator,
-        Err(error) => {
-            eprintln!(
-                "{} is not a usable model pack: {error:?}",
-                options.pack.display()
-            );
-            return ExitCode::FAILURE;
-        }
-    };
+    let translator =
+        match CandleTranslator::load_with_beams(&options.pack, options.precision, options.beams) {
+            Ok(translator) => translator,
+            Err(error) => {
+                eprintln!(
+                    "{} is not a usable model pack: {error:?}",
+                    options.pack.display()
+                );
+                return ExitCode::FAILURE;
+            }
+        };
     println!(
         "load:    {:.0} ms",
         started.elapsed().as_secs_f64() * 1000.0
@@ -137,6 +140,7 @@ fn corpus() -> Vec<Segment> {
 struct Options {
     pack: PathBuf,
     precision: Precision,
+    beams: usize,
     segments: Option<usize>,
     load_only: bool,
 }
@@ -148,6 +152,7 @@ impl Options {
             .filter(|path| !path.is_empty())
             .map(PathBuf::from);
         let mut precision = Precision::default();
+        let mut beams = DEFAULT_BEAMS;
         let mut segments = None;
         let mut load_only = false;
 
@@ -163,6 +168,14 @@ impl Options {
                     let text = value()?;
                     precision = Precision::parse(&text)
                         .ok_or_else(|| format!("{text:?} is not f32, f16 or bf16"))?;
+                }
+                "--beams" => {
+                    let text = value()?;
+                    beams = text
+                        .parse()
+                        .ok()
+                        .filter(|width| *width >= 1)
+                        .ok_or_else(|| format!("{text:?} is not a beam width"))?;
                 }
                 "--pack" => pack = Some(PathBuf::from(value()?)),
                 "--segments" => {
@@ -184,6 +197,7 @@ impl Options {
         Ok(Self {
             pack,
             precision,
+            beams,
             segments,
             load_only,
         })

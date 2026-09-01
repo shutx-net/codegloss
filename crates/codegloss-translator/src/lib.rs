@@ -20,8 +20,8 @@ use codegloss_core::Segment;
 
 #[cfg(feature = "candle")]
 pub use candle::{
-    CONFIG_FILE, CandleTranslator, ENGINE_VERSION, MANIFEST_FILE, Manifest, PYTORCH_FILE,
-    Precision, SAFETENSORS_FILE, SOURCE_TOKENIZER_FILE, TARGET_TOKENIZER_FILE,
+    CONFIG_FILE, CandleTranslator, DEFAULT_BEAMS, ENGINE_VERSION, MANIFEST_FILE, Manifest,
+    PYTORCH_FILE, Precision, SAFETENSORS_FILE, SOURCE_TOKENIZER_FILE, TARGET_TOKENIZER_FILE,
 };
 pub use passthrough::{PASSTHROUGH_MODEL_VERSION, PassthroughTranslator};
 

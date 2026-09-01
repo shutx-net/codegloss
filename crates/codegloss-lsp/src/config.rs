@@ -26,6 +26,11 @@ pub const PRECISION_FLAG: &str = "--precision";
 pub const PRECISION_VARIABLE: &str = "CODEGLOSS_MODEL_PRECISION";
 
 /// Command-line flag naming the directory finished glosses are kept in.
+pub const BEAMS_FLAG: &str = "--beams";
+/// Environment variable for [`BEAMS_FLAG`]. See [`MODEL_PACK_VARIABLE`].
+pub const BEAMS_VARIABLE: &str = "CODEGLOSS_MODEL_BEAMS";
+
+/// Where finished glosses are written so that they survive a restart.
 pub const CACHE_DIR_FLAG: &str = "--cache-dir";
 /// Environment variable for [`CACHE_DIR_FLAG`]. See [`MODEL_PACK_VARIABLE`].
 pub const CACHE_DIR_VARIABLE: &str = "CODEGLOSS_CACHE_DIR";
@@ -53,6 +58,13 @@ pub struct ServerConfig {
     /// occupies, at some cost in time. The measured trade is in
     /// `docs/model-runtime-notes.md`.
     pub precision: Option<String>,
+    /// How many hypotheses the engine's search keeps; `1` is greedy decoding.
+    /// Text for the same reason as [`precision`](ServerConfig::precision).
+    ///
+    /// Wider search stops the engine truncating a sentence part way through,
+    /// which is the failure a reader cannot see. What it costs is measured in
+    /// `docs/model-runtime-notes.md`.
+    pub beams: Option<String>,
     /// Where finished glosses are kept between runs. `None` means the platform
     /// cache directory; [`no_cache`](ServerConfig::no_cache) means nowhere.
     pub cache_dir: Option<PathBuf>,
@@ -91,6 +103,13 @@ impl ServerConfig {
                     Some(value) => config.precision = Some(value),
                     None => tracing::warn!("{PRECISION_FLAG} was given without a value"),
                 }
+            } else if let Some(value) = argument.strip_prefix(&format!("{BEAMS_FLAG}=")) {
+                config.beams = Some(value.to_owned());
+            } else if argument == BEAMS_FLAG {
+                match arguments.next() {
+                    Some(value) => config.beams = Some(value),
+                    None => tracing::warn!("{BEAMS_FLAG} was given without a value"),
+                }
             } else if let Some(value) = argument.strip_prefix(&format!("{CACHE_DIR_FLAG}=")) {
                 config.cache_dir = Some(PathBuf::from(value));
             } else if argument == CACHE_DIR_FLAG {
@@ -121,6 +140,12 @@ impl ServerConfig {
         {
             self.precision = Some(precision);
         }
+        if self.beams.is_none()
+            && let Ok(beams) = std::env::var(BEAMS_VARIABLE)
+            && !beams.is_empty()
+        {
+            self.beams = Some(beams);
+        }
         if self.cache_dir.is_none()
             && let Ok(directory) = std::env::var(CACHE_DIR_VARIABLE)
             && !directory.is_empty()
@@ -148,7 +173,11 @@ pub fn engine(config: &ServerConfig) -> Arc<dyn Translator> {
     };
 
     #[cfg(feature = "candle")]
-    match codegloss_translator::CandleTranslator::load_with(pack, precision(config)) {
+    match codegloss_translator::CandleTranslator::load_with_beams(
+        pack,
+        precision(config),
+        beams(config),
+    ) {
         Ok(translator) => return Arc::new(translator),
         Err(error) => tracing::error!(
             pack = %pack.display(),
@@ -268,6 +297,26 @@ fn precision(config: &ServerConfig) -> codegloss_translator::Precision {
     })
 }
 
+/// The configured beam width, or the default when nothing was configured.
+///
+/// Anything that is not a width at least one is a typo, and a typo must not
+/// stop the server - see [`precision`].
+#[cfg(feature = "candle")]
+fn beams(config: &ServerConfig) -> usize {
+    use codegloss_translator::DEFAULT_BEAMS;
+
+    let Some(text) = config.beams.as_deref() else {
+        return DEFAULT_BEAMS;
+    };
+    text.parse()
+        .ok()
+        .filter(|width| *width >= 1)
+        .unwrap_or_else(|| {
+            tracing::error!("{BEAMS_FLAG} {text:?} is not a beam width; using {DEFAULT_BEAMS}");
+            DEFAULT_BEAMS
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +380,29 @@ mod tests {
 
     /// The fallback that keeps the editor alive: a pack that is not there is
     /// logged, not fatal.
+    /// The beam width is optional and has both spellings, like the precision.
+    #[test]
+    fn the_beam_width_can_be_given_in_either_spelling() {
+        assert_eq!(parse(&[]).beams, None);
+        assert_eq!(parse(&["--beams", "8"]).beams.as_deref(), Some("8"));
+        assert_eq!(parse(&["--beams=8"]).beams.as_deref(), Some("8"));
+        assert_eq!(parse(&["--beams"]).beams, None);
+    }
+
+    /// A width that is not one falls back rather than stopping the server, and
+    /// so does one that would turn the search off entirely.
+    #[cfg(feature = "candle")]
+    #[test]
+    fn a_beam_width_that_is_not_a_width_falls_back_to_the_default() {
+        use codegloss_translator::DEFAULT_BEAMS;
+
+        assert_eq!(beams(&parse(&[])), DEFAULT_BEAMS);
+        assert_eq!(beams(&parse(&["--beams=1"])), 1);
+        assert_eq!(beams(&parse(&["--beams=12"])), 12);
+        assert_eq!(beams(&parse(&["--beams=0"])), DEFAULT_BEAMS);
+        assert_eq!(beams(&parse(&["--beams=wide"])), DEFAULT_BEAMS);
+    }
+
     /// The precision is optional and has both spellings, like the pack.
     #[test]
     fn the_precision_can_be_given_in_either_spelling() {

@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use codegloss_core::{GlossPlan, Segment};
-use codegloss_translator::{CandleTranslator, Precision, Translator};
+use codegloss_translator::{CandleTranslator, DEFAULT_BEAMS, Precision, Translator};
 
 /// Comments chosen to stress the cases a reader complains about: fragments,
 /// units that are all identifier, and sentences carrying several protected
@@ -70,7 +70,18 @@ fn main() -> ExitCode {
         Err(_) => Precision::default(),
     };
 
-    let translator = match CandleTranslator::load_with(&pack, precision) {
+    let beams = match std::env::var("CODEGLOSS_MODEL_BEAMS") {
+        Ok(width) => match width.parse::<usize>() {
+            Ok(beams) if beams >= 1 => beams,
+            _ => {
+                eprintln!("{width:?} is not a beam width");
+                return ExitCode::FAILURE;
+            }
+        },
+        Err(_) => DEFAULT_BEAMS,
+    };
+
+    let translator = match CandleTranslator::load_with_beams(&pack, precision, beams) {
         Ok(translator) => translator,
         Err(error) => {
             eprintln!("{} is not a usable model pack: {error:?}", pack.display());
