@@ -108,17 +108,15 @@ impl CodeglossExtension {
             language_server_id,
             &LanguageServerInstallationStatus::CheckingForUpdate,
         );
-        let release = github_release_by_tag_name(SERVER_REPOSITORY, &tag).map_err(|error| {
-            format!("{SERVER_REPOSITORY} のリリース {tag} が見つかりません: {error}")
-        })?;
+        let release = github_release_by_tag_name(SERVER_REPOSITORY, &tag)
+            .map_err(|error| format!("no release {tag} in {SERVER_REPOSITORY}: {error}"))?;
         let found = release
             .assets
             .iter()
             .find(|candidate| candidate.name == asset.file)
             .ok_or_else(|| {
                 format!(
-                    "リリース {tag} に {} がありません。\
-                     この構成向けのバイナリが配られていません。",
+                    "release {tag} has no {}; no server is published for this platform",
                     asset.file
                 )
             })?;
@@ -128,14 +126,10 @@ impl CodeglossExtension {
             &LanguageServerInstallationStatus::Downloading,
         );
         zed::download_file(&found.download_url, &directory, asset.kind)
-            .map_err(|error| format!("{} をダウンロードできませんでした: {error}", asset.file))?;
+            .map_err(|error| format!("could not download {}: {error}", asset.file))?;
 
-        let path = installed(&directory, &asset.stem).ok_or_else(|| {
-            format!(
-                "{} を展開しましたが {SERVER_BINARY} が見つかりません。",
-                asset.file
-            )
-        })?;
+        let path = installed(&directory, &asset.stem)
+            .ok_or_else(|| format!("unpacked {} but found no {SERVER_BINARY} in it", asset.file))?;
         zed::make_file_executable(&path)?;
 
         zed::set_language_server_installation_status(
@@ -215,9 +209,9 @@ fn asset_name() -> Result<Asset> {
         (Os::Windows, Architecture::X8664) => "x86_64-pc-windows-msvc",
         (os, architecture) => {
             return Err(format!(
-                "{os:?} の {architecture:?} 向けの {SERVER_BINARY} は配布していません。\
-                 ソースからビルドして settings.json の \
-                 lsp.{LANGUAGE_SERVER_ID}.binary.path に指定してください。"
+                "no {SERVER_BINARY} is published for {architecture:?} {os:?}; build one from \
+                 source and name it in settings.json under \
+                 lsp.{LANGUAGE_SERVER_ID}.binary.path"
             ));
         }
     };
@@ -258,5 +252,31 @@ fn executable_suffix() -> &'static str {
     match zed::current_platform().0 {
         Os::Windows => ".exe",
         Os::Mac | Os::Linux => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Zed grants `download_file` per URL, against the patterns in
+    /// `extension.toml`. Nothing connects the two at compile time, so a repository
+    /// renamed in one place and not the other would leave every download refused
+    /// by the host - with no build error, and nothing to see until someone
+    /// installs the extension on a machine with no server on it.
+    #[test]
+    fn the_declared_capability_covers_this_repository() {
+        let manifest = include_str!("../extension.toml");
+        let (owner, repository) = SERVER_REPOSITORY
+            .split_once('/')
+            .expect("the repository is written as owner/name");
+
+        let expected =
+            format!(r#"path = ["{owner}", "{repository}", "releases", "download", "**"]"#);
+        assert!(
+            manifest.contains(&expected),
+            "extension.toml must declare {expected}, or Zed refuses the download"
+        );
+        assert!(manifest.contains(r#"host = "github.com""#));
     }
 }
