@@ -50,11 +50,14 @@ pub const TARGET_TOKENIZER_FILE: &str = "tokenizer-target.json";
 /// Cache-key identity of *this* engine, as opposed to of the weights it runs.
 ///
 /// It covers everything about the runtime that can change a translation
-/// without the model pack changing: greedy decoding, the forbidden tokens.
-/// Bump it whenever one of those moves, or the cache keeps serving what the
-/// old code produced. The precision is not in here because it is appended to
-/// it - see [`CandleTranslator::model_version`].
-pub const ENGINE_VERSION: &str = "candle-marian-1";
+/// without the model pack changing: the search, the forbidden tokens. Bump it
+/// whenever one of those moves, or the cache keeps serving what the old code
+/// produced. The precision and the beam width are not in here because they are
+/// appended to it - see [`CandleTranslator::model_version`].
+///
+/// - `candle-marian-1` - greedy only.
+/// - `candle-marian-2` - beam search, length-normalised.
+pub const ENGINE_VERSION: &str = "candle-marian-2";
 
 /// The vocabulary entry a tokenizer uses for text it cannot represent.
 const UNKNOWN_TOKEN: &str = "<unk>";
@@ -123,6 +126,28 @@ impl std::fmt::Display for Precision {
 /// on an input the model does not understand. A comment that needs more than
 /// this many tokens is not a comment.
 const MAX_NEW_TOKENS: usize = 512;
+
+/// How many hypotheses [`beam search`](Engine::search) keeps.
+///
+/// FuguMT's own `generation_config.json` asks for 12; this is the width the
+/// model was evaluated at, not one that has to be paid at read time. The cost
+/// is close to linear in the width and the benefit is not, so the shipped
+/// default is measured rather than inherited - see
+/// `docs/model-runtime-notes.md`.
+///
+/// `1` is greedy decoding, and is a different code path rather than a beam
+/// search of width one: there is no reason to pay for the bookkeeping.
+pub const DEFAULT_BEAMS: usize = 4;
+
+/// Exponent the score of a finished hypothesis is divided by.
+///
+/// A hypothesis is scored by summing log probabilities, and every term is
+/// negative, so a longer translation scores worse for being longer. Left
+/// alone, the search would reliably prefer the hypothesis that stops early -
+/// which is the failure beam search is here to fix. `1.0` divides the score by
+/// the length and takes the preference back out; it is what the upstream
+/// generation config leaves at its default.
+const LENGTH_PENALTY: f64 = 1.0;
 
 /// What a model pack says about itself.
 ///
@@ -202,6 +227,26 @@ struct Engine {
     /// Added to the logits before picking a token: `0` everywhere and `-inf`
     /// on the tokens the model must never emit.
     forbidden: Tensor,
+    /// Hypotheses kept by the search; `1` means greedy.
+    beams: usize,
+}
+
+/// One partial or finished translation, and the sum of the log probabilities
+/// of the tokens that make it up.
+#[derive(Debug, Clone)]
+struct Hypothesis {
+    /// The decoder start token, then what the search has chosen.
+    tokens: Vec<u32>,
+    score: f64,
+}
+
+impl Hypothesis {
+    /// The score the hypotheses are compared on: per generated token, so that
+    /// a short translation cannot win by being short.
+    fn normalised(&self) -> f64 {
+        let generated = self.tokens.len().saturating_sub(1).max(1) as f64;
+        self.score / generated.powf(LENGTH_PENALTY)
+    }
 }
 
 impl CandleTranslator {
@@ -223,6 +268,21 @@ impl CandleTranslator {
     /// [`model_version`](Translator::model_version), so translations produced
     /// under one are never served for another.
     pub fn load_with(pack: impl AsRef<Path>, precision: Precision) -> Result<Self> {
+        Self::load_with_beams(pack, precision, DEFAULT_BEAMS)
+    }
+
+    /// Loads the model pack in `pack`, holding the weights in `precision` and
+    /// searching `beams` hypotheses wide.
+    ///
+    /// `beams` of `1` is greedy decoding. Like the precision, the width is part
+    /// of [`model_version`](Translator::model_version): two widths do not agree
+    /// on a translation, so they must not share a cache entry.
+    pub fn load_with_beams(
+        pack: impl AsRef<Path>,
+        precision: Precision,
+        beams: usize,
+    ) -> Result<Self> {
+        let beams = beams.max(1);
         let pack = pack.as_ref();
         let manifest = Manifest::read(pack)?;
 
@@ -264,11 +324,15 @@ impl CandleTranslator {
             version = %manifest.model_version,
             weights = %weights.display(),
             precision = %precision,
+            beams,
             "loaded the translation model"
         );
 
         Ok(Self {
-            model_version: format!("{ENGINE_VERSION}-{precision}+{}", manifest.model_version),
+            model_version: format!(
+                "{ENGINE_VERSION}-{precision}-b{beams}+{}",
+                manifest.model_version
+            ),
             manifest,
             engine: Mutex::new(Engine {
                 config,
@@ -280,6 +344,7 @@ impl CandleTranslator {
                 lm_head,
                 final_logits_bias,
                 forbidden,
+                beams,
             }),
         })
     }
@@ -329,34 +394,137 @@ impl Engine {
         self.model.reset_kv_cache();
 
         let encoder_xs = self.encode(text)?;
-        let mut token_ids = vec![self.config.decoder_start_token_id];
+        let tokens = if self.beams > 1 {
+            self.search(&encoder_xs)?
+        } else {
+            self.greedy(&encoder_xs)?
+        };
+
+        // The start token is the decoder's, not the sentence's.
+        self.target
+            .decode(&tokens[1..], true)
+            .map_err(|error| anyhow!("the translation could not be decoded: {error}"))
+    }
+
+    /// Takes the most likely token at every step, and never reconsiders.
+    ///
+    /// Cheap, and wrong in one specific way: the end-of-sentence token is
+    /// often the single most likely next token part way through a sentence,
+    /// and taking it there truncates the translation with no sign that
+    /// anything is missing. [`Engine::search`] is what that costs, and what it
+    /// buys.
+    fn greedy(&mut self, encoder_xs: &Tensor) -> Result<Vec<u32>> {
+        let mut tokens = vec![self.config.decoder_start_token_id];
 
         for index in 0..MAX_NEW_TOKENS {
             // After the first pass the KV cache holds everything before the
             // last token, so only that token is fed back in.
-            let context_size = if index >= 1 { 1 } else { token_ids.len() };
-            let start_pos = token_ids.len().saturating_sub(context_size);
-            let input_ids = Tensor::new(&token_ids[start_pos..], &self.device)?.unsqueeze(0)?;
+            let context_size = if index >= 1 { 1 } else { tokens.len() };
+            let start_pos = tokens.len().saturating_sub(context_size);
+            let input_ids = Tensor::new(&tokens[start_pos..], &self.device)?.unsqueeze(0)?;
 
-            let logits = self.decode(&input_ids, &encoder_xs, start_pos)?;
-            let logits = logits.squeeze(0)?;
-            let logits = logits.get(logits.dim(0)? - 1)?;
+            let logits = self.decode(&input_ids, encoder_xs, start_pos)?;
+            let logits = logits.squeeze(1)?.squeeze(0)?;
             let logits = logits.broadcast_add(&self.forbidden)?;
 
-            // Greedy: `argmax`, not a sampler. Nothing about a translation
-            // wants randomness, and a deterministic engine is what lets the
-            // cache and the fixtures mean anything.
+            // `argmax`, not a sampler. Nothing about a translation wants
+            // randomness, and a deterministic engine is what lets the cache and
+            // the fixtures mean anything.
             let token = logits.argmax(0)?.to_scalar::<u32>()?;
-            if token == self.config.eos_token_id || token == self.config.forced_eos_token_id {
+            if self.is_end(token) {
                 break;
             }
-            token_ids.push(token);
+            tokens.push(token);
         }
 
-        // The start token is the decoder's, not the sentence's.
-        self.target
-            .decode(&token_ids[1..], true)
-            .map_err(|error| anyhow!("the translation could not be decoded: {error}"))
+        Ok(tokens)
+    }
+
+    /// Keeps [`beams`](Engine::beams) hypotheses alive and returns the best of
+    /// the finished ones.
+    ///
+    /// Two deliberate departures from the upstream generation config:
+    ///
+    /// - the width is [`DEFAULT_BEAMS`] rather than its 12, because the cost is
+    ///   linear in the width and the benefit is not;
+    /// - the search stops as soon as `beams` hypotheses have finished
+    ///   (`early_stopping=True`), rather than proving that nothing still
+    ///   running can beat them. Proving it needs a bound on a score whose
+    ///   normaliser grows with the length, which is only a bound in the
+    ///   direction that does not help.
+    ///
+    /// IMPORTANT: there is no incremental KV cache here. candle's `marian`
+    /// keeps the cache private and offers only `reset_kv_cache`, so there is no
+    /// way to permute it when the beams are reordered - and a cache carried
+    /// across a reordering silently attributes one beam's prefix to another.
+    /// The prefix is therefore re-read at every step, which is quadratic in the
+    /// length of the translation. What that costs is measured in
+    /// `docs/model-runtime-notes.md`; taking it back means forking `marian`,
+    /// which is the same fork batching needs.
+    fn search(&mut self, encoder_xs: &Tensor) -> Result<Vec<u32>> {
+        let (_, source_len, model_dim) = encoder_xs.dims3()?;
+        // Every beam translates the same sentence, so they all attend to the
+        // same encoder states.
+        let encoder_xs = encoder_xs
+            .broadcast_as((self.beams, source_len, model_dim))?
+            .contiguous()?;
+
+        let mut live = vec![Hypothesis {
+            tokens: vec![self.config.decoder_start_token_id],
+            score: 0.0,
+        }];
+        let mut finished: Vec<Hypothesis> = Vec::with_capacity(self.beams);
+
+        for _ in 0..MAX_NEW_TOKENS {
+            let width = live.len();
+            let length = live[0].tokens.len();
+
+            self.model.reset_kv_cache();
+            let prefixes: Vec<u32> = live
+                .iter()
+                .flat_map(|hypothesis| hypothesis.tokens.iter().copied())
+                .collect();
+            let input_ids = Tensor::from_vec(prefixes, (width, length), &self.device)?;
+
+            let logits = self.decode(&input_ids, &encoder_xs.narrow(0, 0, width)?, 0)?;
+            let logits = logits.squeeze(1)?.broadcast_add(&self.forbidden)?;
+            // In F32 whatever the weights are held in: a sum of log
+            // probabilities over a whole sentence is exactly the accumulation
+            // F16 is bad at.
+            let logprobs = candle_nn::ops::log_softmax(&logits.to_dtype(DType::F32)?, 1)?;
+            let logprobs: Vec<f32> = logprobs.flatten_all()?.to_vec1()?;
+            let vocabulary = logprobs.len() / width;
+
+            let mut next = Vec::with_capacity(self.beams);
+            for (score, beam, token) in best(&logprobs, vocabulary, &live, 2 * self.beams) {
+                let mut tokens = live[beam].tokens.clone();
+                if self.is_end(token) {
+                    finished.push(Hypothesis { tokens, score });
+                } else if next.len() < self.beams {
+                    tokens.push(token);
+                    next.push(Hypothesis { tokens, score });
+                }
+            }
+
+            if finished.len() >= self.beams || next.is_empty() {
+                live = next;
+                break;
+            }
+            live = next;
+        }
+
+        // Nothing finished inside the budget: the best hypothesis still running
+        // is a truncated translation, but it is the translation.
+        let best = finished
+            .iter()
+            .chain(live.iter())
+            .max_by(|left, right| left.normalised().total_cmp(&right.normalised()))
+            .ok_or_else(|| anyhow!("the search ended with no hypothesis at all"))?;
+        Ok(best.tokens.clone())
+    }
+
+    fn is_end(&self, token: u32) -> bool {
+        token == self.config.eos_token_id || token == self.config.forced_eos_token_id
     }
 
     /// One decoder step, plus the projection onto the vocabulary.
@@ -382,9 +550,13 @@ impl Engine {
             .model
             .decoder()
             .forward(input_ids, Some(encoder_xs), past, &mask)?;
+        // Only the last position can produce the next token. Projecting the
+        // rest onto a 32k vocabulary is the most expensive way there is to
+        // throw work away, and the search feeds whole prefixes.
+        let last = hidden.narrow(1, hidden.dim(1)? - 1, 1)?;
         Ok(self
             .lm_head
-            .forward(&hidden)?
+            .forward(&last)?
             .broadcast_add(&self.final_logits_bias)?)
     }
 
@@ -408,6 +580,37 @@ impl Engine {
         let tokens = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
         Ok(self.model.encoder().forward(&tokens, 0)?)
     }
+}
+
+/// The `wanted` best continuations of `live`, best first.
+///
+/// `logprobs` is one row of `vocabulary` log probabilities per hypothesis, and
+/// a continuation is scored by adding one of them to the hypothesis it extends.
+/// The result is `(score, hypothesis, token)`.
+fn best(
+    logprobs: &[f32],
+    vocabulary: usize,
+    live: &[Hypothesis],
+    wanted: usize,
+) -> Vec<(f64, usize, u32)> {
+    let mut ranked: Vec<(f64, usize, u32)> = Vec::with_capacity(logprobs.len());
+    for (beam, hypothesis) in live.iter().enumerate() {
+        for (token, logprob) in logprobs[beam * vocabulary..(beam + 1) * vocabulary]
+            .iter()
+            .enumerate()
+        {
+            ranked.push((hypothesis.score + f64::from(*logprob), beam, token as u32));
+        }
+    }
+
+    let wanted = wanted.min(ranked.len());
+    if wanted == 0 {
+        return Vec::new();
+    }
+    ranked.select_nth_unstable_by(wanted - 1, |left, right| right.0.total_cmp(&left.0));
+    ranked.truncate(wanted);
+    ranked.sort_unstable_by(|left, right| right.0.total_cmp(&left.0));
+    ranked
 }
 
 /// The weights of the pack: safetensors when the pack was converted, the

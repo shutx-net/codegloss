@@ -20,8 +20,7 @@ public User findUser(String id) {
 
 開発初期です。Zed 拡張と LSP サーバの骨組みができ、Rust のコメントを Tree-sitter で
 抜き出して、ホバーと Code Lens（コメント行の上に出る独立した行）に返すところまで
-動きます。**翻訳も実際に動きます**（candle + FuguMT。CPU で 1 段落あたり
-0.2 秒ほど）。
+動きます。**翻訳も実際に動きます**（candle + FuguMT。CPU で 1 文あたり 0.7 秒ほど）。
 
 ただし**モデルの自動取得はまだありません。**モデルパックを自分で作って
 `--model-pack` で渡す必要があり、渡さなければ英語のまま表示されます（サーバは
@@ -34,6 +33,8 @@ python3 tools/convert-fugumt/convert.py ~/codegloss-model
 cargo build --release -p codegloss-lsp --features candle
 ./target/release/codegloss-lsp --model-pack ~/codegloss-model
 ```
+
+訳の速さより正しさを優先して、既定ではビームサーチ（幅 4）を使います。貪欲デコードは文を途中で打ち切ることがあり、**訳文は日本語として自然なままなので読者が気づけません**。速さが要るときは `--beams 1` で貪欲法に戻せます（1 文あたり 0.3 秒ほど）。実測値は下記のドキュメントに。
 
 翻訳エンジンは差し替え可能な形（`trait Translator`）のままです。
 

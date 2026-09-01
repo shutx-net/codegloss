@@ -113,6 +113,22 @@ pub struct Gloss {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct GlossKey(pub [u8; 32]);
 
+/// Version of the pre- and post-processing a gloss was produced with.
+///
+/// Hashed into every [`GlossKey`] beside the model version. What is cached is
+/// the finished gloss, so a change to how a comment is cut into units, masked
+/// or rebuilt changes the answer without the engine changing at all - and a
+/// cache directory outlives a release. Without this, an upgrade would keep
+/// serving what the old code wrote, for as long as the entry survives.
+///
+/// **Bump it whenever `preserve`, `sentence` or `docblock` changes what comes
+/// out of the pipeline.** The stability test in this module fails when the key
+/// encoding moves, so a bump is a deliberate act rather than a side effect.
+///
+/// - `1` - as P6 shipped: one segment per unit.
+/// - `2` - one segment per sentence.
+pub const PIPELINE_VERSION: &str = "2";
+
 impl GlossKey {
     /// Separator between the hashed fields. NUL cannot appear in a language tag
     /// or a model version, which is what keeps the encoding unambiguous.
@@ -120,7 +136,7 @@ impl GlossKey {
 
     pub fn new(model_version: &str, src_lang: &str, tgt_lang: &str, text: &str) -> Self {
         let mut hasher = blake3::Hasher::new();
-        for field in [model_version, src_lang, tgt_lang, text] {
+        for field in [PIPELINE_VERSION, model_version, src_lang, tgt_lang, text] {
             hasher.update(field.as_bytes());
             hasher.update(Self::SEPARATOR);
         }
@@ -140,6 +156,18 @@ impl GlossKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The key encoding is a storage format: entries written by an earlier
+    /// build have to keep hashing to the same name, and a change that moves
+    /// every key has to be a bump of [`PIPELINE_VERSION`] rather than an
+    /// accident. Both directions of that are this assertion.
+    #[test]
+    fn the_key_encoding_is_stable() {
+        assert_eq!(
+            GlossKey::new("fugumt-en-ja@1", "en", "ja", "Returns the user.").to_hex(),
+            "cf0ba6d78b58af57c024b600e0767307601d713cba9145d38a30a41adc00c81e"
+        );
+    }
 
     #[test]
     fn a_segment_carries_its_text_unchanged() {
