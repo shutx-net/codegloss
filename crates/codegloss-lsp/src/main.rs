@@ -43,7 +43,7 @@ async fn main() -> std::process::ExitCode {
 #[cfg(feature = "candle")]
 fn fetch_model() -> std::process::ExitCode {
     let settings = ServerConfig::from_environment();
-    let Some(cache) = config::cache_directory_for(&settings) else {
+    let Some(cache) = config::cache_root(&settings) else {
         tracing::error!("no cache directory could be found to download the model pack into");
         return std::process::ExitCode::FAILURE;
     };

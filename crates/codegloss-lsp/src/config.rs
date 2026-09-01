@@ -209,7 +209,7 @@ fn model_pack(config: &ServerConfig) -> Option<PathBuf> {
     if config.model_pack.is_some() {
         return None;
     }
-    crate::model_pack::installed(&cache_directory(config)?)
+    crate::model_pack::installed(&cache_root(config)?)
 }
 
 #[cfg(not(feature = "candle"))]
@@ -274,19 +274,21 @@ pub fn cache(config: &ServerConfig) -> GlossCache {
 /// else, because [`GlossStore`] prunes what it finds there.
 /// The directory `--fetch-model` downloads into, which is the same one the
 /// glosses go to: one place to point a backup at, and one place to delete.
-pub fn cache_directory_for(config: &ServerConfig) -> Option<PathBuf> {
-    cache_directory(config)
-}
-
-fn cache_directory(config: &ServerConfig) -> Option<PathBuf> {
+pub fn cache_root(config: &ServerConfig) -> Option<PathBuf> {
     if let Some(directory) = &config.cache_dir {
         return Some(directory.clone());
     }
-    Some(
-        platform_cache_directory()?
-            .join("codegloss")
-            .join("glosses"),
-    )
+    Some(platform_cache_directory()?.join("codegloss"))
+}
+
+/// Where finished glosses are kept.
+///
+/// A sibling of the model packs, not their parent: they are two things the
+/// server caches, and one is not part of the other. Getting this wrong put the
+/// weights inside `glosses/`, which reads as though a 120 MB pack were a
+/// translation.
+fn cache_directory(config: &ServerConfig) -> Option<PathBuf> {
+    Some(cache_root(config)?.join("glosses"))
 }
 
 /// The directory this platform keeps caches in.
@@ -475,7 +477,7 @@ mod tests {
     /// A configured directory wins over the platform's, and `--no-cache`
     /// produces a cache with nothing behind it.
     #[test]
-    fn the_configured_directory_is_the_one_used() {
+    fn the_configured_directory_is_the_root_of_both_caches() {
         let directory =
             std::env::temp_dir().join(format!("codegloss-config-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
@@ -484,15 +486,21 @@ mod tests {
             cache_dir: Some(directory.clone()),
             ..Default::default()
         };
-        assert_eq!(
-            cache_directory(&config).as_deref(),
-            Some(directory.as_path())
+
+        // Glosses and model packs are two things the server caches, and
+        // neither is part of the other. What `--cache-dir` names is the
+        // directory they both sit in.
+        assert_eq!(cache_root(&config).as_deref(), Some(directory.as_path()));
+        assert_eq!(cache_directory(&config), Some(directory.join("glosses")));
+        #[cfg(feature = "candle")]
+        assert!(
+            crate::model_pack::directory(&directory).starts_with(directory.join("model-packs"))
         );
 
         let opened = cache(&config);
         assert_eq!(
             opened.store().map(|store| store.directory().to_owned()),
-            Some(directory.clone())
+            Some(directory.join("glosses"))
         );
 
         let refused = ServerConfig {
