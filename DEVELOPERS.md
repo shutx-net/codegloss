@@ -242,7 +242,7 @@ cd editors/zed && cargo build --target wasm32-wasip2 --release
 |---|---|---|---|---|
 | ホバー | 不要 | — | — | 実装済み |
 | Code Lens | `"code_lens": "on"` | **ユーザ設定のみ** | **できない** | 実装済み |
-| Inlay Hint | `"inlay_hints": { "enabled": true }` | どちらでも可 | できる | 未実装（P9） |
+| Inlay Hint | `"inlay_hints": { "enabled": true }` | どちらでも可 | できる | 未実装 |
 
 - ユーザ設定 = `~/.config/zed/settings.json`（macOS も同じパス）
 - プロジェクト設定 = `<repo>/.zed/settings.json`
@@ -270,7 +270,7 @@ Zed の既定は `"code_lens": "off"` と `"inlay_hints": { "enabled": false }` 
 `deny_unknown_fields` も付いていないので、書いてもエラーにならず黙って無視される。
 言語ごとに Code Lens を切り替えることはできない。
 
-### Inlay Hint（P9 で実装予定）
+### Inlay Hint（未実装）
 
 ```jsonc
 {

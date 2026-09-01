@@ -45,7 +45,7 @@ impl Backend {
     ///
     /// The tests use it to count what reaches the engine and to tell a gloss
     /// apart from the source text, which the passthrough engine cannot do
-    /// because its output is its input. P7 will use it to pick candle when a
+    /// because its output is its input. It is what picks candle when a
     /// model pack is installed and to fall back when it is not.
     pub fn with_engine(client: Client, engine: Arc<dyn Translator>) -> Self {
         Self::with_cache(client, engine, Arc::new(GlossCache::default()))

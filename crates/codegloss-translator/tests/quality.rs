@@ -2,7 +2,7 @@
 //! still hold, and what does the Japanese look like. What it costs in time and
 //! memory is `examples/measure.rs`, which loads exactly one model.
 //!
-//! P6 fixed these fixtures against an engine that returns its input, precisely
+//! These fixtures were fixed against an engine that returns its input, precisely
 //! so that a failure here can be attributed. If a fixture that passes in
 //! `codegloss-core` fails here, the model is at fault; if it fails in both,
 //! this crate is not the place to look.
@@ -16,7 +16,7 @@ mod support;
 use codegloss_core::{CommentShape, GlossPlan, Segment, mask};
 use codegloss_translator::Translator;
 
-/// The three blocks P6 pinned, included from `codegloss-core` itself rather
+/// The three pinned blocks, included from `codegloss-core` itself rather
 /// than copied: a fixture that drifts from the one it is meant to mirror
 /// proves nothing.
 const JAVADOC: &str = include_str!("../../codegloss-core/tests/fixtures/javadoc.txt");
@@ -122,7 +122,7 @@ fn the_identifier_of_issue_1_survives_the_real_model() {
     );
 }
 
-/// The P6 fixtures, re-run against candle.
+/// The pre- and post-processing fixtures, re-run against candle.
 #[test]
 #[ignore = "needs a model pack"]
 fn the_p6_fixtures_keep_their_structure_and_their_protected_spans() {
@@ -139,7 +139,7 @@ fn the_p6_fixtures_keep_their_structure_and_their_protected_spans() {
         let gloss = gloss(&translator, raw);
         eprintln!("=== {name}\n{gloss}\n");
 
-        // The source line count is the structure P6 promises to rebuild.
+        // The source line count is the structure the pipeline promises to rebuild.
         let expected_lines = plan.source().lines().count();
         let actual_lines = gloss.lines().count();
         if expected_lines != actual_lines {
