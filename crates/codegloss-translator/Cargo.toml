@@ -44,6 +44,12 @@ candle = [
 name = "measure"
 required-features = ["candle"]
 
+# 訳文そのものを見るための診断ツール。measure が「いくらかかるか」を出すのに対し、
+# probe は「何と答えるか」を出す。実モデルが要るので candle の裏に置く。
+[[example]]
+name = "probe"
+required-features = ["candle"]
+
 # quality / placeholders は実モデル（モデルパック）が要るので #[ignore] 付き。
 # CODEGLOSS_MODEL_PACK が指すパックに対して `-- --ignored` で走らせる。
 [[test]]
