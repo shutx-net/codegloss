@@ -1,5 +1,7 @@
 # 開発環境のセットアップ
 
+*日本語 · [English](DEVELOPERS.en.md)*
+
 Nix flake と Dev Container の 2 通りを用意している。どちらを選んでも同じ Rust ツールチェーンになる。
 
 ## ツールチェーンの一元管理

@@ -81,4 +81,5 @@ Cargo ワークスペースがあり、`cargo build --workspace` / `cargo test -
 ## 規約
 
 - `docs/` 配下のドキュメントとコミットメッセージは日本語。コード内の識別子とコメントは英語。
+- **`README.md` と `DEVELOPERS.md` には英語版（`README.en.md` / `DEVELOPERS.en.md`）がある。片方だけ直さないこと。**日本語が原本で、英語はその訳。`docs/` 配下は日本語のみ（測定値と調査の記録で、2 つ持つと数字がずれる）。
 - 作業は `claude/<topic>` ブランチで行い、`main` へ直接プッシュしない。
