@@ -1,4 +1,4 @@
-name: リリース
+name: Release
 
 # タグを打つとバイナリが出る。タグを打つ前に、Actions タブの Run workflow から
 # 通しで回せる（**書庫を集めてチェックサムを作るところまで走り**、リリースだけ
@@ -27,7 +27,7 @@ env:
 jobs:
   # ビルドの前に置く。版がずれたタグで 5 構成 8 分を待たされるのは高い。
   version:
-    name: 版を照合する
+    name: versions
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -36,7 +36,7 @@ jobs:
       #
       # タグの形式もここで見る。上の絞り込みは「当てはまらないと何も
       # 起きない」ので、間違いに気づけない。通ってしまった形はここで落とす。
-      - name: 版とタグを照合する
+      - name: check the declared versions and the tag
         shell: bash
         run: |
           set -euo pipefail
@@ -163,7 +163,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: 集めて、タグならリリースする
+    name: collect, and release on a tag
     needs: build
     runs-on: ubuntu-latest
     # ここは常に走る。集める・数える・照合するまでを、タグを打つ前に

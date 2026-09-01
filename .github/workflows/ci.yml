@@ -44,7 +44,7 @@ jobs:
         run: cargo test --workspace
 
   wasm:
-    name: Zed 拡張の wasm ビルド
+    name: zed extension (wasm)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
