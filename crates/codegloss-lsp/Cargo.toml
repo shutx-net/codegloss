@@ -14,6 +14,8 @@ codegloss-core = { path = "../codegloss-core" }
 codegloss-parser = { path = "../codegloss-parser" }
 codegloss-translator = { path = "../codegloss-translator" }
 dashmap.workspace = true
+anyhow = { workspace = true, optional = true }
+ureq = { workspace = true, optional = true }
 tokio.workspace = true
 tower-lsp-server.workspace = true
 tracing.workspace = true
@@ -25,9 +27,10 @@ tracing-subscriber.workspace = true
 # かかわらず PassthroughTranslator にフォールバックする（src/config.rs）。
 [features]
 default = []
-candle = ["codegloss-translator/candle"]
+candle = ["codegloss-translator/candle", "dep:anyhow", "dep:ureq"]
 
 [dev-dependencies]
+sha2.workspace = true
 # テスト用の Translator を書くために anyhow が要る（trait Translator の戻り値）。
 anyhow.workspace = true
 futures.workspace = true

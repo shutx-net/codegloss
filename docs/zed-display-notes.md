@@ -240,7 +240,7 @@ $ python3 scripts/measure-code-lens.py --lines 3000 --rounds 20
 ```
 
 python3 が要る（標準ライブラリのみ。追加パッケージは不要）。Nix の dev shell には
-python3 を入れていないので、そこで動かすなら `nix shell nixpkgs#python3` を挟む。
+`flake.nix` が python3 を宣言しているので、そのまま動く。
 
 スクリプトはリリースビルドのサーバを子プロセスとして起動し、stdio 越しに
 `initialize` → `didOpen` → `codeLens` → `didChange` → `codeLens` を投げて
