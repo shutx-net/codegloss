@@ -139,18 +139,9 @@ jobs:
 
       # タグと Cargo.toml の版がずれたまま配ると、あとから何が入っている
       # のか分からなくなる。ここで止めるほうが、消して打ち直すより安い。
-      - name: check the tag against the workspace version
+      - name: check the tag against the declared versions
         if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        run: |
-          set -euo pipefail
-          version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
-            | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$version" != "$tag" ]; then
-            echo "タグ $GITHUB_REF_NAME に対して Cargo.toml は $version です" >&2
-            exit 1
-          fi
+        run: scripts/verify-versions.sh "$GITHUB_REF_NAME"
 
       # 下書きで作る。**リリースを作る step だけは、タグを打つまで一度も
       # 走らない**ので、5 つのアセットを目で見てから公開できるようにして

@@ -34,6 +34,12 @@ jobs:
       - name: verify toolchain
         run: scripts/verify-toolchain.sh
 
+      # リリースのタグは手で打つ。打つ値が正しいことは、打つ人ではなく
+      # これが保証する。ずれたまま配ると、拡張が存在しない版のバイナリを
+      # 探しに行く。
+      - name: verify versions
+        run: scripts/verify-versions.sh
+
       - name: fmt
         run: cargo fmt --all -- --check
 

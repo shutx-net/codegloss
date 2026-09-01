@@ -327,3 +327,35 @@ LSP の `kind` を持たないので `show_other_hints` の管轄になり、こ
   ```
 
 - Nix 環境に `rustup` は入っていない。`rustup` 前提のコマンドはそのままでは動かない。
+
+## リリース
+
+タグを打つとバイナリが出る（`.github/workflows/release.yml`）。5 構成
+（Linux x64 / arm64、macOS arm64 / x64、Windows x64）が作られ、下書きの
+リリースにアセットとして付く。
+
+**タグは手で打つ。**いつ配るか・どの版にするかは人が決めることで、機械に
+決めさせる理由がない。ただし**打つ値が正しいことは機械が保証する**
+（`scripts/verify-versions.sh`）。
+
+手順:
+
+1. 版を上げる。書いてあるのは 3 か所で、**すべて同じ値**にする。
+   - `Cargo.toml` の `[workspace.package]`
+   - `editors/zed/Cargo.toml`
+   - `editors/zed/extension.toml`
+2. `scripts/verify-versions.sh` が通ることを確かめる（CI でも見ている）。
+3. その変更を `main` へ入れる。
+4. タグを打つ。
+
+   ```sh
+   git tag v0.1.0 && git push origin v0.1.0
+   ```
+
+5. 下書きリリースができるので、5 つのアセットを見てから公開する。
+
+タグを打つ前に確かめたいときは、Actions タブの Run workflow から回す。
+**書庫を集めてチェックサムを作るところまで走り**、リリースだけ作らない。
+
+版がずれたタグは `verify-versions.sh` が公開の直前で止める。止まったら、
+タグを消して（`git push --delete origin v0.1.0`）版を直してから打ち直す。
