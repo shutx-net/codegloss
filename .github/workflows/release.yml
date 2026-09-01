@@ -1,8 +1,9 @@
 name: リリース
 
 # タグを打つとバイナリが出る。タグを打つ前に、Actions タブの Run workflow から
-# ビルドだけ回せる（リリースは作らない）。**新しい構成を足したらまずそちらで
-# 回すこと。**5 つのうち 1 つでも落ちるタグは、消して打ち直すしかない。
+# 通しで回せる（**書庫を集めてチェックサムを作るところまで走り**、リリースだけ
+# 作らない）。**新しい構成を足したらまずそちらで回すこと。**1 つでも落ちるタグは、
+# 消して打ち直すしかない。
 on:
   push:
     tags: ["v*"]
@@ -100,7 +101,8 @@ jobs:
           cat log
           grep -q "starting" log
 
-      - uses: actions/upload-artifact@v4
+      # v4 は Node 20 で、ランナーが Node 24 に載せ替えて警告を出す。
+      - uses: actions/upload-artifact@v7
         with:
           name: codegloss-lsp-${{ matrix.target }}
           path: |
@@ -109,29 +111,16 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: リリースを作る
+    name: 集めて、タグならリリースする
     needs: build
     runs-on: ubuntu-latest
-    # タグを打ったときだけ。Run workflow から回した回はビルドで終わる。
-    if: startsWith(github.ref, 'refs/tags/')
+    # ここは常に走る。集める・数える・照合するまでを、タグを打つ前に
+    # 一度でも通しておきたいから。実際に公開する step だけがタグ限定。
     steps:
       - uses: actions/checkout@v7
 
-      # タグと Cargo.toml の版がずれたまま配ると、あとから何が入っている
-      # のか分からなくなる。ここで止めるほうが、消して打ち直すより安い。
-      - name: check the tag against the workspace version
-        shell: bash
-        run: |
-          set -euo pipefail
-          version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
-            | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$version" != "$tag" ]; then
-            echo "タグ $GITHUB_REF_NAME に対して Cargo.toml は $version です" >&2
-            exit 1
-          fi
-
-      - uses: actions/download-artifact@v4
+      # v4 は Node 20。upload 側と揃えて Node 24 のものにする。
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -148,10 +137,26 @@ jobs:
           test -s SHA256SUMS
           cat SHA256SUMS
 
-      # 下書きで作る。**このワークフローは一度も通ったことがない**ので、
-      # 5 つのアセットを目で見てから公開できるようにしておく。何度か通って
-      # 中身が信用できるようになったら --draft を外してよい。
+      # タグと Cargo.toml の版がずれたまま配ると、あとから何が入っている
+      # のか分からなくなる。ここで止めるほうが、消して打ち直すより安い。
+      - name: check the tag against the workspace version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
+            | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "タグ $GITHUB_REF_NAME に対して Cargo.toml は $version です" >&2
+            exit 1
+          fi
+
+      # 下書きで作る。**リリースを作る step だけは、タグを打つまで一度も
+      # 走らない**ので、5 つのアセットを目で見てから公開できるようにして
+      # おく。何度か通って中身が信用できるようになったら --draft を外してよい。
       - name: create the release
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
