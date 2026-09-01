@@ -6,7 +6,10 @@ name: リリース
 # 消して打ち直すしかない。
 on:
   push:
-    tags: ["v*"]
+    # `+` は直前の文字の 1 回以上の繰り返し、`.` はそのままの文字。
+    # `v0.1` や `v1.0.0-rc1` はここで弾かれ、何も起きない。何も起きないのは
+    # 分かりにくいので、通ってしまった形は verify-versions.sh が落とす。
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
 
 # リリースの作成とアセットのアップロードに要る。ビルドだけの回でも同じ
@@ -22,8 +25,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ビルドの前に置く。版がずれたタグで 5 構成 8 分を待たされるのは高い。
+  version:
+    name: 版を照合する
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: verify versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            scripts/verify-versions.sh "$GITHUB_REF_NAME"
+          else
+            scripts/verify-versions.sh
+          fi
+
   build:
     name: ${{ matrix.target }}
+    needs: version
     runs-on: ${{ matrix.runner }}
     strategy:
       # 1 つが落ちても残りの結果は見たい。どれが通ってどれが落ちるかが
@@ -139,10 +159,6 @@ jobs:
 
       # タグと Cargo.toml の版がずれたまま配ると、あとから何が入っている
       # のか分からなくなる。ここで止めるほうが、消して打ち直すより安い。
-      - name: check the tag against the declared versions
-        if: startsWith(github.ref, 'refs/tags/')
-        run: scripts/verify-versions.sh "$GITHUB_REF_NAME"
-
       # 下書きで作る。**リリースを作る step だけは、タグを打つまで一度も
       # 走らない**ので、5 つのアセットを目で見てから公開できるようにして
       # おく。何度か通って中身が信用できるようになったら --draft を外してよい。

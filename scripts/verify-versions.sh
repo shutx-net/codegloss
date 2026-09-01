@@ -41,7 +41,18 @@ extension="$(sed -n '1,/^\[/p' editors/zed/extension.toml | sed -n 's/^version[[
   fail "editors/zed/extension.toml は $extension ですが、ワークスペースは $workspace です"
 
 if [ $# -gt 0 ]; then
+  # 形式もここで見る。ワークフローのタグ絞り込みは「当てはまらないと何も
+  # 起きない」ので、通ってしまった形を落とすのはこちら側の仕事になる。
+  #
+  # case のパターンに繰り返しは書けない（* は何でも拾ってしまい、
+  # v1.0.0-rc1 のような後ろに付いた形を通してしまう）ので、3 つに分けて見る。
+  bad_tag() { fail "タグ $1 の形式が v<major>.<minor>.<patch> ではありません"; }
+  case "$1" in v*.*.*) ;; *) bad_tag "$1" ;; esac
   tag="${1#v}"
+  # 数字と区切り以外が混ざっていないか。
+  case "$tag" in *[!0-9.]*) bad_tag "$1" ;; esac
+  # 区切りがちょうど 2 つで、どの成分も空でないか。
+  case "$tag" in *.*.*.* | .* | *. | *..*) bad_tag "$1" ;; esac
   [ "$tag" = "$workspace" ] ||
     fail "タグ $1 に対して、ワークスペースの版は $workspace です"
   printf 'OK: 版は %s（タグ・ワークスペース・拡張のすべて）\n' "$workspace"
