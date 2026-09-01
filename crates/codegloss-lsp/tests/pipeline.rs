@@ -14,9 +14,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use codegloss_core::Segment;
+use codegloss_core::{GlossCache, Segment};
 use codegloss_lsp::Backend;
 use codegloss_lsp::code_lens::PENDING_TITLE;
+use codegloss_lsp::translation::{EngineSwitch, engine_channel};
 use codegloss_translator::Translator;
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -44,15 +45,28 @@ struct TestEngine {
     calls: AtomicUsize,
     permits: Mutex<mpsc::Receiver<()>>,
     release: Mutex<mpsc::Sender<()>>,
+    /// What `model_version` answers. It is part of every cache key, so two
+    /// engines that disagree here cannot read each other's glosses - which is
+    /// what the swap test turns into an observation.
+    version: String,
+    /// The prefix its glosses carry, so that an answer can be traced back to
+    /// the engine that produced it.
+    tag: String,
 }
 
 impl TestEngine {
     fn new() -> Arc<Self> {
+        Self::named("test-engine-1", "ja")
+    }
+
+    fn named(version: &str, tag: &str) -> Arc<Self> {
         let (release, permits) = mpsc::channel();
         Arc::new(Self {
             calls: AtomicUsize::new(0),
             permits: Mutex::new(permits),
             release: Mutex::new(release),
+            version: version.to_owned(),
+            tag: tag.to_owned(),
         })
     }
 
@@ -85,12 +99,12 @@ impl Translator for TestEngine {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(segments
             .iter()
-            .map(|segment| format!("[ja] {}", segment.text()))
+            .map(|segment| format!("[{}] {}", self.tag, segment.text()))
             .collect())
     }
 
     fn model_version(&self) -> &str {
-        "test-engine-1"
+        &self.version
     }
 }
 
@@ -106,7 +120,25 @@ fn server(engine: Arc<TestEngine>) -> (LspService<Backend>, SeenRequests) {
     let (service, socket) = LspService::new(move |client| {
         Backend::with_engine(client, Arc::clone(&engine) as Arc<dyn Translator>)
     });
+    let seen = answer_the_server(socket);
+    (service, seen)
+}
 
+/// The same, on an engine the test can replace while the server is running.
+///
+/// The switch comes back instead of being dropped, which is the whole
+/// difference from [`server`]: a server that may still be given another engine
+/// keeps its worker watching for one.
+fn swappable_server(engine: Arc<TestEngine>) -> (LspService<Backend>, SeenRequests, EngineSwitch) {
+    let (switch, engine) = engine_channel(engine as Arc<dyn Translator>);
+    let (service, socket) = LspService::new(move |client| {
+        Backend::with_cache(client, engine.clone(), Arc::new(GlossCache::default()))
+    });
+    let seen = answer_the_server(socket);
+    (service, seen, switch)
+}
+
+fn answer_the_server(socket: tower_lsp_server::ClientSocket) -> SeenRequests {
     let seen: SeenRequests = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&seen);
     let (mut requests, mut responses) = socket.split();
@@ -123,7 +155,7 @@ fn server(engine: Arc<TestEngine>) -> (LspService<Backend>, SeenRequests) {
         }
     });
 
-    (service, seen)
+    seen
 }
 
 async fn call(service: &mut LspService<Backend>, request: Request) -> Option<Value> {
@@ -239,6 +271,18 @@ async fn next_batch(batches: &mut watch::Receiver<u64>) {
         .await
         .expect("the pipeline finished a batch")
         .expect("the pipeline is still running");
+}
+
+/// Waits for something the worker does off to the side, with no counter to
+/// watch.
+async fn wait_until(what: &str, ready: impl Fn() -> bool) {
+    timeout(SETTLE_TIMEOUT, async {
+        while !ready() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what}"));
 }
 
 /// The refresh requests the server sent, in order. Other server-to-client
@@ -455,4 +499,62 @@ async fn a_file_without_comments_queues_nothing() {
     assert_eq!(*batches.borrow(), 0);
     assert_eq!(engine.calls(), 0);
     assert!(refresh_requests(&seen).is_empty());
+}
+
+/// Replacing the engine puts every gloss the old one made out of reach, and the
+/// client is told to come back for the new ones.
+///
+/// This is a server that started in English, downloaded a model pack and swapped
+/// candle in a minute later. Nothing re-translates by itself: the glosses of the
+/// engine that was replaced are keyed under its model version and simply stop
+/// being found, and the refresh is what brings the client back to ask.
+#[tokio::test(flavor = "current_thread")]
+async fn replacing_the_engine_makes_the_client_come_back_for_new_glosses() {
+    let english = TestEngine::named("test-engine-1", "en");
+    let (mut service, seen, switch) = swappable_server(Arc::clone(&english));
+    let mut batches = service.inner().glosses().batches_completed();
+
+    initialize(&mut service, true).await;
+    did_open(&mut service, DOCUMENT_TEXT).await;
+    english.release_one_batch();
+    next_batch(&mut batches).await;
+
+    assert_eq!(
+        hover_value(&mut service, 0, 5).await,
+        json!("[en] Return the cached user.\n\n> Return the cached user.")
+    );
+    let before = refresh_requests(&seen).len();
+
+    // What the downloader does once the model pack is in place.
+    let japanese = TestEngine::named("test-engine-2", "ja");
+    switch
+        .send(Arc::clone(&japanese) as Arc<dyn Translator>)
+        .expect("the server is still running");
+
+    // The swap on its own asks the client to refetch. Nothing has been
+    // translated at this point: there is no batch, and the new engine has not
+    // been called.
+    wait_until("the swap asked the client to refetch", || {
+        refresh_requests(&seen).len() > before
+    })
+    .await;
+    assert_eq!(japanese.calls(), 0);
+
+    // The client comes back, and the glosses it had are not there any more.
+    assert_eq!(
+        code_lens_titles(&mut service).await,
+        vec![(0, PENDING_TITLE.to_owned()), (2, PENDING_TITLE.to_owned())]
+    );
+
+    // That request queued them again, this time for the new engine.
+    japanese.release_one_batch();
+    next_batch(&mut batches).await;
+    assert_eq!(
+        hover_value(&mut service, 0, 5).await,
+        json!("[ja] Return the cached user.\n\n> Return the cached user.")
+    );
+
+    // The engine that was replaced ran for the first batch and never again.
+    assert_eq!(english.calls(), 1);
+    assert_eq!(japanese.calls(), 1);
 }

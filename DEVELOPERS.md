@@ -120,6 +120,19 @@ CI が重くなるため）。モデル無しでもサーバは動き、コメ�
    ログに理由を出して Passthrough にフォールバックする。**モデルが理由で
    サーバが落ちることはない。**
 
+   自分で変換しない場合、パックはサーバが起動後に裏で取ってくる（`--no-download`
+   で止まる）。起動を待たせずに取ってきたいときは `--fetch-model`。サーバは
+   起動せず、落としたら終了する。
+
+   ```sh
+   ./target/release/codegloss-lsp --fetch-model
+   ```
+
+   取得中もサーバは普通に応答し、英語のまま表示される。届いた時点でエンジンだけ
+   差し替わり、`workspace/*/refresh` でクライアントが訳を取りに戻る。**訳が
+   置き換わるまで数分あるのは仕様**で、`initialize` の裏で 120 MB を落として
+   editor から壊れて見えるよりましだと判断している。
+
 3. Zed から使うときは `.zed/settings.json` の `binary.arguments` に渡す
    （拡張はここをそのままサーバへ渡す）。
 
@@ -146,6 +159,7 @@ CI が重くなるため）。モデル無しでもサーバは動き、コメ�
    | `--precision f32\|f16` | `CODEGLOSS_MODEL_PRECISION` | `f32` | `f16` は常駐が 281 → 158 MiB に減り、1 セグメントが 6〜8% 遅くなる |
    | `--cache-dir <dir>` | `CODEGLOSS_CACHE_DIR` | `$XDG_CACHE_HOME/codegloss/glosses` | 訳を置く場所。**再起動しても訳し直さない** |
    | `--no-cache` | — | 無効 | 訳をディスクに書かない（メモリのみ） |
+   | `--no-download` | — | 無効 | モデルパックを自分で取りに行かない |
 
    数字の根拠は [docs/model-runtime-notes.md](docs/model-runtime-notes.md) の §6。
    キャッシュのディレクトリが作れない・書けないときは、ログを出してメモリのみで

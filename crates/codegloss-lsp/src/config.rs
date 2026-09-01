@@ -6,7 +6,7 @@
 //! with it, and a user who installed the extension before downloading the
 //! weights would see nothing at all and have nothing to read about why.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use codegloss_core::{DEFAULT_CAPACITY, GlossCache, GlossStore};
@@ -36,6 +36,12 @@ pub const CACHE_DIR_FLAG: &str = "--cache-dir";
 pub const CACHE_DIR_VARIABLE: &str = "CODEGLOSS_CACHE_DIR";
 /// Command-line flag turning the on-disk cache off entirely.
 pub const NO_CACHE_FLAG: &str = "--no-cache";
+
+/// Command-line flag that stops the server fetching the model pack by itself.
+///
+/// A flag rather than a value, like [`NO_CACHE_FLAG`]: what it turns off is
+/// 120 MB over someone's connection, and that is a yes-or-no.
+pub const NO_DOWNLOAD_FLAG: &str = "--no-download";
 
 /// How many glosses the directory keeps before the oldest are dropped.
 ///
@@ -72,6 +78,12 @@ pub struct ServerConfig {
     /// process. Translating is expensive enough that this is a real choice
     /// rather than a default, but a shared or read-only machine may want it.
     pub no_cache: bool,
+    /// Never fetch the model pack; run on whatever is already there.
+    ///
+    /// The download is 120 MB, and a metered connection or an offline machine
+    /// is a good enough reason not to want it. Without a pack the server shows
+    /// English, which is the same thing it does today.
+    pub no_download: bool,
 }
 
 impl ServerConfig {
@@ -122,6 +134,8 @@ impl ServerConfig {
                 // serving. Named here so that it is not warned about.
             } else if argument == NO_CACHE_FLAG {
                 config.no_cache = true;
+            } else if argument == NO_DOWNLOAD_FLAG {
+                config.no_download = true;
             } else {
                 tracing::warn!(argument, "ignoring an unknown argument");
             }
@@ -171,19 +185,29 @@ pub fn engine(config: &ServerConfig) -> Arc<dyn Translator> {
     let Some(pack) = config.model_pack.as_deref().or(downloaded.as_deref()) else {
         tracing::info!(
             "no model pack configured ({MODEL_PACK_FLAG} / {MODEL_PACK_VARIABLE}) and none \
-             downloaded (run with {}); comments will be shown in English",
+             downloaded; comments will be shown in English {}",
             fetch_hint()
         );
         return Arc::new(PassthroughTranslator);
     };
 
+    load(pack, config).unwrap_or_else(|| Arc::new(PassthroughTranslator))
+}
+
+/// The engine over `pack`, or `None` with the reason logged.
+///
+/// Split out of [`engine`] because the pack can also turn up later: the
+/// downloader has one to load and the same reasons to keep serving English if
+/// it cannot. Neither caller has an error to handle - there is nothing either
+/// could do with it that is better than English.
+pub fn load(pack: &Path, config: &ServerConfig) -> Option<Arc<dyn Translator>> {
     #[cfg(feature = "candle")]
     match codegloss_translator::CandleTranslator::load_with_beams(
         pack,
         precision(config),
         beams(config),
     ) {
-        Ok(translator) => return Arc::new(translator),
+        Ok(translator) => return Some(Arc::new(translator)),
         Err(error) => tracing::error!(
             pack = %pack.display(),
             "the model pack could not be loaded, falling back to English: {error:#}"
@@ -191,13 +215,16 @@ pub fn engine(config: &ServerConfig) -> Arc<dyn Translator> {
     }
 
     #[cfg(not(feature = "candle"))]
-    tracing::error!(
-        pack = %pack.display(),
-        "a model pack was configured but this binary was built without the \
-         `candle` feature, so it has no engine to load it into"
-    );
+    {
+        let _ = config;
+        tracing::error!(
+            pack = %pack.display(),
+            "a model pack is available but this binary was built without the \
+             `candle` feature, so it has no engine to load it into"
+        );
+    }
 
-    Arc::new(PassthroughTranslator)
+    None
 }
 
 /// The pack a previous `--fetch-model` left in the cache directory, if there
@@ -217,14 +244,18 @@ fn model_pack(_config: &ServerConfig) -> Option<PathBuf> {
     None
 }
 
+/// The rest of the sentence [`engine`] starts when it finds no pack: what, if
+/// anything, is going to change that.
 #[cfg(feature = "candle")]
-fn fetch_hint() -> &'static str {
-    crate::model_pack::FETCH_FLAG
+fn fetch_hint() -> String {
+    format!("until one has been fetched (turn that off with {NO_DOWNLOAD_FLAG})")
 }
 
 #[cfg(not(feature = "candle"))]
-fn fetch_hint() -> &'static str {
-    "a build with the `candle` feature"
+fn fetch_hint() -> String {
+    "for good: this binary was built without the `candle` feature, so it has no \
+     engine to fetch a pack for"
+        .to_owned()
 }
 
 /// The cache the server answers requests from.
@@ -472,6 +503,17 @@ mod tests {
             Some("/var/glosses".as_ref())
         );
         assert!(parse(&["--no-cache"]).no_cache);
+    }
+
+    /// The download is 120 MB, so it has to be refusable - and the flag has to
+    /// be understood by a build that has no engine to download for, or a server
+    /// started with it would warn about an argument it was handed on purpose.
+    #[test]
+    fn the_download_can_be_refused() {
+        assert!(!parse(&[]).no_download);
+        assert!(parse(&[NO_DOWNLOAD_FLAG]).no_download);
+        assert!(!parse(&[NO_DOWNLOAD_FLAG]).no_cache);
+        assert!(!parse(&["--no-cache"]).no_download);
     }
 
     /// A configured directory wins over the platform's, and `--no-cache`
