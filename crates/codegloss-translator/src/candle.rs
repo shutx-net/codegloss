@@ -14,7 +14,7 @@
 //! of a second. `codegloss-lsp` runs it on its background worker; nothing on
 //! the path of an LSP request may call it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -173,9 +173,29 @@ pub struct Manifest {
     pub license: String,
     /// Attribution text the licence requires to be kept.
     pub attribution: String,
+    /// Every file of the pack, by name, with what it should hash to.
+    ///
+    /// This is what makes a pack downloadable: the manifest is small enough to
+    /// fetch first, and everything else is checked against it. A pack built
+    /// before `tools/convert-fugumt` wrote this cannot be verified and is
+    /// rejected rather than trusted.
+    pub files: BTreeMap<String, PackFile>,
+}
+
+/// One file of a pack, as [`Manifest`] describes it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PackFile {
+    /// Lower-case hex, as `tools/convert-fugumt` writes it.
+    pub sha256: String,
+    pub bytes: u64,
 }
 
 impl Manifest {
+    /// Reads the manifest of the pack in `pack`.
+    pub fn read_from(pack: &Path) -> Result<Self> {
+        Self::read(pack)
+    }
+
     fn read(pack: &Path) -> Result<Self> {
         let path = pack.join(MANIFEST_FILE);
         let text = fs::read_to_string(&path).with_context(|| {
@@ -185,8 +205,71 @@ impl Manifest {
                 pack.display()
             )
         })?;
-        serde_json::from_str(&text).with_context(|| format!("{} is not valid", path.display()))
+        Self::parse(&text).with_context(|| format!("{} is not valid", path.display()))
     }
+
+    /// Reads a manifest that is not on disk yet - the one a download fetches
+    /// before it knows what else to fetch.
+    pub fn parse(text: &str) -> Result<Self> {
+        Ok(serde_json::from_str(text)?)
+    }
+
+    /// Checks that `directory` holds every file this manifest names, at the
+    /// length and digest it names them at.
+    ///
+    /// A pack is 120 MB fetched over a network into a cache directory that
+    /// outlives the process. Anything can go wrong there - a truncated
+    /// download, a full disk, a half-written file from a killed process - and
+    /// none of it is visible in the translations: bad weights produce fluent
+    /// nonsense rather than an error. So the pack is checked before it is
+    /// used, not after it disappoints.
+    pub fn verify(&self, directory: &Path) -> Result<()> {
+        if self.files.is_empty() {
+            bail!(
+                "the manifest lists no files, so nothing about this pack can be checked; \
+                 rebuild it with tools/convert-fugumt"
+            );
+        }
+        for (name, file) in &self.files {
+            let path = directory.join(name);
+            let found = fs::metadata(&path)
+                .with_context(|| format!("{} is missing from the pack", path.display()))?
+                .len();
+            if found != file.bytes {
+                bail!(
+                    "{} is {found} bytes, and the manifest says {}",
+                    path.display(),
+                    file.bytes
+                );
+            }
+            let digest = sha256(&path)?;
+            if !digest.eq_ignore_ascii_case(&file.sha256) {
+                bail!(
+                    "{} hashes to {digest}, and the manifest says {}",
+                    path.display(),
+                    file.sha256
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Lower-case hex SHA-256 of a file, read in chunks: a pack holds 120 MB and
+/// reading it into memory to hash it would double what loading it costs.
+fn sha256(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    let mut file =
+        fs::File::open(path).with_context(|| format!("{} is unreadable", path.display()))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .with_context(|| format!("{} could not be read to the end", path.display()))?;
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 /// FuguMT, loaded and ready to translate.
@@ -964,4 +1047,86 @@ fn forbidden_logits(
         }
     }
     Ok(Tensor::from_vec(mask, vocabulary, device)?.to_dtype(dtype)?)
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use std::fs;
+
+    use super::*;
+
+    const MANIFEST: &str = r#"{
+        "model_id": "staka/fugumt-en-ja",
+        "model_version": "fugumt-en-ja-test",
+        "license": "CC-BY-SA-4.0",
+        "attribution": "test",
+        "files": {
+            "NOTICE": {
+                "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "bytes": 0
+            }
+        }
+    }"#;
+
+    /// A directory of this test's own. The harness runs these in one process
+    /// and in parallel, so a name shared between them is a name they race on.
+    fn directory(test: &str) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("codegloss-pack-{}-{test}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("a temporary directory");
+        path
+    }
+
+    #[test]
+    fn a_pack_that_matches_its_manifest_verifies() {
+        let manifest = Manifest::parse(MANIFEST).expect("the manifest parses");
+        let directory = directory("matches");
+        fs::write(directory.join("NOTICE"), b"").expect("the file is written");
+
+        manifest
+            .verify(&directory)
+            .expect("an empty file hashes to the empty digest");
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// The failure a download has to be caught by: right name, wrong bytes.
+    #[test]
+    fn a_file_of_the_wrong_length_is_rejected() {
+        let manifest = Manifest::parse(MANIFEST).expect("the manifest parses");
+        let directory = directory("length");
+        fs::write(directory.join("NOTICE"), b"truncated").expect("the file is written");
+
+        let error = manifest
+            .verify(&directory)
+            .expect_err("the length is wrong");
+        assert!(format!("{error}").contains("bytes"), "{error}");
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_missing_file_is_rejected() {
+        let manifest = Manifest::parse(MANIFEST).expect("the manifest parses");
+        let directory = directory("missing");
+
+        let error = manifest
+            .verify(&directory)
+            .expect_err("the file is not there");
+        assert!(format!("{error}").contains("missing"), "{error}");
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// A pack built before the manifest carried digests cannot be checked, and
+    /// an unverifiable pack is refused rather than trusted.
+    #[test]
+    fn a_manifest_without_files_is_refused() {
+        let manifest = Manifest::parse(
+            r#"{"model_id":"x","model_version":"y","license":"z","attribution":"w","files":{}}"#,
+        )
+        .expect("the manifest parses");
+        let error = manifest
+            .verify(std::path::Path::new("."))
+            .expect_err("nothing can be checked");
+        assert!(format!("{error}").contains("no files"), "{error}");
+    }
 }

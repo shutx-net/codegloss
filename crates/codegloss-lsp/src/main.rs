@@ -8,8 +8,15 @@ use codegloss_lsp::{Backend, ServerConfig, config};
 use tower_lsp_server::{LspService, Server};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::process::ExitCode {
     init_tracing();
+
+    // Downloading is a thing a person does once, not a thing a language server
+    // does while an editor waits for `initialize`. See `model_pack.rs`.
+    #[cfg(feature = "candle")]
+    if std::env::args().any(|argument| argument == codegloss_lsp::model_pack::FETCH_FLAG) {
+        return fetch_model();
+    }
 
     // The engine is chosen once, before the first request: loading a model
     // takes long enough that doing it inside `initialize` would delay the
@@ -29,6 +36,27 @@ async fn main() {
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
         .serve(service)
         .await;
+    std::process::ExitCode::SUCCESS
+}
+
+/// Downloads the model pack and exits, instead of serving.
+#[cfg(feature = "candle")]
+fn fetch_model() -> std::process::ExitCode {
+    let settings = ServerConfig::from_environment();
+    let Some(cache) = config::cache_directory_for(&settings) else {
+        tracing::error!("no cache directory could be found to download the model pack into");
+        return std::process::ExitCode::FAILURE;
+    };
+    match codegloss_lsp::model_pack::fetch(&cache, &codegloss_lsp::model_pack::base_url()) {
+        Ok(pack) => {
+            tracing::info!(pack = %pack.display(), "done");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            tracing::error!("the model pack could not be downloaded: {error:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
 /// Sends every log line to stderr.

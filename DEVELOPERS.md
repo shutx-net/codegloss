@@ -136,7 +136,8 @@ CI が重くなるため）。モデル無しでもサーバは動き、コメ�
    }
    ```
 
-   **この 3 の設定は実機の Zed では未確認**（サーバ側は stdio 越しに確認済み）。
+   この設定が実機の Zed でサーバに届くことは確認済み（[Issue #18](https://github.com/shutx-net/codegloss/issues/18)）。
+   `--beams` / `--precision` / `--cache-dir` も同じ形で渡せる。
 
 4. 重みの精度と訳のキャッシュは引数で変えられる。
 
