@@ -117,6 +117,9 @@ impl ServerConfig {
                     Some(value) => config.cache_dir = Some(PathBuf::from(value)),
                     None => tracing::warn!("{CACHE_DIR_FLAG} was given without a directory"),
                 }
+            } else if cfg!(feature = "candle") && argument == "--fetch-model" {
+                // Handled in `main`, which downloads and exits instead of
+                // serving. Named here so that it is not warned about.
             } else if argument == NO_CACHE_FLAG {
                 config.no_cache = true;
             } else {
@@ -164,10 +167,12 @@ impl ServerConfig {
 /// logs what happened and falls back. Nothing here can take the server down,
 /// because taking the server down is worse than showing English.
 pub fn engine(config: &ServerConfig) -> Arc<dyn Translator> {
-    let Some(pack) = config.model_pack.as_deref() else {
+    let downloaded = model_pack(config);
+    let Some(pack) = config.model_pack.as_deref().or(downloaded.as_deref()) else {
         tracing::info!(
-            "no model pack configured ({MODEL_PACK_FLAG} / {MODEL_PACK_VARIABLE}); \
-             comments will be shown in English"
+            "no model pack configured ({MODEL_PACK_FLAG} / {MODEL_PACK_VARIABLE}) and none \
+             downloaded (run with {}); comments will be shown in English",
+            fetch_hint()
         );
         return Arc::new(PassthroughTranslator);
     };
@@ -193,6 +198,33 @@ pub fn engine(config: &ServerConfig) -> Arc<dyn Translator> {
     );
 
     Arc::new(PassthroughTranslator)
+}
+
+/// The pack a previous `--fetch-model` left in the cache directory, if there
+/// is one and it still matches its manifest.
+#[cfg(feature = "candle")]
+fn model_pack(config: &ServerConfig) -> Option<PathBuf> {
+    // No point looking when the caller named one: an explicit path wins, and
+    // checking a 120 MB pack nobody is going to use is not free.
+    if config.model_pack.is_some() {
+        return None;
+    }
+    crate::model_pack::installed(&cache_directory(config)?)
+}
+
+#[cfg(not(feature = "candle"))]
+fn model_pack(_config: &ServerConfig) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(feature = "candle")]
+fn fetch_hint() -> &'static str {
+    crate::model_pack::FETCH_FLAG
+}
+
+#[cfg(not(feature = "candle"))]
+fn fetch_hint() -> &'static str {
+    "a build with the `candle` feature"
 }
 
 /// The cache the server answers requests from.
@@ -240,6 +272,12 @@ pub fn cache(config: &ServerConfig) -> GlossCache {
 ///
 /// The subdirectory is named after the crate rather than shared with anything
 /// else, because [`GlossStore`] prunes what it finds there.
+/// The directory `--fetch-model` downloads into, which is the same one the
+/// glosses go to: one place to point a backup at, and one place to delete.
+pub fn cache_directory_for(config: &ServerConfig) -> Option<PathBuf> {
+    cache_directory(config)
+}
+
 fn cache_directory(config: &ServerConfig) -> Option<PathBuf> {
     if let Some(directory) = &config.cache_dir {
         return Some(directory.clone());

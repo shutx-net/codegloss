@@ -22,17 +22,20 @@ public User findUser(String id) {
 抜き出して、ホバーと Code Lens（コメント行の上に出る独立した行）に返すところまで
 動きます。**翻訳も実際に動きます**（candle + FuguMT。CPU で 1 文あたり 0.15 秒ほど。ファイルを開いたときのようにまとめて訳す場合）。
 
-ただし**モデルの自動取得はまだありません。**モデルパックを自分で作って
-`--model-pack` で渡す必要があり、渡さなければ英語のまま表示されます（サーバは
-落ちません）。作り方は
-[tools/convert-fugumt/README.md](tools/convert-fugumt/README.md) を参照してください。
+モデルパックは 1 回取ってくれば、あとは引数なしで見つかります。**まだ配布先の
+リリースを作っていない**ので、いまは自分で変換する必要があります（作り方は
+[tools/convert-fugumt/README.md](tools/convert-fugumt/README.md)、配る側の手順は
+[docs/model-pack.md](docs/model-pack.md)）。パックが無ければ英語のまま表示され、
+サーバは落ちません。
 
 ```sh
-pip install -r tools/convert-fugumt/requirements.txt
-python3 tools/convert-fugumt/convert.py ~/codegloss-model
 cargo build --release -p codegloss-lsp --features candle
-./target/release/codegloss-lsp --model-pack ~/codegloss-model
+./target/release/codegloss-lsp --fetch-model   # 1 回だけ。以後は引数不要
+./target/release/codegloss-lsp
 ```
+
+自分で変換したパックを使うなら `--model-pack <dir>` で渡します（明示したほうが
+優先されます）。
 
 訳の速さより正しさを優先して、既定ではビームサーチ（幅 4）を使います。貪欲デコードは文を途中で打ち切ることがあり、**訳文は日本語として自然なままなので読者が気づけません**。貪欲法（`--beams 1`）に対する上乗せは 1.07 倍しかないので、速さのために質を落とす理由はほぼありません。実測値は下記のドキュメントに。
 
