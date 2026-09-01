@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use codegloss_translator::{CandleTranslator, Precision, Translator};
+use codegloss_translator::{CandleTranslator, DEFAULT_BEAMS, Precision, Translator};
 
 /// Environment variable naming the model pack to test against.
 pub const MODEL_PACK_VARIABLE: &str = "CODEGLOSS_MODEL_PACK";
@@ -23,9 +23,14 @@ pub const PRECISION_VARIABLE: &str = "CODEGLOSS_MODEL_PRECISION";
 /// Loads the pack named by the environment, and says how to get one when the
 /// variable is unset rather than failing with a path error.
 pub fn translator() -> CandleTranslator {
+    translator_with_beams(DEFAULT_BEAMS)
+}
+
+/// The same, at a chosen search width, for the tests that compare two.
+pub fn translator_with_beams(beams: usize) -> CandleTranslator {
     let pack = pack();
     let started = Instant::now();
-    let translator = CandleTranslator::load_with(&pack, precision())
+    let translator = CandleTranslator::load_with_beams(&pack, precision(), beams)
         .unwrap_or_else(|error| panic!("{} is not a usable model pack: {error:?}", pack.display()));
     eprintln!(
         "loaded {} in {:?}",

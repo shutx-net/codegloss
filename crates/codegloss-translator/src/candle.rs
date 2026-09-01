@@ -19,11 +19,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::marian;
 use anyhow::{Context, Result, anyhow, bail};
 use candle_core::{DType, Device, Shape, Tensor};
 use candle_nn::var_builder::SimpleBackend;
 use candle_nn::{Init, Linear, Module, VarBuilder};
-use candle_transformers::models::marian;
 use codegloss_core::Segment;
 use serde::Deserialize;
 use tokenizers::Tokenizer;
@@ -57,7 +57,8 @@ pub const TARGET_TOKENIZER_FILE: &str = "tokenizer-target.json";
 ///
 /// - `candle-marian-1` - greedy only.
 /// - `candle-marian-2` - beam search, length-normalised.
-pub const ENGINE_VERSION: &str = "candle-marian-2";
+/// - `candle-marian-3` - a finished hypothesis wins over a running one.
+pub const ENGINE_VERSION: &str = "candle-marian-3";
 
 /// The vocabulary entry a tokenizer uses for text it cannot represent.
 const UNKNOWN_TOKEN: &str = "<unk>";
@@ -139,6 +140,15 @@ const MAX_NEW_TOKENS: usize = 512;
 /// search of width one: there is no reason to pay for the bookkeeping.
 pub const DEFAULT_BEAMS: usize = 4;
 
+/// Rows of the decoder batch to aim for.
+///
+/// One segment occupies [`beams`](Engine::beams) rows, so this is a budget in
+/// segments only after dividing. Widening the batch stops paying once the
+/// matrix multiplications are large enough to keep the cores busy, and starts
+/// costing once a group spans segments of unlike length and pads to the
+/// longest - the measured curve is in `docs/model-runtime-notes.md`.
+const MAX_BATCH_ROWS: usize = 32;
+
 /// Exponent the score of a finished hypothesis is divided by.
 ///
 /// A hypothesis is scored by summing log probabilities, and every term is
@@ -215,13 +225,14 @@ struct Engine {
     dtype: DType,
     /// Output projection, and the bias Marian adds to it.
     ///
-    /// `marian::MTModel::decode` owns a pair of these already, but it also
-    /// builds its causal mask in F32 and adds it to the attention weights -
-    /// which is a dtype mismatch the moment the model is not F32, and there is
-    /// no way to hand it a mask. Driving `MTModel::decoder` directly is what
-    /// makes [`Precision`] a choice at all. It costs nothing: `VarBuilder`
-    /// hands out tensors that share their storage, so this is the same
-    /// embedding matrix the model is using, not a second copy.
+    /// Upstream's `MTModel::decode` owned a pair of these, but it also built
+    /// its causal mask in F32 and added it to the attention weights - a dtype
+    /// mismatch the moment the model is not F32, with no way to hand it a mask
+    /// instead. Driving `MTModel::decoder` directly is what makes
+    /// [`Precision`] a choice at all, and why the fork in `marian.rs` drops
+    /// `decode` altogether. It costs nothing: `VarBuilder` hands out tensors
+    /// that share their storage, so this is the same embedding matrix the
+    /// model is using, not a second copy.
     lm_head: Linear,
     final_logits_bias: Tensor,
     /// Added to the logits before picking a token: `0` everywhere and `-inf`
@@ -235,6 +246,8 @@ struct Engine {
 /// of the tokens that make it up.
 #[derive(Debug, Clone)]
 struct Hypothesis {
+    /// Which segment of the batch this is a translation of.
+    segment: usize,
     /// The decoder start token, then what the search has chosen.
     tokens: Vec<u32>,
     score: f64,
@@ -363,10 +376,7 @@ impl Translator for CandleTranslator {
             .lock()
             .map_err(|_| anyhow!("the translation engine was poisoned by an earlier panic"))?;
 
-        segments
-            .iter()
-            .map(|segment| engine.translate(segment.text()))
-            .collect()
+        engine.translate(segments)
     }
 
     fn model_version(&self) -> &str {
@@ -375,192 +385,50 @@ impl Translator for CandleTranslator {
 }
 
 impl Engine {
-    /// Translates one segment, greedily.
+    /// Translates a whole batch.
     ///
-    /// One segment at a time rather than a padded batch: batching Marian means
-    /// padding the encoder input and masking the pad positions, and candle's
-    /// `marian` has no attention mask on the encoder. Getting that wrong is
-    /// silent - the translation is merely worse - so v0.1 does not do it.
-    fn translate(&mut self, text: &str) -> Result<String> {
-        // Nothing to say, and an empty encoder input makes the model produce a
-        // sentence out of nowhere.
-        if text.trim().is_empty() {
-            return Ok(text.to_owned());
+    /// The segments are regrouped before they reach the model: sorted by
+    /// length, cut into groups that fill the decoder batch, and each group
+    /// padded to its longest member. Nothing about the result depends on the
+    /// grouping - a padded position is masked out of every attention, so a
+    /// segment is translated the same whoever it travels with - but everything
+    /// about the speed does.
+    fn translate(&mut self, segments: &[Segment]) -> Result<Vec<String>> {
+        let mut translations = vec![String::new(); segments.len()];
+        let mut jobs = Vec::with_capacity(segments.len());
+
+        for (index, segment) in segments.iter().enumerate() {
+            let text = segment.text();
+            // Nothing to say, and an empty encoder input makes the model
+            // produce a sentence out of nowhere.
+            if text.trim().is_empty() {
+                translations[index] = text.to_owned();
+                continue;
+            }
+            jobs.push(Job {
+                index,
+                source: self.tokenize(text)?,
+            });
         }
 
-        // The KV cache holds the previous sentence. Not resetting it is the
-        // classic way to have translation number two contaminated by number
-        // one.
-        self.model.reset_kv_cache();
+        // Longest first. A group pads to its longest member, so grouping
+        // like with like is what keeps the padding from being most of the
+        // batch.
+        jobs.sort_by_key(|job| std::cmp::Reverse(job.source.len()));
 
-        let encoder_xs = self.encode(text)?;
-        let tokens = if self.beams > 1 {
-            self.search(&encoder_xs)?
-        } else {
-            self.greedy(&encoder_xs)?
-        };
-
-        // The start token is the decoder's, not the sentence's.
-        self.target
-            .decode(&tokens[1..], true)
-            .map_err(|error| anyhow!("the translation could not be decoded: {error}"))
-    }
-
-    /// Takes the most likely token at every step, and never reconsiders.
-    ///
-    /// Cheap, and wrong in one specific way: the end-of-sentence token is
-    /// often the single most likely next token part way through a sentence,
-    /// and taking it there truncates the translation with no sign that
-    /// anything is missing. [`Engine::search`] is what that costs, and what it
-    /// buys.
-    fn greedy(&mut self, encoder_xs: &Tensor) -> Result<Vec<u32>> {
-        let mut tokens = vec![self.config.decoder_start_token_id];
-
-        for index in 0..MAX_NEW_TOKENS {
-            // After the first pass the KV cache holds everything before the
-            // last token, so only that token is fed back in.
-            let context_size = if index >= 1 { 1 } else { tokens.len() };
-            let start_pos = tokens.len().saturating_sub(context_size);
-            let input_ids = Tensor::new(&tokens[start_pos..], &self.device)?.unsqueeze(0)?;
-
-            let logits = self.decode(&input_ids, encoder_xs, start_pos)?;
-            let logits = logits.squeeze(1)?.squeeze(0)?;
-            let logits = logits.broadcast_add(&self.forbidden)?;
-
-            // `argmax`, not a sampler. Nothing about a translation wants
-            // randomness, and a deterministic engine is what lets the cache and
-            // the fixtures mean anything.
-            let token = logits.argmax(0)?.to_scalar::<u32>()?;
-            if self.is_end(token) {
-                break;
+        // Every segment of a group occupies `beams` rows of the decoder batch.
+        let per_group = (MAX_BATCH_ROWS / self.beams).max(1);
+        for group in jobs.chunks(per_group) {
+            for (job, translation) in group.iter().zip(self.translate_group(group)?) {
+                translations[job.index] = translation;
             }
-            tokens.push(token);
         }
 
-        Ok(tokens)
+        Ok(translations)
     }
 
-    /// Keeps [`beams`](Engine::beams) hypotheses alive and returns the best of
-    /// the finished ones.
-    ///
-    /// Two deliberate departures from the upstream generation config:
-    ///
-    /// - the width is [`DEFAULT_BEAMS`] rather than its 12, because the cost is
-    ///   linear in the width and the benefit is not;
-    /// - the search stops as soon as `beams` hypotheses have finished
-    ///   (`early_stopping=True`), rather than proving that nothing still
-    ///   running can beat them. Proving it needs a bound on a score whose
-    ///   normaliser grows with the length, which is only a bound in the
-    ///   direction that does not help.
-    ///
-    /// IMPORTANT: there is no incremental KV cache here. candle's `marian`
-    /// keeps the cache private and offers only `reset_kv_cache`, so there is no
-    /// way to permute it when the beams are reordered - and a cache carried
-    /// across a reordering silently attributes one beam's prefix to another.
-    /// The prefix is therefore re-read at every step, which is quadratic in the
-    /// length of the translation. What that costs is measured in
-    /// `docs/model-runtime-notes.md`; taking it back means forking `marian`,
-    /// which is the same fork batching needs.
-    fn search(&mut self, encoder_xs: &Tensor) -> Result<Vec<u32>> {
-        let (_, source_len, model_dim) = encoder_xs.dims3()?;
-        // Every beam translates the same sentence, so they all attend to the
-        // same encoder states.
-        let encoder_xs = encoder_xs
-            .broadcast_as((self.beams, source_len, model_dim))?
-            .contiguous()?;
-
-        let mut live = vec![Hypothesis {
-            tokens: vec![self.config.decoder_start_token_id],
-            score: 0.0,
-        }];
-        let mut finished: Vec<Hypothesis> = Vec::with_capacity(self.beams);
-
-        for _ in 0..MAX_NEW_TOKENS {
-            let width = live.len();
-            let length = live[0].tokens.len();
-
-            self.model.reset_kv_cache();
-            let prefixes: Vec<u32> = live
-                .iter()
-                .flat_map(|hypothesis| hypothesis.tokens.iter().copied())
-                .collect();
-            let input_ids = Tensor::from_vec(prefixes, (width, length), &self.device)?;
-
-            let logits = self.decode(&input_ids, &encoder_xs.narrow(0, 0, width)?, 0)?;
-            let logits = logits.squeeze(1)?.broadcast_add(&self.forbidden)?;
-            // In F32 whatever the weights are held in: a sum of log
-            // probabilities over a whole sentence is exactly the accumulation
-            // F16 is bad at.
-            let logprobs = candle_nn::ops::log_softmax(&logits.to_dtype(DType::F32)?, 1)?;
-            let logprobs: Vec<f32> = logprobs.flatten_all()?.to_vec1()?;
-            let vocabulary = logprobs.len() / width;
-
-            let mut next = Vec::with_capacity(self.beams);
-            for (score, beam, token) in best(&logprobs, vocabulary, &live, 2 * self.beams) {
-                let mut tokens = live[beam].tokens.clone();
-                if self.is_end(token) {
-                    finished.push(Hypothesis { tokens, score });
-                } else if next.len() < self.beams {
-                    tokens.push(token);
-                    next.push(Hypothesis { tokens, score });
-                }
-            }
-
-            if finished.len() >= self.beams || next.is_empty() {
-                live = next;
-                break;
-            }
-            live = next;
-        }
-
-        // Nothing finished inside the budget: the best hypothesis still running
-        // is a truncated translation, but it is the translation.
-        let best = finished
-            .iter()
-            .chain(live.iter())
-            .max_by(|left, right| left.normalised().total_cmp(&right.normalised()))
-            .ok_or_else(|| anyhow!("the search ended with no hypothesis at all"))?;
-        Ok(best.tokens.clone())
-    }
-
-    fn is_end(&self, token: u32) -> bool {
-        token == self.config.eos_token_id || token == self.config.forced_eos_token_id
-    }
-
-    /// One decoder step, plus the projection onto the vocabulary.
-    ///
-    /// This is `marian::MTModel::decode` with the causal mask built in the
-    /// model's own dtype instead of always in F32 - see [`Engine::lm_head`].
-    fn decode(&mut self, input_ids: &Tensor, encoder_xs: &Tensor, past: usize) -> Result<Tensor> {
-        let length = input_ids.dim(1)?;
-        let mask: Vec<f32> = (0..length)
-            .flat_map(|row| {
-                (0..length).map(move |column| {
-                    if column > row {
-                        f32::NEG_INFINITY
-                    } else {
-                        0f32
-                    }
-                })
-            })
-            .collect();
-        let mask = Tensor::from_vec(mask, (length, length), &self.device)?.to_dtype(self.dtype)?;
-
-        let hidden = self
-            .model
-            .decoder()
-            .forward(input_ids, Some(encoder_xs), past, &mask)?;
-        // Only the last position can produce the next token. Projecting the
-        // rest onto a 32k vocabulary is the most expensive way there is to
-        // throw work away, and the search feeds whole prefixes.
-        let last = hidden.narrow(1, hidden.dim(1)? - 1, 1)?;
-        Ok(self
-            .lm_head
-            .forward(&last)?
-            .broadcast_add(&self.final_logits_bias)?)
-    }
-
-    fn encode(&mut self, text: &str) -> Result<Tensor> {
+    /// Source tokens for one segment, as the encoder wants them.
+    fn tokenize(&self, text: &str) -> Result<Vec<u32>> {
         let encoded = self
             .source
             .encode(text, true)
@@ -576,30 +444,323 @@ impl Engine {
         if tokens.last() != Some(&self.config.eos_token_id) {
             tokens.push(self.config.eos_token_id);
         }
+        Ok(tokens)
+    }
 
-        let tokens = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
-        Ok(self.model.encoder().forward(&tokens, 0)?)
+    /// Encodes a group together and searches all of it at once.
+    fn translate_group(&mut self, group: &[Job]) -> Result<Vec<String>> {
+        // The KV cache holds the previous group. Not resetting it is the
+        // classic way to have translation number two contaminated by number
+        // one.
+        self.model.reset_kv_cache();
+
+        let source_len = group.iter().map(|job| job.source.len()).max().unwrap_or(0);
+        let mut padded = Vec::with_capacity(group.len() * source_len);
+        let mut pad_mask = Vec::with_capacity(group.len() * source_len);
+        for job in group {
+            let padding = source_len - job.source.len();
+            padded.extend_from_slice(&job.source);
+            padded.extend(std::iter::repeat_n(self.config.pad_token_id, padding));
+            pad_mask.extend(std::iter::repeat_n(0f32, job.source.len()));
+            pad_mask.extend(std::iter::repeat_n(f32::NEG_INFINITY, padding));
+        }
+
+        let tokens = Tensor::from_vec(padded, (group.len(), source_len), &self.device)?;
+        // A group whose members are all the same length has nothing to hide,
+        // and no mask at all is cheaper than one made of zeroes.
+        let pad_mask = pad_mask
+            .iter()
+            .any(|value| value.is_infinite())
+            .then(|| Tensor::from_vec(pad_mask, (group.len(), source_len), &self.device))
+            .transpose()?
+            .map(|mask| mask.to_dtype(self.dtype))
+            .transpose()?;
+
+        let rows: Vec<u32> = (0..group.len() as u32).collect();
+        let rows = Tensor::from_vec(rows, (group.len(),), &self.device)?;
+        let encoder_mask = self.attention_mask(
+            pad_mask.as_ref(),
+            &rows,
+            self.config.encoder_attention_heads,
+        )?;
+        let encoder_xs = self
+            .model
+            .encoder()
+            .forward(&tokens, 0, encoder_mask.as_ref())?;
+
+        self.search(group.len(), &encoder_xs, pad_mask.as_ref())?
+            .iter()
+            // The start token is the decoder's, not the sentence's.
+            .map(|tokens| {
+                self.target
+                    .decode(&tokens[1..], true)
+                    .map_err(|error| anyhow!("the translation could not be decoded: {error}"))
+            })
+            .collect()
+    }
+
+    /// Keeps [`beams`](Engine::beams) hypotheses alive per segment and returns
+    /// the best finished one of each.
+    ///
+    /// Greedy decoding - `beams` of one - is this with a width of one rather
+    /// than a path of its own: taking the single most likely token is what a
+    /// search one wide does, and the end-of-sentence token that truncates a
+    /// translation part way through is the top one exactly as often.
+    ///
+    /// Two deliberate departures from the upstream generation config:
+    ///
+    /// - the width is [`DEFAULT_BEAMS`] rather than its 12, because the cost is
+    ///   linear in the width and the benefit is not;
+    /// - the search stops as soon as `beams` hypotheses have finished
+    ///   (`early_stopping=True`), rather than proving that nothing still
+    ///   running can beat them. Proving it needs a bound on a score whose
+    ///   normaliser grows with the length, which is only a bound in the
+    ///   direction that does not help.
+    ///
+    /// The KV cache is carried across steps, and moved with the beams: the
+    /// hypothesis in row `i` changes parent at nearly every step, and a cache
+    /// left in place would answer with the prefix that used to be there. That
+    /// is what [`marian::Decoder::reorder_kv_cache`] is for, and what this
+    /// crate carries its own copy of `marian` to be able to call. It also
+    /// carries the batch: a segment whose beams have all finished leaves, and
+    /// its rows go with it.
+    fn search(
+        &mut self,
+        segments: usize,
+        encoder_xs: &Tensor,
+        pad_mask: Option<&Tensor>,
+    ) -> Result<Vec<Vec<u32>>> {
+        let mut live: Vec<Hypothesis> = (0..segments)
+            .map(|segment| Hypothesis {
+                segment,
+                tokens: vec![self.config.decoder_start_token_id],
+                score: 0.0,
+            })
+            .collect();
+        let mut finished: Vec<Vec<Hypothesis>> = vec![Vec::new(); segments];
+
+        // Which segment each row of the batch is translating, and the encoder
+        // states and mask that follow from it. Rebuilt only when it changes -
+        // which is when a segment leaves the batch, and once at the start as
+        // the one row per segment opens out into `beams` - because expanding
+        // the encoder states is a copy of the whole source, and doing it per
+        // step costs more than the search saves.
+        let mut mapping: Vec<u32> = Vec::new();
+        let mut encoder_rows = encoder_xs.clone();
+        let mut cross_mask = None;
+
+        for _ in 0..MAX_NEW_TOKENS {
+            let rows = live.len();
+            // The cache holds every token but the last, so the last is all that
+            // goes back in. Every live hypothesis is the same length - a
+            // segment advances one token per step or leaves - so one `past`
+            // covers the batch.
+            let past = live[0].tokens.len() - 1;
+            let last: Vec<u32> = live
+                .iter()
+                .map(|hypothesis| hypothesis.tokens[past])
+                .collect();
+            let input_ids = Tensor::from_vec(last, (rows, 1), &self.device)?;
+
+            let of_row: Vec<u32> = live
+                .iter()
+                .map(|hypothesis| hypothesis.segment as u32)
+                .collect();
+            if of_row != mapping {
+                let rows = Tensor::from_vec(of_row.clone(), (of_row.len(),), &self.device)?;
+                encoder_rows = encoder_xs.index_select(&rows, 0)?.contiguous()?;
+                cross_mask =
+                    self.attention_mask(pad_mask, &rows, self.config.decoder_attention_heads)?;
+                mapping = of_row;
+            }
+
+            let logits = self.decode(&input_ids, &encoder_rows, past, cross_mask.as_ref())?;
+            let logits = logits.squeeze(1)?.broadcast_add(&self.forbidden)?;
+            // In F32 whatever the weights are held in: a sum of log
+            // probabilities over a whole sentence is exactly the accumulation
+            // F16 is bad at.
+            let logprobs = candle_nn::ops::log_softmax(&logits.to_dtype(DType::F32)?, 1)?;
+            let logprobs: Vec<f32> = logprobs.flatten_all()?.to_vec1()?;
+            let vocabulary = logprobs.len() / rows;
+
+            let mut next: Vec<Hypothesis> = Vec::with_capacity(rows);
+            let mut parents: Vec<u32> = Vec::with_capacity(rows);
+            for (segment, endings) in finished.iter_mut().enumerate() {
+                let mine: Vec<usize> = (0..rows)
+                    .filter(|row| live[*row].segment == segment)
+                    .collect();
+                if mine.is_empty() {
+                    continue;
+                }
+
+                let mut kept: Vec<(f64, usize, u32)> = Vec::with_capacity(self.beams);
+                for (score, row, token) in best(&logprobs, vocabulary, &live, &mine, 2 * self.beams)
+                {
+                    if self.is_end(token) {
+                        endings.push(Hypothesis {
+                            segment,
+                            tokens: live[row].tokens.clone(),
+                            score,
+                        });
+                    } else if kept.len() < self.beams {
+                        kept.push((score, row, token));
+                    }
+                }
+
+                // Enough endings: this segment is answered, and its rows are
+                // not carried into the next step.
+                if endings.len() >= self.beams {
+                    continue;
+                }
+                for (score, row, token) in kept {
+                    let mut tokens = live[row].tokens.clone();
+                    tokens.push(token);
+                    next.push(Hypothesis {
+                        segment,
+                        tokens,
+                        score,
+                    });
+                    parents.push(row as u32);
+                }
+            }
+
+            live = next;
+            if live.is_empty() {
+                break;
+            }
+
+            // Row `i` of the batch now continues what row `parents[i]` held,
+            // and the cache has to say the same. On the first pass this also
+            // widens it from the one row per segment the start token needed.
+            let parents = Tensor::from_vec(parents, (live.len(),), &self.device)?;
+            self.model.reorder_kv_cache(&parents)?;
+        }
+
+        // A finished hypothesis beats a running one whatever they score.
+        // Ending is not free - the end token has to be the likely one where it
+        // falls - so a running hypothesis of the same length can always score
+        // better by not having paid for it, and returning one means returning
+        // a sentence the model never ended. That is the failure this whole
+        // search exists to remove. A segment with nothing finished ran out of
+        // budget instead, and there its best running hypothesis is a truncated
+        // translation, but it is the translation.
+        finished
+            .iter()
+            .enumerate()
+            .map(|(segment, endings)| {
+                endings
+                    .iter()
+                    .chain(live.iter().filter(|it| it.segment == segment))
+                    .max_by(|left, right| left.normalised().total_cmp(&right.normalised()))
+                    .map(|best| best.tokens.clone())
+                    .ok_or_else(|| anyhow!("the search ended with no hypothesis at all"))
+            })
+            .collect()
+    }
+
+    /// The mask that hides padded source positions, shaped for the attention
+    /// weights of `heads` heads over the batch rows named by `rows`.
+    ///
+    /// `attn_weights` is `(batch * heads, queries, keys)` with the heads of one
+    /// batch row adjacent, so a mask over keys repeats head by head. It says
+    /// nothing about the query, which is what lets one mask serve both the
+    /// encoder - where the queries are the source - and cross-attention, where
+    /// they are the translation so far.
+    fn attention_mask(
+        &self,
+        pad_mask: Option<&Tensor>,
+        rows: &Tensor,
+        heads: usize,
+    ) -> Result<Option<Tensor>> {
+        let Some(pad_mask) = pad_mask else {
+            return Ok(None);
+        };
+        let per_row = pad_mask.index_select(rows, 0)?;
+        let (rows, source_len) = per_row.dims2()?;
+        Ok(Some(
+            per_row
+                .unsqueeze(1)?
+                .broadcast_as((rows, heads, source_len))?
+                .contiguous()?
+                .reshape((rows * heads, 1, source_len))?,
+        ))
+    }
+
+    fn is_end(&self, token: u32) -> bool {
+        token == self.config.eos_token_id || token == self.config.forced_eos_token_id
+    }
+
+    /// One decoder step, plus the projection onto the vocabulary.
+    ///
+    /// This is what upstream's `MTModel::decode` did, with the causal mask
+    /// built in the model's own dtype instead of always in F32 - see
+    /// [`Engine::lm_head`] - and with a mask for the padded source positions
+    /// that upstream had no way to pass.
+    fn decode(
+        &mut self,
+        input_ids: &Tensor,
+        encoder_xs: &Tensor,
+        past: usize,
+        cross_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let length = input_ids.dim(1)?;
+        let mask: Vec<f32> = (0..length)
+            .flat_map(|row| {
+                (0..length).map(move |column| {
+                    if column > row {
+                        f32::NEG_INFINITY
+                    } else {
+                        0f32
+                    }
+                })
+            })
+            .collect();
+        let mask = Tensor::from_vec(mask, (length, length), &self.device)?.to_dtype(self.dtype)?;
+
+        let hidden =
+            self.model
+                .decoder()
+                .forward(input_ids, Some(encoder_xs), past, &mask, cross_mask)?;
+        // Only the last position can produce the next token. Projecting the
+        // rest onto a 32k vocabulary is the most expensive way there is to
+        // throw work away.
+        let last = hidden.narrow(1, hidden.dim(1)? - 1, 1)?;
+        Ok(self
+            .lm_head
+            .forward(&last)?
+            .broadcast_add(&self.final_logits_bias)?)
     }
 }
 
-/// The `wanted` best continuations of `live`, best first.
+/// One segment on its way through a batch.
+#[derive(Debug, Clone)]
+struct Job {
+    /// Where it goes in the caller's order, which the grouping does not keep.
+    index: usize,
+    source: Vec<u32>,
+}
+
+/// The `wanted` best continuations of the hypotheses in `rows`, best first.
 ///
-/// `logprobs` is one row of `vocabulary` log probabilities per hypothesis, and
-/// a continuation is scored by adding one of them to the hypothesis it extends.
-/// The result is `(score, hypothesis, token)`.
+/// `logprobs` is one row of `vocabulary` log probabilities per row of the
+/// batch, and a continuation is scored by adding one of them to the hypothesis
+/// it extends. Only the rows of one segment are ranked together: the segments
+/// of a batch are separate searches that happen to share a forward pass. The
+/// result is `(score, row, token)`.
 fn best(
     logprobs: &[f32],
     vocabulary: usize,
     live: &[Hypothesis],
+    rows: &[usize],
     wanted: usize,
 ) -> Vec<(f64, usize, u32)> {
-    let mut ranked: Vec<(f64, usize, u32)> = Vec::with_capacity(logprobs.len());
-    for (beam, hypothesis) in live.iter().enumerate() {
-        for (token, logprob) in logprobs[beam * vocabulary..(beam + 1) * vocabulary]
+    let mut ranked: Vec<(f64, usize, u32)> = Vec::with_capacity(rows.len() * vocabulary);
+    for &row in rows {
+        for (token, logprob) in logprobs[row * vocabulary..(row + 1) * vocabulary]
             .iter()
             .enumerate()
         {
-            ranked.push((hypothesis.score + f64::from(*logprob), beam, token as u32));
+            ranked.push((live[row].score + f64::from(*logprob), row, token as u32));
         }
     }
 

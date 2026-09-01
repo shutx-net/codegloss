@@ -23,9 +23,10 @@ Cargo ワークスペースがあり、`cargo build --workspace` / `cargo test -
   - `docblock.rs` — `CommentShape` / `GlossPlan`。`raw` から Javadoc / Rustdoc の行構造を読み、段落・タグ行・箇条書き・見出し・コードフェンスを別々の翻訳単位に分けて、訳文を同じ行構造へ組み直す。連続する散文行は 1 単位にまとめ、その単位を**文ごとに**エンジンへ渡す（マスクとキャッシュは単位のまま）。プレースホルダを落とした文はその文だけ原文へ戻る（`Masked::unmask_fragment`）。組み直した訳文にコメント記号（`/**`・` * `・`///`）は含めない。
   - `cargo build -p codegloss-core --target wasm32-unknown-unknown` が通ることを確認済み（将来のブラウザ拡張との共有のため）。ただしこのターゲットは `rust-toolchain.toml` にも CI にも入れていない。
 - `crates/codegloss-parser` — Tree-sitter によるコメント抽出。対応言語は Rust のみ。連続する行コメントを 1 ブロックに連結し、区切り線と空コメントは落とす。**空の `///` 行はここで落ちて連結も切れる**ため、`///` の doc コメントは空行のたびに別ブロックになる。`docblock.rs` の行構造の復元（空行・コードフェンス）が効くのは `/* */` 系のブロックコメントと、空行を挟まない `///` の連なりだけ。
+- `crates/codegloss-translator/src/marian.rs` — **candle の `models::marian` のフォーク**（candle 0.11.0、MIT OR Apache-2.0）。上流のままでは外から手が出せない 3 点だけを変えてある: (1) `Decoder::reorder_kv_cache`（上流は `kv_cache` が private で `reset_kv_cache` しか無く、ビーム探索がキャッシュを動かせない）、(2) エンコーダとクロスアテンションのアテンションマスク（上流は両方に `None` を渡すので、パディングすると訳文が静かに悪くなる）、(3) エンコーダ層を `is_decoder: false` で作る（上流は `true`）。`MTModel::decode` は落とした（causal mask を必ず F32 で作るため）。**それ以外は上流のまま**にしてある。上流の新版と diff を取れることが、コピーを抱える条件だから。3 つの変更にはモデルパック不要のユニットテストが付いている（`src/marian.rs` の `mod tests`）。
 - `crates/codegloss-translator` — `trait Translator`（`translate(&[Segment]) -> Vec<String>` と `model_version()`）と 2 つの実装。
   - `PassthroughTranslator` — 入力をそのまま返す。常に入っている。
-  - `CandleTranslator` — candle + FuguMT（Marian）。**`feature = "candle"` の裏**にあり、既定の `cargo build` / `cargo test` には入らない（CI を重くしないため）。モデルパックのディレクトリを渡して `CandleTranslator::load`（既定 F32）または `load_with(pack, Precision)` で読む。既定はビームサーチ（幅 4、長さ正規化あり）。`--beams 1` で貪欲法。CPU。**ビームの KV キャッシュは持てない**（candle の `marian` はキャッシュが private で `reset_kv_cache` しか無く、ビームを並べ替えるときに置換できない）ため、毎ステップ前文を読み直す。文が短いので実測 2.2 倍で済んでいる。`MTModel` は `&mut self` を要求するので内部を `Mutex` で包んでいる。
+  - `CandleTranslator` — candle + FuguMT（Marian）。**`feature = "candle"` の裏**にあり、既定の `cargo build` / `cargo test` には入らない（CI を重くしないため）。モデルパックのディレクトリを渡して `CandleTranslator::load`（既定 F32）または `load_with(pack, Precision)` で読む。既定はビームサーチ（幅 4、長さ正規化あり）。`--beams 1` で貪欲法。CPU。KV キャッシュはステップをまたいで持ち越し、ビームの並べ替えに合わせて動かす（`marian::Decoder::reorder_kv_cache`）。**バッチで訳す**：長さ順に並べてグループに切り、パディングしてマスクする。1 セグメントが `beams` 行を占めるので、行数の予算は `MAX_BATCH_ROWS`（32）。実測 3.6 倍速く、常駐は +26 MiB。**パディングは訳文に影響しない**（コーパス 62 ブロックで、1 グループ 1 セグメントとバッチがバイト一致することを確認済み）。終了した仮説は、走行中の仮説よりつねに優先する——終端していない仮説を返すのは、ビームサーチが消しに来た打ち切りそのものだから。`MTModel` は `&mut self` を要求するので内部を `Mutex` で包んでいる。
     - 重みは `VarBuilder` で**遅延**に読む。一括読み（`pickle::read_all`）はピークが 251 → 441 MiB に悪化するので使わない。FuguMT の pickle は 32001x512 の埋め込みを 4 つの名前で共有しているため（`docs/model-runtime-notes.md` §6.2）。同じ名前を 2 度求めても同じテンソルが返るよう `Weights` でキャッシュしてある。
     - `tokenizer-source.json` と `tokenizer-target.json` がバイト単位で同じなら 1 つだけ構築して共有する（`Tokenizer` 1 つで約 30 MiB）。
     - デコードは `MTModel::decode` ではなく `Engine::decode`。上流は causal mask を必ず F32 で作るため、F16 だと dtype が合わずに落ちる。`Precision` を選べるのはこのため。
@@ -52,7 +53,7 @@ Cargo ワークスペースがあり、`cargo build --workspace` / `cargo test -
 - 翻訳エンジンはネイティブバイナリ `codegloss-lsp` 側に置く。WASM 拡張には入れない。
 - 翻訳ランタイムは v0.1 では candle（純 Rust）。ct2rs / ort / bergamot へ差し替えられるよう `trait Translator` の裏に置く。
 - 重みは pickle（`pytorch_model.bin`）のまま読む。safetensors 化も mmap も**ピーク RSS を減らさない**ことを実測済み（`docs/model-runtime-notes.md` §6.2）。`#![forbid(unsafe_code)]` を外す理由は無い。
-- バッチ推論は入れない。candle の `marian::Encoder` にアテンションマスクが無く、パディングすると訳文が静かに悪くなる（同 §6.5）。**ビームサーチの KV キャッシュも同じ marian の壁**（キャッシュが private で並べ替えられない）。直すなら 1 回のフォークでまとめて。
+- バッチ推論は入っている（§9）。`src/marian.rs` のフォークでエンコーダとクロスアテンションのマスクが入り、§6.5 で諦めた理由が消えた。実測 3.6 倍、常駐 +26 MiB。**パディングは訳文を変えない**ことを実測で確認してある。
 - モデル第一候補は FuguMT（Marian, CC-BY-SA-4.0）。
 - コメント抽出は正規表現ではなく Tree-sitter を使う（文字列中の URL を行コメントと誤認しないため）。
 
