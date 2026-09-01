@@ -6,7 +6,10 @@ name: リリース
 # 消して打ち直すしかない。
 on:
   push:
-    tags: ["v*"]
+    # `+` は直前の文字の 1 回以上の繰り返し、`.` はそのままの文字。
+    # `v0.1` や `v1.0.0-rc1` はここで弾かれ、何も起きない。何も起きないのは
+    # 分かりにくいので、通ってしまった形は verify-versions.sh が落とす。
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
 
 # リリースの作成とアセットのアップロードに要る。ビルドだけの回でも同じ
@@ -22,8 +25,57 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ビルドの前に置く。版がずれたタグで 5 構成 8 分を待たされるのは高い。
+  version:
+    name: 版を照合する
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # 版は 3 か所にあり、全部同じでなければならない。ずれたまま配ると、
+      # 拡張が存在しない版のバイナリを探しに行く。
+      #
+      # タグの形式もここで見る。上の絞り込みは「当てはまらないと何も
+      # 起きない」ので、間違いに気づけない。通ってしまった形はここで落とす。
+      - name: 版とタグを照合する
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail() { echo "NG: $1" >&2; exit 1; }
+
+          # [workspace.package] の次の [ までを切る。ファイル全体を見ると
+          # [workspace.dependencies] 側の version= を拾ってしまう。
+          workspace=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
+            | sed -n 's/^version *= *"\(.*\)"$/\1/p' | head -1)
+          crate=$(sed -n '/^\[package\]/,/^\[/p' editors/zed/Cargo.toml \
+            | sed -n 's/^version *= *"\(.*\)"$/\1/p' | head -1)
+          # extension.toml の version はどのテーブルよりも前にある。
+          extension=$(sed -n '1,/^\[/p' editors/zed/extension.toml \
+            | sed -n 's/^version *= *"\(.*\)"$/\1/p' | head -1)
+
+          [ -n "$workspace" ] || fail "Cargo.toml から版を読み取れませんでした"
+          [ "$crate" = "$workspace" ] ||
+            fail "editors/zed/Cargo.toml は $crate、ワークスペースは $workspace"
+          [ "$extension" = "$workspace" ] ||
+            fail "editors/zed/extension.toml は $extension、ワークスペースは $workspace"
+
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+            # case のパターンに繰り返しは書けない。v[0-9]*.[0-9]*.[0-9]* だと
+            # 末尾の * が何でも拾い、v1.0.0-rc1 を通してしまう。3 つに分ける。
+            bad() { fail "タグ $tag の形式が v<major>.<minor>.<patch> ではありません"; }
+            case "$tag" in v*.*.*) ;; *) bad ;; esac
+            case "${tag#v}" in *[!0-9.]*) bad ;; esac
+            case "${tag#v}" in *.*.*.* | .* | *. | *..*) bad ;; esac
+            [ "${tag#v}" = "$workspace" ] ||
+              fail "タグ $tag に対して、宣言されている版は $workspace です"
+            echo "OK: 版は $workspace（タグ・ワークスペース・拡張のすべて）"
+          else
+            echo "OK: 版は $workspace（ワークスペースと拡張）"
+          fi
+
   build:
     name: ${{ matrix.target }}
+    needs: version
     runs-on: ${{ matrix.runner }}
     strategy:
       # 1 つが落ちても残りの結果は見たい。どれが通ってどれが落ちるかが
@@ -139,19 +191,6 @@ jobs:
 
       # タグと Cargo.toml の版がずれたまま配ると、あとから何が入っている
       # のか分からなくなる。ここで止めるほうが、消して打ち直すより安い。
-      - name: check the tag against the workspace version
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        run: |
-          set -euo pipefail
-          version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
-            | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$version" != "$tag" ]; then
-            echo "タグ $GITHUB_REF_NAME に対して Cargo.toml は $version です" >&2
-            exit 1
-          fi
-
       # 下書きで作る。**リリースを作る step だけは、タグを打つまで一度も
       # 走らない**ので、5 つのアセットを目で見てから公開できるようにして
       # おく。何度か通って中身が信用できるようになったら --draft を外してよい。
