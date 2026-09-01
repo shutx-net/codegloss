@@ -23,7 +23,7 @@ use tower_lsp_server::{Client, LanguageServer};
 
 use crate::code_lens;
 use crate::documents::DocumentStore;
-use crate::translation::TranslationService;
+use crate::translation::{EngineWatch, TranslationService, engine_channel};
 
 #[derive(Debug)]
 pub struct Backend {
@@ -48,14 +48,20 @@ impl Backend {
     /// because its output is its input. It is what picks candle when a
     /// model pack is installed and to fall back when it is not.
     pub fn with_engine(client: Client, engine: Arc<dyn Translator>) -> Self {
+        // The switch is dropped on the way out, which is how this says the
+        // engine will not change: nothing here is going to download a pack.
+        let (_switch, engine) = engine_channel(engine);
         Self::with_cache(client, engine, Arc::new(GlossCache::default()))
     }
 
-    /// The same server again, over a cache the caller built.
+    /// The same server again, over a cache the caller built and an engine the
+    /// caller may still replace.
     ///
     /// `main.rs` uses it to hand in a cache backed by a directory, so that a
-    /// restart does not re-translate what the last run already translated.
-    pub fn with_cache(client: Client, engine: Arc<dyn Translator>, cache: Arc<GlossCache>) -> Self {
+    /// restart does not re-translate what the last run already translated, and
+    /// an engine that starts out as the passthrough and becomes candle once the
+    /// model pack has been downloaded.
+    pub fn with_cache(client: Client, engine: EngineWatch, cache: Arc<GlossCache>) -> Self {
         Self {
             documents: DocumentStore::new(),
             glosses: TranslationService::spawn(client.clone(), engine, cache),

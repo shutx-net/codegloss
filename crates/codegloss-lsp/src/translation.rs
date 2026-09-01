@@ -77,6 +77,32 @@ const MIN_REFRESH_INTERVAL: Duration = Duration::from_millis(300);
 /// this one.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The end of the engine channel a reader holds.
+///
+/// The engine is not owned by the pipeline any more, because it can be
+/// replaced while the server runs: a server that started without a model pack
+/// downloads one in the background and swaps candle in when it arrives
+/// (`model_pack::spawn_download`).
+///
+/// A `watch` rather than a lock, because the worker has to *notice* the swap
+/// and not merely see a new value the next time it happens to look: every
+/// gloss the old engine produced is now unreachable (the model version is part
+/// of the cache key), so the client has to be told to ask again. Readers get
+/// the engine of the moment with `borrow()`, which is what the request path
+/// needs.
+pub type EngineWatch = watch::Receiver<Arc<dyn Translator>>;
+
+/// The other end: whoever may replace the engine holds this one.
+///
+/// Dropping it is normal and means the engine will never change - which is the
+/// case for every build without a downloader, and for the tests.
+pub type EngineSwitch = watch::Sender<Arc<dyn Translator>>;
+
+/// A channel carrying the engine, starting out on `initial`.
+pub fn engine_channel(initial: Arc<dyn Translator>) -> (EngineSwitch, EngineWatch) {
+    watch::channel(initial)
+}
+
 /// One document's worth of comments to translate.
 struct Job {
     uri: Uri,
@@ -89,7 +115,7 @@ struct Job {
 
 /// The handle the LSP handlers hold: a cache to read and a queue to write.
 pub struct TranslationService {
-    translator: Arc<dyn Translator>,
+    engine: EngineWatch,
     cache: Arc<GlossCache>,
     jobs: mpsc::UnboundedSender<Job>,
     batches: watch::Receiver<u64>,
@@ -100,7 +126,7 @@ impl fmt::Debug for TranslationService {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TranslationService")
-            .field("model_version", &self.translator.model_version())
+            .field("model_version", &self.engine.borrow().model_version())
             .field("cached", &self.cache.len())
             .finish_non_exhaustive()
     }
@@ -114,14 +140,14 @@ impl TranslationService {
     /// `spawn_blocking`'s pool would otherwise happily start hundreds.
     ///
     /// Must be called from inside a tokio runtime.
-    pub fn spawn(client: Client, translator: Arc<dyn Translator>, cache: Arc<GlossCache>) -> Self {
+    pub fn spawn(client: Client, engine: EngineWatch, cache: Arc<GlossCache>) -> Self {
         let initialized = Arc::new(AtomicBool::new(false));
         let (jobs, queue) = mpsc::unbounded_channel();
         let (completed, batches) = watch::channel(0);
 
         let worker = Worker {
             client,
-            translator: Arc::clone(&translator),
+            engine: engine.clone(),
             cache: Arc::clone(&cache),
             initialized: Arc::clone(&initialized),
             completed,
@@ -130,7 +156,7 @@ impl TranslationService {
         tokio::spawn(worker.run(queue));
 
         Self {
-            translator,
+            engine,
             cache,
             jobs,
             batches,
@@ -189,15 +215,19 @@ impl TranslationService {
 
     /// Cache key of the comment written as `source`, under the engine currently
     /// loaded.
+    ///
+    /// Reading the engine on every call rather than remembering its version is
+    /// the point: after a swap this has to start missing, so that the comments
+    /// glossed by the engine before it are translated again.
     pub fn key(&self, source: &str) -> GlossKey {
-        key(self.translator.model_version(), source)
+        key(self.engine.borrow().model_version(), source)
     }
 }
 
-/// The task that owns the engine.
+/// The task that runs the engine.
 struct Worker {
     client: Client,
-    translator: Arc<dyn Translator>,
+    engine: EngineWatch,
     cache: Arc<GlossCache>,
     initialized: Arc<AtomicBool>,
     completed: watch::Sender<u64>,
@@ -206,7 +236,33 @@ struct Worker {
 
 impl Worker {
     async fn run(mut self, mut queue: mpsc::UnboundedReceiver<Job>) {
-        while let Some(job) = queue.recv().await {
+        // Cleared once the switch is gone, which is how a server that can
+        // never be given another engine says so.
+        //
+        // IMPORTANT: the branch has to be taken out of the running, not merely
+        // ignored. `changed()` on a closed watch is ready immediately and stays
+        // ready, so leaving it in the select turns this wait into a spin - it
+        // went round 286,000 times in 100 ms when measured. It does not stall
+        // anything (tokio yields the task when its budget runs out, so every
+        // test still passes) and it does not corrupt anything. It just burns a
+        // core for as long as the editor is open, which is why the guard is
+        // here and not a test.
+        let mut swappable = true;
+
+        loop {
+            let job = tokio::select! {
+                job = queue.recv() => job,
+                changed = self.engine.changed(), if swappable => {
+                    if changed.is_err() {
+                        swappable = false;
+                    } else {
+                        self.engine_replaced().await;
+                    }
+                    continue;
+                }
+            };
+
+            let Some(job) = job else { break };
             let mut pending = HashMap::new();
             pending.insert(job.uri, job.sources);
 
@@ -220,16 +276,42 @@ impl Worker {
         tracing::debug!("translation worker stopped");
     }
 
+    /// Reacts to a new engine: nothing to re-translate here, only something to
+    /// say.
+    ///
+    /// The glosses the previous engine produced are still in the cache and are
+    /// still correct for it, but they are keyed under its model version and so
+    /// can no longer be found. Asking the client to refetch is what turns that
+    /// into work: it comes back for the lenses it is showing, they miss, and
+    /// the handler queues them.
+    async fn engine_replaced(&mut self) {
+        let model_version = self.engine.borrow_and_update().model_version().to_owned();
+        tracing::info!(
+            model_version,
+            "the engine was replaced; asking for a refetch"
+        );
+        self.refresh().await;
+    }
+
     /// Translates whatever of `pending` is not cached yet, then asks the client
     /// to refetch.
     async fn run_batch(&mut self, pending: HashMap<Uri, Vec<String>>) {
         let documents = pending.len();
-        let sources = uncached_sources(&self.cache, self.translator.model_version(), pending);
+        // Taken once and used for the whole batch. Reading it again after the
+        // engine ran would store what one engine produced under another one's
+        // key, and nothing downstream could tell.
+        //
+        // `borrow`, not `borrow_and_update`: a swap that lands while a batch is
+        // being collected would otherwise be marked as seen here and never
+        // reach the branch that asks the client to refetch. Leaving it unseen
+        // costs at most one extra refresh, which is rate-limited anyway.
+        let translator = self.engine.borrow().clone();
+        let sources = uncached_sources(&self.cache, translator.model_version(), pending);
 
         let stored = if sources.is_empty() {
             0
         } else {
-            self.run_engine(sources).await
+            self.run_engine(&translator, sources).await
         };
 
         tracing::debug!(documents, stored, "translation batch finished");
@@ -245,7 +327,7 @@ impl Worker {
 
     /// Pre-processes, runs the engine off the async executor, post-processes and
     /// caches what comes back. Returns how many glosses were stored.
-    async fn run_engine(&self, sources: Vec<String>) -> usize {
+    async fn run_engine(&self, translator: &Arc<dyn Translator>, sources: Vec<String>) -> usize {
         // Pre-processing (`codegloss-core`): each comment is taken apart into
         // the units a translator should see, with identifiers, inline code,
         // URLs and doc tags replaced by placeholders.
@@ -264,21 +346,21 @@ impl Worker {
         // stored, so that the next request finds an answer instead of queueing
         // it again for ever.
         if segments.is_empty() {
-            return self.store(&sources, &plans, &slots, &[]);
+            return self.store(translator, &sources, &plans, &slots, &[]);
         }
 
-        let translator = Arc::clone(&self.translator);
+        let engine = Arc::clone(translator);
         // IMPORTANT: inference is CPU-bound and blocking. Running it on the
         // executor would stall every other LSP handler on the same thread.
         let finished = tokio::task::spawn_blocking(move || {
-            let translations = translator.translate(&segments);
+            let translations = engine.translate(&segments);
             (segments, translations)
         })
         .await;
 
         match finished {
             Ok((segments, Ok(translations))) if translations.len() == segments.len() => {
-                self.store(&sources, &plans, &slots, &translations)
+                self.store(translator, &sources, &plans, &slots, &translations)
             }
             Ok((segments, Ok(translations))) => {
                 // The trait says one output per input. An engine that breaks
@@ -310,12 +392,13 @@ impl Worker {
     /// caches the gloss under the comment it was made from.
     fn store(
         &self,
+        translator: &Arc<dyn Translator>,
         sources: &[String],
         plans: &[GlossPlan],
         slots: &[Vec<usize>],
         translations: &[String],
     ) -> usize {
-        let model_version = self.translator.model_version();
+        let model_version = translator.model_version();
         for ((source, plan), slots) in sources.iter().zip(plans).zip(slots) {
             let of_this_block: Vec<String> = slots
                 .iter()

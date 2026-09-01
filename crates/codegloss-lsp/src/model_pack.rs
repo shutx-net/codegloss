@@ -8,9 +8,16 @@
 //! IMPORTANT: the download is never on the path of a request, and never on the
 //! path of `initialize` either. 120 MB over a network is minutes, and a
 //! language server that does not answer `initialize` looks broken rather than
-//! busy. It is a subcommand - `codegloss-lsp --fetch-model` - that a person or
-//! an installer runs once; the server itself only ever looks for a pack that
-//! is already there.
+//! busy. So the server answers everything from the start, in English, and
+//! [`spawn_download`] fetches the pack on a task of its own; the engine is
+//! swapped in when it arrives, and the client is asked to refetch. The same
+//! download is also a subcommand - `codegloss-lsp --fetch-model` - which is
+//! what an installer or a person on a metered connection reaches for, and what
+//! `--no-download` leaves as the only way to get a pack.
+//!
+//! One machine can be running several of these: an editor starts a language
+//! server per project. [`obtain`] is what keeps that from becoming several
+//! downloads of the same 120 MB.
 //!
 //! What is trusted, and what is checked:
 //!
@@ -31,6 +38,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use codegloss_translator::{MANIFEST_FILE, Manifest};
+
+use crate::config::{NO_DOWNLOAD_FLAG, ServerConfig};
+use crate::translation::EngineSwitch;
 
 /// Where packs are published.
 ///
@@ -101,6 +111,70 @@ pub fn installed(cache: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Fetches the pack in the background, and hands the engine over when it is
+/// there.
+///
+/// Returns at once. The download and the load both happen on a blocking task,
+/// so neither `initialize` nor any later request waits for them; until the
+/// engine is swapped the server answers in English, which is what it does
+/// without a pack anyway.
+///
+/// Nothing is fetched when there is nothing to gain by it, and each of those
+/// cases drops `switch` on the way out - which is how the pipeline is told
+/// that this engine is the one it is going to have.
+pub fn spawn_download(config: &ServerConfig, switch: EngineSwitch) {
+    if config.no_download {
+        tracing::info!("{NO_DOWNLOAD_FLAG}: the model pack will not be fetched");
+        return;
+    }
+
+    // An explicitly named pack is a decision. If it did not load, the answer
+    // is to say so - which `config::engine` already did - and not to quietly
+    // download a different one.
+    if config.model_pack.is_some() {
+        return;
+    }
+
+    let Some(cache) = crate::config::cache_root(config) else {
+        tracing::warn!("no cache directory could be found; the model pack cannot be fetched");
+        return;
+    };
+    if installed(&cache).is_some() {
+        // Already fetched, and `config::engine` is running on it.
+        return;
+    }
+
+    let base = base_url();
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || {
+        tracing::info!(from = %base, "fetching the model pack in the background");
+
+        let pack = match obtain(&cache, &base) {
+            Ok(pack) => pack,
+            Err(error) => {
+                tracing::error!(
+                    "the model pack could not be fetched, staying in English: {error:#}"
+                );
+                return;
+            }
+        };
+
+        // Loading is a second slow step - the weights are read and the
+        // tokenizers built - and it is on this task for the same reason the
+        // download is.
+        let Some(engine) = crate::config::load(&pack, &config) else {
+            return;
+        };
+
+        let model_version = engine.model_version().to_owned();
+        if switch.send(engine).is_err() {
+            tracing::debug!("the server stopped before the model pack was ready");
+            return;
+        }
+        tracing::info!(model_version, "the engine is now translating");
+    });
+}
+
 /// Downloads the pack into `cache`, replacing whatever was there.
 ///
 /// Files land in a directory of their own and are moved into place only once
@@ -156,6 +230,131 @@ pub fn fetch(cache: &Path, base: &str) -> anyhow::Result<PathBuf> {
         manifest.attribution
     );
     Ok(final_directory)
+}
+
+/// Fetches the pack unless another process on this machine is already doing
+/// it, in which case it waits for that one instead.
+///
+/// An editor starts a language server per project, so several of these can be
+/// running at once and all of them start out with no pack. Without this they
+/// would each pull the same 120 MB, and then race to install it: the last one
+/// to finish deletes the pack the others just put in place.
+///
+/// The lock is a directory rather than a file, because `create_dir` fails when
+/// one exists and `File::create` truncates it - and the atomic test-and-set is
+/// the whole point. It is removed when [`Lock`] is dropped, including on the
+/// way out of a panic.
+pub fn obtain(cache: &Path, base: &str) -> anyhow::Result<PathBuf> {
+    match Lock::acquire(cache)? {
+        Some(_lock) => fetch(cache, base),
+        None => wait_for_the_other_process(cache, POLL_INTERVAL, OTHER_PROCESS_TIMEOUT),
+    }
+}
+
+/// How long a lock may go untouched before it is taken to belong to a process
+/// that is no longer running.
+///
+/// Longer than any download has a right to take, because taking a live lock
+/// away means two processes writing the same staging directory.
+const STALE_LOCK: Duration = Duration::from_secs(60 * 60);
+
+/// How long to wait for the process that holds the lock.
+const OTHER_PROCESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// How often the waiting process looks.
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The lock a downloading process holds, for as long as it holds it.
+struct Lock {
+    path: PathBuf,
+}
+
+impl Lock {
+    /// Takes the lock, or reports that someone else has it.
+    ///
+    /// A lock nobody has touched for [`STALE_LOCK`] is taken over: the process
+    /// that made it is gone, and a lock that outlives its owner would leave
+    /// every later run waiting for a download that is never going to happen.
+    fn acquire(cache: &Path) -> io::Result<Option<Self>> {
+        let path = lock_path(cache);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        match fs::create_dir(&path) {
+            Ok(()) => Ok(Some(Self { path })),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if !is_stale(&path) {
+                    return Ok(None);
+                }
+                tracing::warn!(
+                    lock = %path.display(),
+                    "taking over a lock nobody has touched for {} minutes",
+                    STALE_LOCK.as_secs() / 60
+                );
+                let _ = fs::remove_dir_all(&path);
+                // Losing the second race means another process got there
+                // first, which is the answer this returns anyway.
+                Ok(fs::create_dir(&path).ok().map(|()| Self { path }))
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.path) {
+            // Left behind, it costs the next run one `STALE_LOCK`. Not worth
+            // failing anything over, and there is nothing to retry.
+            tracing::warn!(
+                lock = %self.path.display(),
+                "the download lock could not be removed: {error}"
+            );
+        }
+    }
+}
+
+fn lock_path(cache: &Path) -> PathBuf {
+    directory(cache).with_file_name(format!("{EXPECTED_MODEL_VERSION}.lock"))
+}
+
+fn is_stale(lock: &Path) -> bool {
+    let Ok(modified) = fs::metadata(lock).and_then(|metadata| metadata.modified()) else {
+        // No timestamp to judge by. Leaving it alone is the safe reading: a
+        // second downloader is worse than a wait that ends in a timeout.
+        return false;
+    };
+    modified.elapsed().is_ok_and(|age| age > STALE_LOCK)
+}
+
+/// Waits for the process holding the lock to install the pack.
+///
+/// Waiting rather than giving up, so that the second editor window ends up
+/// translating too instead of showing English until it is restarted.
+fn wait_for_the_other_process(
+    cache: &Path,
+    poll: Duration,
+    give_up_after: Duration,
+) -> anyhow::Result<PathBuf> {
+    tracing::info!("another process is downloading the model pack; waiting for it to finish");
+    let deadline = std::time::Instant::now() + give_up_after;
+
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(poll);
+        if let Some(pack) = installed(cache) {
+            return Ok(pack);
+        }
+        // The lock is released whether the download worked or not, so its
+        // going away without a pack in place means it did not.
+        if !lock_path(cache).exists() {
+            anyhow::bail!("the process that was downloading the model pack stopped without one");
+        }
+    }
+    anyhow::bail!(
+        "the process that was downloading the model pack has not finished in {} minutes",
+        give_up_after.as_secs() / 60
+    )
 }
 
 fn get(url: &str) -> anyhow::Result<String> {
@@ -345,5 +544,124 @@ mod tests {
     #[test]
     fn the_base_url_defaults_to_where_packs_are_published() {
         assert_eq!(base_url(), DEFAULT_BASE_URL);
+    }
+
+    /// Fast enough that the wait is not what the test measures.
+    const QUICK_POLL: Duration = Duration::from_millis(10);
+    const QUICK_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// An editor starts a language server per project, so several of them come
+    /// up at once with no pack and all of them want one.
+    #[test]
+    fn only_one_process_fetches_at_a_time() {
+        let cache = cache("lock");
+
+        let first = Lock::acquire(&cache)
+            .expect("the lock directory can be made")
+            .expect("nobody holds the lock");
+        assert!(
+            Lock::acquire(&cache)
+                .expect("the lock directory is readable")
+                .is_none(),
+            "a second process must not start its own download"
+        );
+
+        drop(first);
+        assert!(
+            Lock::acquire(&cache)
+                .expect("the lock directory can be made")
+                .is_some(),
+            "the lock is free once its holder is done with it"
+        );
+        let _ = fs::remove_dir_all(&cache);
+    }
+
+    /// The lock and the pack are separate things in the same directory, and
+    /// neither may be mistaken for the other.
+    #[test]
+    fn the_lock_is_beside_the_pack_and_not_inside_it() {
+        let cache = cache("lock-path");
+        assert_ne!(lock_path(&cache), directory(&cache));
+        assert!(!lock_path(&cache).starts_with(directory(&cache)));
+        assert_eq!(lock_path(&cache).parent(), directory(&cache).parent());
+    }
+
+    /// The second server ends up translating too, on the pack the first one
+    /// fetched - rather than showing English until someone restarts it.
+    #[test]
+    fn the_process_that_waited_uses_the_pack_the_other_one_installed() {
+        let base = serve(pack(EXPECTED_MODEL_VERSION));
+        let cache = cache("waits");
+        let lock = Lock::acquire(&cache)
+            .expect("the lock directory can be made")
+            .expect("nobody holds the lock");
+
+        let waiting = {
+            let cache = cache.clone();
+            thread::spawn(move || wait_for_the_other_process(&cache, QUICK_POLL, QUICK_TIMEOUT))
+        };
+
+        let installed = fetch(&cache, &base).expect("the pack downloads");
+        drop(lock);
+
+        assert_eq!(
+            waiting.join().expect("the waiting thread finished").ok(),
+            Some(installed)
+        );
+        let _ = fs::remove_dir_all(&cache);
+    }
+
+    /// A download that failed releases the lock without installing anything,
+    /// and whoever was waiting has to stop waiting rather than sit out the
+    /// whole timeout.
+    #[test]
+    fn the_process_that_waited_gives_up_when_the_other_one_installs_nothing() {
+        let cache = cache("waits-in-vain");
+        let lock = Lock::acquire(&cache)
+            .expect("the lock directory can be made")
+            .expect("nobody holds the lock");
+
+        let waiting = {
+            let cache = cache.clone();
+            thread::spawn(move || wait_for_the_other_process(&cache, QUICK_POLL, QUICK_TIMEOUT))
+        };
+
+        drop(lock);
+        let error = waiting
+            .join()
+            .expect("the waiting thread finished")
+            .expect_err("there is no pack to find");
+
+        assert!(
+            format!("{error}").contains("stopped without one"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(&cache);
+    }
+
+    /// Whichever path it took, no lock is left behind for the next run to wait
+    /// on.
+    #[test]
+    fn fetching_leaves_no_lock_behind() {
+        let base = serve(pack(EXPECTED_MODEL_VERSION));
+        let cache = cache("unlocked");
+
+        obtain(&cache, &base).expect("the pack downloads");
+        assert!(!lock_path(&cache).exists());
+
+        let _ = fs::remove_dir_all(&cache);
+    }
+
+    /// A lock made just now belongs to a process that is still running, and
+    /// taking it away would put two downloads in the same staging directory.
+    #[test]
+    fn a_fresh_lock_is_not_stale() {
+        let cache = cache("fresh");
+        let _lock = Lock::acquire(&cache)
+            .expect("the lock directory can be made")
+            .expect("nobody holds the lock");
+
+        assert!(!is_stale(&lock_path(&cache)));
+        let _ = fs::remove_dir_all(&cache);
     }
 }
