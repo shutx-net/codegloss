@@ -213,7 +213,8 @@ CI が重くなるため）。モデル無しでもサーバは動き、コメ�
 
    キーの `"codegloss"` は `editors/zed/extension.toml` の
    `[language_servers.codegloss]` のテーブルキーであって、表示名の
-   `name = "CodeGloss"` ではない。取り違えると設定が効かない。
+   `name = "CodeGloss"` でも、レジストリでの拡張 id（`id = "codegloss-lsp"`）でも
+   ない。同じファイルに紛らわしい名前が 3 つある。取り違えると設定が効かない。
 
    `.zed/settings.json` は環境ごとに絶対パスが変わるので `.gitignore` してある。
 

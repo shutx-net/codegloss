@@ -1,6 +1,6 @@
-id = "codegloss"
+id = "codegloss-lsp"
 name = "CodeGloss"
-description = "英語コメントの日本語訳をエディタ上に表示する"
+description = "Shows Japanese translations of English code comments in the editor"
 version = "0.0.2"
 schema_version = 1
 authors = ["shutx <169037737+shutx-net@users.noreply.github.com>"]
@@ -8,6 +8,9 @@ repository = "https://github.com/shutx-net/codegloss"
 
 # テーブルキー（codegloss）がそのまま language server id になる。Zed の
 # settings.json でも "lsp": { "codegloss": ... } と書く。name は表示名。
+# **上の id（codegloss-lsp）とは別物。**あちらはレジストリでの拡張の id で、
+# 「language server しか提供しない拡張は -lsp を付けろ」という規約に合わせてある。
+# こちらを変えると利用者の settings.json が壊れる。
 #
 # languages の値は Zed 側の言語名と一致させる必要がある。Rust は Zed 本体に
 # 組み込まれているので確実に当たる。他の言語は別の拡張が提供するため、
@@ -15,3 +18,17 @@ repository = "https://github.com/shutx-net/codegloss"
 [language_servers.codegloss]
 name = "CodeGloss"
 languages = ["Rust"]
+
+# Zed は capability に載っていない URL の `download_file` を拒む
+# （`capability_granter.grant_download_file`）。これが無いと拡張はサーバを
+# 落とせない。レジストリの要件というだけではなく、**無いと実行時に失敗する**。
+# dev extension でも同じく失敗する。
+#
+# 自分のリリースアセットだけに絞ってある。リリースアセットの `download_url` は
+# GitHub の `browser_download_url`、つまり
+# `https://github.com/shutx-net/codegloss/releases/download/<tag>/<asset>` なので、
+# 固定の 4 つがタグより前のすべて。
+[[capabilities]]
+kind = "download_file"
+host = "github.com"
+path = ["shutx-net", "codegloss", "releases", "download", "**"]
