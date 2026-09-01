@@ -39,34 +39,46 @@ fn beam_search_keeps_a_clause_that_greedy_drops() {
     );
 }
 
-/// The cache must not carry anything from one segment into the next.
+/// A segment must translate the same whoever it travels with.
 ///
-/// `Engine::translate` resets it per segment and the search reorders it per
-/// step, and a mistake in either shows up here and nowhere else: a translation
-/// contaminated by its predecessor is still fluent Japanese.
+/// Two things could break it and neither would be visible in the result: a KV
+/// cache carried from one segment into the next, and a padded batch whose pad
+/// positions leak into the sentence beside them. The companion here is far
+/// longer than the segment under test on purpose - that is what makes the
+/// padding, and the padding is what the mask in `src/marian.rs` exists for.
 #[test]
 #[ignore = "needs a model pack: CODEGLOSS_MODEL_PACK=<dir> ... -- --ignored"]
 fn a_segment_translates_the_same_whoever_came_before_it() {
     let translator = support::translator();
-    let first = Segment::new("The worker owns the only handle to the model.");
-    let second = Segment::new("Returns the currently authenticated user.");
+    let short = Segment::new("Returns the currently authenticated user.");
+    let long = Segment::new(
+        "The worker owns the only handle to the model, so a translation that arrives while \
+         another is running waits for it rather than loading a second copy of the weights, \
+         which is also why the queue is bounded rather than left to grow with the editor.",
+    );
 
-    let together = translator
-        .translate(&[first.clone(), second.clone()])
+    let alone = translator.translate(std::slice::from_ref(&short)).unwrap();
+    let after = translator
+        .translate(&[long.clone(), short.clone()])
         .unwrap();
-    let alone = translator.translate(std::slice::from_ref(&second)).unwrap();
-    let reversed = translator
-        .translate(&[second.clone(), first.clone()])
+    let before = translator
+        .translate(&[short.clone(), long.clone()])
         .unwrap();
 
     assert_eq!(
-        together[1], alone[0],
-        "the batch changed the second segment"
+        after[1], alone[0],
+        "padding it against a longer segment changed the translation"
     );
     assert_eq!(
-        reversed[0], alone[0],
-        "the order of the batch changed a segment"
+        before[0], alone[0],
+        "the order of the batch changed the translation"
     );
+
+    // And the long one is not changed by the short one either, which is the
+    // same property from the other side.
+    let long_alone = translator.translate(std::slice::from_ref(&long)).unwrap();
+    assert_eq!(before[1], long_alone[0]);
+    assert_eq!(after[0], long_alone[0]);
 }
 
 /// The search is deterministic: it picks by score, never by chance, and the
