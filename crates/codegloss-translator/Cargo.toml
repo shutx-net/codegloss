@@ -16,7 +16,6 @@ anyhow.workspace = true
 codegloss-core = { path = "../codegloss-core" }
 candle-core = { workspace = true, optional = true }
 candle-nn = { workspace = true, optional = true }
-candle-transformers = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
@@ -30,7 +29,6 @@ default = []
 candle = [
     "dep:candle-core",
     "dep:candle-nn",
-    "dep:candle-transformers",
     "dep:serde",
     "dep:serde_json",
     "dep:tokenizers",
@@ -58,4 +56,9 @@ required-features = ["candle"]
 
 [[test]]
 name = "placeholders"
+required-features = ["candle"]
+
+# 探索そのもの（KV キャッシュの並べ替えと打ち切り）を見るテスト。
+[[test]]
+name = "decoding"
 required-features = ["candle"]

@@ -14,6 +14,8 @@
 
 #[cfg(feature = "candle")]
 mod candle;
+#[cfg(feature = "candle")]
+mod marian;
 mod passthrough;
 
 use codegloss_core::Segment;

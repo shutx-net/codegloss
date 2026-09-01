@@ -19,11 +19,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::marian;
 use anyhow::{Context, Result, anyhow, bail};
 use candle_core::{DType, Device, Shape, Tensor};
 use candle_nn::var_builder::SimpleBackend;
 use candle_nn::{Init, Linear, Module, VarBuilder};
-use candle_transformers::models::marian;
 use codegloss_core::Segment;
 use serde::Deserialize;
 use tokenizers::Tokenizer;
@@ -215,13 +215,14 @@ struct Engine {
     dtype: DType,
     /// Output projection, and the bias Marian adds to it.
     ///
-    /// `marian::MTModel::decode` owns a pair of these already, but it also
-    /// builds its causal mask in F32 and adds it to the attention weights -
-    /// which is a dtype mismatch the moment the model is not F32, and there is
-    /// no way to hand it a mask. Driving `MTModel::decoder` directly is what
-    /// makes [`Precision`] a choice at all. It costs nothing: `VarBuilder`
-    /// hands out tensors that share their storage, so this is the same
-    /// embedding matrix the model is using, not a second copy.
+    /// Upstream's `MTModel::decode` owned a pair of these, but it also built
+    /// its causal mask in F32 and added it to the attention weights - a dtype
+    /// mismatch the moment the model is not F32, with no way to hand it a mask
+    /// instead. Driving `MTModel::decoder` directly is what makes
+    /// [`Precision`] a choice at all, and why the fork in `marian.rs` drops
+    /// `decode` altogether. It costs nothing: `VarBuilder` hands out tensors
+    /// that share their storage, so this is the same embedding matrix the
+    /// model is using, not a second copy.
     lm_head: Linear,
     final_logits_bias: Tensor,
     /// Added to the logits before picking a token: `0` everywhere and `-inf`
@@ -453,14 +454,11 @@ impl Engine {
     ///   normaliser grows with the length, which is only a bound in the
     ///   direction that does not help.
     ///
-    /// IMPORTANT: there is no incremental KV cache here. candle's `marian`
-    /// keeps the cache private and offers only `reset_kv_cache`, so there is no
-    /// way to permute it when the beams are reordered - and a cache carried
-    /// across a reordering silently attributes one beam's prefix to another.
-    /// The prefix is therefore re-read at every step, which is quadratic in the
-    /// length of the translation. What that costs is measured in
-    /// `docs/model-runtime-notes.md`; taking it back means forking `marian`,
-    /// which is the same fork batching needs.
+    /// The KV cache is carried across steps, and moved with the beams: the
+    /// hypothesis in row `i` changes parent at nearly every step, and a cache
+    /// left in place would answer with the prefix that used to be there. That
+    /// is what [`marian::Decoder::reorder_kv_cache`] is for, and what this
+    /// crate carries its own copy of `marian` to be able to call.
     fn search(&mut self, encoder_xs: &Tensor) -> Result<Vec<u32>> {
         let (_, source_len, model_dim) = encoder_xs.dims3()?;
         // Every beam translates the same sentence, so they all attend to the
@@ -477,16 +475,17 @@ impl Engine {
 
         for _ in 0..MAX_NEW_TOKENS {
             let width = live.len();
-            let length = live[0].tokens.len();
-
-            self.model.reset_kv_cache();
-            let prefixes: Vec<u32> = live
+            // The cache holds every token but the last, so the last is all
+            // that goes back in. It is also true on the first pass, where the
+            // cache is empty and the only token is the decoder's start.
+            let past = live[0].tokens.len() - 1;
+            let last: Vec<u32> = live
                 .iter()
-                .flat_map(|hypothesis| hypothesis.tokens.iter().copied())
+                .map(|hypothesis| hypothesis.tokens[past])
                 .collect();
-            let input_ids = Tensor::from_vec(prefixes, (width, length), &self.device)?;
+            let input_ids = Tensor::from_vec(last, (width, 1), &self.device)?;
 
-            let logits = self.decode(&input_ids, &encoder_xs.narrow(0, 0, width)?, 0)?;
+            let logits = self.decode(&input_ids, &encoder_xs.narrow(0, 0, width)?, past)?;
             let logits = logits.squeeze(1)?.broadcast_add(&self.forbidden)?;
             // In F32 whatever the weights are held in: a sum of log
             // probabilities over a whole sentence is exactly the accumulation
@@ -496,6 +495,7 @@ impl Engine {
             let vocabulary = logprobs.len() / width;
 
             let mut next = Vec::with_capacity(self.beams);
+            let mut parents: Vec<u32> = Vec::with_capacity(self.beams);
             for (score, beam, token) in best(&logprobs, vocabulary, &live, 2 * self.beams) {
                 let mut tokens = live[beam].tokens.clone();
                 if self.is_end(token) {
@@ -503,14 +503,20 @@ impl Engine {
                 } else if next.len() < self.beams {
                     tokens.push(token);
                     next.push(Hypothesis { tokens, score });
+                    parents.push(beam as u32);
                 }
             }
 
-            if finished.len() >= self.beams || next.is_empty() {
-                live = next;
+            live = next;
+            if finished.len() >= self.beams || live.is_empty() {
                 break;
             }
-            live = next;
+
+            // Row `i` of the batch now continues what row `parents[i]` held,
+            // and the cache has to say the same. On the first pass this also
+            // widens it from the one row the start token needed.
+            let parents = Tensor::from_vec(parents, (live.len(),), &self.device)?;
+            self.model.reorder_kv_cache(&parents)?;
         }
 
         // Nothing finished inside the budget: the best hypothesis still running
@@ -546,10 +552,10 @@ impl Engine {
             .collect();
         let mask = Tensor::from_vec(mask, (length, length), &self.device)?.to_dtype(self.dtype)?;
 
-        let hidden = self
-            .model
-            .decoder()
-            .forward(input_ids, Some(encoder_xs), past, &mask)?;
+        let hidden =
+            self.model
+                .decoder()
+                .forward(input_ids, Some(encoder_xs), past, &mask, None)?;
         // Only the last position can produce the next token. Projecting the
         // rest onto a 32k vocabulary is the most expensive way there is to
         // throw work away, and the search feeds whole prefixes.
@@ -578,7 +584,7 @@ impl Engine {
         }
 
         let tokens = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
-        Ok(self.model.encoder().forward(&tokens, 0)?)
+        Ok(self.model.encoder().forward(&tokens, 0, None)?)
     }
 }
 
