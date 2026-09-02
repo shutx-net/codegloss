@@ -18,6 +18,12 @@ rust-toolchain.toml  (channel = "1.98.0")
 
 `.devcontainer/devcontainer.json` にはあえて Rust のバージョンを書いていない。そこに書くと `rust-toolchain.toml` との二重管理になり、それ自体がずれの原因になる。
 
+**例外が 1 つある。`editors/zed/Cargo.toml` の `rust-version` はここに揃えない。**
+拡張をビルドするのは Zed のレジストリであって、このファイルは向こうに効かない
+（向こうは 2026-09 時点で rustc 1.90.0）。揃えるとレジストリの CI が
+`requires rustc X` で落ちる。値は拡張のコードと依存が実際に要求する下限で、
+CI の `msrv` ジョブがその版でビルドできることを見ている。
+
 ## 選択肢 A: Nix flake
 
 [Flakes を有効にした Nix](https://nixos.org/download/) が必要。
