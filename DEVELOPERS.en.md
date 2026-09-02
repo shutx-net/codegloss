@@ -24,6 +24,13 @@ identical. rust-overlay fetches from `https://static.rust-lang.org/dist`
 Naming one there would duplicate what `rust-toolchain.toml` says, and the
 duplication is itself how the two drift apart.
 
+**There is one exception: `rust-version` in `editors/zed/Cargo.toml` is not kept
+in step with this file.** The extension is built by the Zed extension registry,
+which this file has no say over (it was on rustc 1.90.0 as of 2026-09). Matching
+the two makes the registry's CI fail with `requires rustc X`. The value is the
+floor the extension's own code and dependencies actually need, and CI's `msrv`
+job checks that it builds at that version.
+
 ## Option A: Nix flake
 
 Needs [Nix with flakes enabled](https://nixos.org/download/).

@@ -78,3 +78,48 @@ jobs:
       # wasip2 はパッケージ名の `-` を `_` に正規化する。
       - name: check artifact
         run: test -f editors/zed/target/wasm32-wasip2/release/codegloss_zed.wasm
+
+  # 上の wasm ジョブは rust-toolchain.toml の版（開発用の最新）でしかビルドしない。
+  # 拡張をビルドするのは Zed のレジストリで、向こうはうちより古い rustc を使う。
+  # そこで、宣言した rust-version でも通ることをここで見る。
+  #
+  # このジョブが捕まえるのは「rust-version を据え置いたまま、新しい版でしか
+  # 通らない書き方をした」場合である。**逆は捕まえられない**：rust-version を
+  # 上げてしまった場合はその版でビルドして通ってしまう。レジストリ側の rustc が
+  # いくつかは、このリポジトリからは分からないため。上げるときは
+  # editors/zed/Cargo.toml のコメントを読むこと。
+  msrv:
+    name: zed extension (msrv)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # 版を書く場所は増やさない。Cargo.toml の rust-version をそのまま使う。
+      - name: read the declared rust-version
+        id: msrv
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' editors/zed/Cargo.toml | head -1)
+          [ -n "$version" ] || {
+            echo "NG: editors/zed/Cargo.toml に rust-version がありません" >&2
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "declared rust-version: $version"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          target: wasm32-wasip2
+          cache-workspaces: editors/zed
+
+      # RUSTUP_TOOLCHAIN で明示するのが要点。これが無いと、cargo が上へ辿って
+      # ルートの rust-toolchain.toml を拾い、結局そちらの版でビルドしてしまう。
+      # 文字列は setup に渡したものと同じにする（`1.88` と `1.88.0` は rustup に
+      # とって別のツールチェーンで、後者には wasm ターゲットが入っていない）。
+      - name: build
+        working-directory: editors/zed
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
+        run: cargo build --target wasm32-wasip2 --release

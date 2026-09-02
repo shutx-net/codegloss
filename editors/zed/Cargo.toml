@@ -3,7 +3,15 @@ name = "codegloss-zed"
 description = "CodeGloss の Zed 拡張"
 version = "0.0.2"
 edition = "2024"
-rust-version = "1.98"
+# IMPORTANT: これはルートの rust-toolchain.toml とは別物で、揃えてはいけない。
+# 拡張をビルドするのは Zed のレジストリであって、うちのツールチェーン定義は
+# 向こうに効かない（向こうは 2026-09 時点で rustc 1.90.0）。ここに開発用の版を
+# 書くとレジストリの CI が「requires rustc X」で落ちる。実際に落ちた。
+#
+# 1.88 は下限を測って決めた。1.87 では zed_extension_api が引く icu_* が
+# 「requires rustc 1.88」で止まり、自分のコードも let chains（1.88 で安定）を
+# 使っている。CI の msrv ジョブがこの版でのビルドを見ている。
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/shutx-net/codegloss"
 publish = false

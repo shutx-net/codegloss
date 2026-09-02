@@ -44,6 +44,8 @@ Cargo ワークスペースがあり、`cargo build --workspace` / `cargo test -
 
 **IMPORTANT: Rust のバージョンを変えるときは `rust-toolchain.toml` だけを編集する。** flake.nix も devcontainer の rustup も同じこのファイルを読むため、他の場所に版を書くと二重管理になる。
 
+**例外が 1 つある。`editors/zed/Cargo.toml` の `rust-version` はここに揃えない。**拡張をビルドするのは Zed のレジストリで、うちのツールチェーン定義は向こうに効かない（向こうは 2026-09 時点で rustc 1.90.0）。揃えるとレジストリの CI が「requires rustc X」で落ちる。値は拡張のコードと依存が実際に要求する下限（いまは 1.88）で、CI の `msrv` ジョブがその版でビルドできることを見ている。
+
 セットアップの検証は `scripts/verify-toolchain.sh`。
 
 ## 確定済みの設計判断
