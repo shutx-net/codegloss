@@ -26,7 +26,8 @@ const DOCUMENT_URI: &str = "file:///tmp/codegloss/preservation.rs";
 
 /// Every pattern Issue #1 lists, in one file:
 /// a `TODO:` prefix, identifiers of each shape, inline code, a URL, and a
-/// Javadoc block with `@param` / `@return` / `@throws`.
+/// Javadoc block with `@param` / `@return` / `@throws`, plus the comment of
+/// more than one sentence Issue #49 was about.
 const DOCUMENT_TEXT: &str = concat!(
     "// TODO: cache the result of find_user before UserRepository::load() runs.\n",
     "fn find_user() {}\n",
@@ -44,6 +45,9 @@ const DOCUMENT_TEXT: &str = concat!(
     " * @throws AuthenticationException if authentication failed\n",
     " */\n",
     "fn current_user() {}\n",
+    "\n",
+    "/// Returns the cached user. Nothing is written back.\n",
+    "fn cached_user() {}\n",
 );
 
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -224,6 +228,23 @@ async fn a_javadoc_block_keeps_its_line_structure_and_its_tags() {
     );
 }
 
+/// Two sentences in one comment come back with the space between them.
+///
+/// The defect of Issue #49, at the level the reader meets it: `join_sentences`
+/// suppressed the space after an ASCII full stop as well as after a `。`, so a
+/// comment of two sentences was shown as `...user.Nothing...`. The engine here
+/// is the one that produces it in production - a server with no model pack
+/// answers with its input, which is English.
+#[tokio::test(flavor = "current_thread")]
+async fn a_comment_of_two_sentences_keeps_the_space_between_them() {
+    let mut service = glossed_document().await;
+
+    assert_eq!(
+        gloss_at(&mut service, 17, 10).await,
+        "Returns the cached user. Nothing is written back."
+    );
+}
+
 /// The same glosses reach the other display mode. A lens is one line high, so
 /// the Javadoc block is folded and cut - that is the code lens doing it, and everything
 /// that fits is still exact.
@@ -268,7 +289,7 @@ async fn every_comment_of_the_document_is_glossed() {
     let mut service = glossed_document().await;
     let titles = lens_titles(&mut service).await;
 
-    assert_eq!(titles.len(), 4);
+    assert_eq!(titles.len(), 5);
     for (line, title) in titles {
         assert!(
             title != codegloss_lsp::code_lens::PENDING_TITLE,

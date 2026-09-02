@@ -34,6 +34,20 @@ use std::borrow::Cow;
 /// Characters that can end a sentence.
 const TERMINATORS: [char; 3] = ['.', '!', '?'];
 
+/// Sentence ends that carry their own break, and so need no space after them.
+///
+/// Japanese is set without spaces between its sentences: the break is inside
+/// the `。` glyph, and a space after one would set the next sentence too far
+/// away. An ASCII full stop is the opposite - it is one character wide and the
+/// space is what makes the next sentence a separate word.
+///
+/// Deliberately **not** [`TERMINATORS`], which is the splitter's list of what
+/// ends a sentence and holds `.`, `!` and `?`. The two lists look alike and
+/// unifying them is exactly the mistake this constant exists to stop: with the
+/// ASCII terminators in here, `Returns the user. Nothing is cached.` came back
+/// out of [`join_sentences`] as `Returns the user.Nothing is cached.`
+const JAPANESE_TERMINATORS: [char; 4] = ['。', '！', '？', '．'];
+
 /// Characters that can end a clause without ending a sentence.
 ///
 /// A long sentence hinged on one of these is truncated exactly like a
@@ -270,9 +284,17 @@ pub fn engine_form(sentence: &str) -> Cow<'_, str> {
 /// Puts translated sentences back together as the one line they came from.
 ///
 /// Japanese carries its own sentence break in `。`, so nothing is inserted
-/// after one. A translation that ends in something else - a fragment, a
-/// heading, a unit the engine returned unchanged - gets a space, because
-/// running two of those together would read as one word.
+/// after one - see [`JAPANESE_TERMINATORS`]. Everything else gets a space: a
+/// fragment, a heading, a unit the engine returned unchanged, and an English
+/// sentence, because running two of those together would read as one word.
+///
+/// **The decision is per join, on the character before it, and it has to be.**
+/// A unit is not written in one language: a fragment whose translation lost a
+/// placeholder falls back to its own English while the fragments around it stay
+/// Japanese ([`unmask_fragment`](crate::Masked::unmask_fragment)), so
+/// `ユーザを返します。` / `Fails when X0Q is unknown.` / `何も…` needs the
+/// first join suppressed and the second one not, in a single call. A target
+/// language handed in from outside could only get one of the two right.
 pub fn join_sentences(translations: &[String]) -> String {
     let mut joined = String::new();
     for translation in translations {
@@ -280,7 +302,7 @@ pub fn join_sentences(translations: &[String]) -> String {
         if translation.is_empty() {
             continue;
         }
-        if !joined.is_empty() && !joined.ends_with(['。', '！', '？', '．', '.', '!', '?']) {
+        if !joined.is_empty() && !joined.ends_with(JAPANESE_TERMINATORS) {
             joined.push(' ');
         }
         joined.push_str(translation);
@@ -534,6 +556,69 @@ mod tests {
                 "IDが不明な時に失敗します。".to_owned(),
             ]),
             "ユーザを返します。IDが不明な時に失敗します。"
+        );
+
+        // One case per character of `JAPANESE_TERMINATORS`: the set is what
+        // this fix narrowed, and narrowing it too far reads the same way at the
+        // call site.
+        for (first, joined) in [
+            ("本当に！", "本当に！次の文。"),
+            ("そうですか？", "そうですか？次の文。"),
+            ("終わり．", "終わり．次の文。"),
+        ] {
+            assert_eq!(
+                join_sentences(&[first.to_owned(), "次の文。".to_owned()]),
+                joined
+            );
+        }
+    }
+
+    /// The defect of Issue #49: an English sentence end is one character wide
+    /// and the space after it is what separates two words.
+    #[test]
+    fn english_sentences_are_joined_with_a_space() {
+        assert_eq!(
+            join_sentences(&[
+                "Returns the user.".to_owned(),
+                "Nothing is cached.".to_owned()
+            ]),
+            "Returns the user. Nothing is cached."
+        );
+        assert_eq!(
+            join_sentences(&["Really?!".to_owned(), "It does.".to_owned()]),
+            "Really?! It does."
+        );
+        assert_eq!(
+            join_sentences(&["Wait...".to_owned(), "The rest arrives later.".to_owned()]),
+            "Wait... The rest arrives later."
+        );
+    }
+
+    /// One unit, two languages: the fragment in the middle lost a placeholder
+    /// and fell back to its English while its neighbours came back Japanese.
+    ///
+    /// The join before it is suppressed and the join after it is not, in one
+    /// call - which is why the character before each join decides, and why a
+    /// target language handed to this function could not.
+    #[test]
+    fn a_mixed_unit_gets_a_space_only_where_the_english_ends() {
+        assert_eq!(
+            join_sentences(&[
+                "ユーザを返します。".to_owned(),
+                "Fails when `id` is unknown.".to_owned(),
+                "何もキャッシュされません。".to_owned(),
+            ]),
+            "ユーザを返します。Fails when `id` is unknown. 何もキャッシュされません。"
+        );
+    }
+
+    /// A Japanese fragment that ends in a restored identifier or a placeholder
+    /// keeps the space it has always had.
+    #[test]
+    fn a_fragment_that_ends_in_code_still_gets_its_space() {
+        assert_eq!(
+            join_sentences(&["これを呼ぶのは find_user".to_owned(), "次の文。".to_owned()]),
+            "これを呼ぶのは find_user 次の文。"
         );
     }
 

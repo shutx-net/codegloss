@@ -1,0 +1,3 @@
+/// Returns the cached user. Nothing is written back.
+///
+/// The lookup is a plain map read, so `find_user` is never called twice.
