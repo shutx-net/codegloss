@@ -662,29 +662,49 @@ mod tests {
         assert_eq!(plan.restore(&sources), plan.source());
     }
 
+    /// Every shape a comment takes, as a raw comment block.
+    ///
+    /// The table the two round-trip tests below share. A unit of more than one
+    /// sentence is in it several times over, because that is the shape both of
+    /// them used to have to avoid: [`join_sentences`] put no space after a full
+    /// stop, so an echoed `Returns the user. Nothing is cached.` came back as
+    /// `Returns the user.Nothing is cached.` (Issue #49).
+    const RAWS: [&str; 11] = [
+        JAVADOC,
+        "// Return the cached user.",
+        "/// Returns `UserDetails` when authentication succeeds.",
+        "/// See https://example.com/docs for the protocol.",
+        "// TODO: replace find_user with UserRepository::load().",
+        "/// Loads a user.\n///\n/// ```\n/// let user = find_user(id);\n/// ```",
+        // More than one sentence per unit, which is the shape Issue #49 broke.
+        "/// Returns the user. Nothing is cached.",
+        "/// Returns `UserDetails`. Fails when `id` is unknown.",
+        "// Really?! It does. Wait... The rest arrives later.",
+        // A sentence that finishes on the line after the one it opened on: the
+        // two `//` lines are one unit, and the boundary is inside it.
+        "// Returns the user. Nothing is\n// cached, and nothing is written back.",
+        // The same, inside a Javadoc paragraph, with a tag line after it.
+        "/**\n * Returns the user. Nothing is cached.\n *\n * @return the user\n */",
+    ];
+
     /// The property the whole phase exists for: with an engine that returns its
     /// input, a block comes back exactly as its prose went in.
     ///
     /// Every raw here is one whose segments are its sentences. A unit split at
     /// a comma is not, and cannot be: what such a segment carries is a full stop
     /// the comment never had ([`engine_form`]), so an engine that echoes it
-    /// echoes that too. The exact property for those is stated one test up, over
+    /// echoes that too. The exact property for those is stated in
+    /// [`restore_of_sources_is_the_source_for_every_shape`], over
     /// [`GlossPlan::sources`] - the English a fragment actually falls back to -
-    /// which is the string the rewrite was kept out of. (A unit holding two
-    /// full-stopped sentences is already not exact either, for an older reason:
-    /// `join_sentences` puts no space after a full stop, so an echoed
-    /// `Returns the user. Nothing is cached.` comes back with the space gone.
-    /// Only the model ever sees that path, and only English reaches it.)
+    /// which is the string the rewrite was kept out of.
+    ///
+    /// An engine that returns its input is not a hypothetical: it is
+    /// `PassthroughTranslator`, the engine every install runs until its model
+    /// pack arrives, and the one a build without the `candle` feature has at
+    /// all. What this test asserts is what such a reader is shown.
     #[test]
     fn a_passthrough_translation_restores_the_source_exactly() {
-        for raw in [
-            JAVADOC,
-            "// Return the cached user.",
-            "/// Returns `UserDetails` when authentication succeeds.",
-            "/// See https://example.com/docs for the protocol.",
-            "// TODO: replace find_user with UserRepository::load().",
-            "/// Loads a user.\n///\n/// ```\n/// let user = find_user(id);\n/// ```",
-        ] {
+        for raw in RAWS {
             let plan = GlossPlan::new(raw);
             let translations: Vec<String> = plan
                 .segments()
@@ -693,6 +713,24 @@ mod tests {
                 .collect();
 
             assert_eq!(plan.restore(&translations), plan.source(), "in {raw:?}");
+        }
+    }
+
+    /// The same round trip over [`GlossPlan::sources`]: the English a fragment
+    /// whose translation lost a placeholder falls back to is the prose it was
+    /// cut from, joined back up unchanged.
+    ///
+    /// Stronger than the test above in the one place that test cannot reach -
+    /// a unit cut at a comma, whose segment carries a full stop the comment
+    /// never had - and weaker nowhere, so the table is the same one.
+    #[test]
+    fn restore_of_sources_is_the_source_for_every_shape() {
+        for raw in RAWS.into_iter().chain([
+            "/// Dropping it closes the socket and wakes every task blocked on accept, \
+             which is why the shutdown is not graceful.",
+        ]) {
+            let plan = GlossPlan::new(raw);
+            assert_eq!(plan.restore(&plan.sources()), plan.source(), "in {raw:?}");
         }
     }
 

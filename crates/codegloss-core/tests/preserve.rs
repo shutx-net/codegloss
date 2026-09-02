@@ -16,14 +16,22 @@ use codegloss_core::{CommentShape, GlossPlan, mask};
 const JAVADOC: &str = include_str!("fixtures/javadoc.txt");
 const RUSTDOC: &str = include_str!("fixtures/rustdoc.txt");
 const LINE_COMMENTS: &str = include_str!("fixtures/line_comments.txt");
+/// A block whose first unit is two sentences: the shape Issue #49 broke, and
+/// the one the three fixtures above happen not to have.
+const PROSE: &str = include_str!("fixtures/prose.txt");
 
 /// A fixture as the parser would hand it over: no trailing newline.
 fn fixture(raw: &str) -> &str {
     raw.trim_end_matches('\n')
 }
 
-fn fixtures() -> [&'static str; 3] {
-    [fixture(JAVADOC), fixture(RUSTDOC), fixture(LINE_COMMENTS)]
+fn fixtures() -> [&'static str; 4] {
+    [
+        fixture(JAVADOC),
+        fixture(RUSTDOC),
+        fixture(LINE_COMMENTS),
+        fixture(PROSE),
+    ]
 }
 
 /// The passthrough engine: every segment comes back as it went in.
@@ -253,6 +261,21 @@ fn the_fixtures_mask_into_exactly_these_segments() {
             "X0Q return the cached user when X1Q hits, and fall back to X2Q otherwise.",
             vec!["TODO:", "find_user", "UserRepository::load()"]
         )]
+        .map(|(text, spans)| (
+            text.to_owned(),
+            spans.into_iter().map(str::to_owned).collect::<Vec<_>>()
+        ))
+    );
+
+    assert_eq!(
+        masked(fixture(PROSE)),
+        [
+            ("Returns the cached user. Nothing is written back.", vec![]),
+            (
+                "The lookup is a plain map read, so X0Q is never called twice.",
+                vec!["`find_user`"]
+            ),
+        ]
         .map(|(text, spans)| (
             text.to_owned(),
             spans.into_iter().map(str::to_owned).collect::<Vec<_>>()
