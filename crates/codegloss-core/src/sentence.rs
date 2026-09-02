@@ -142,9 +142,18 @@ fn opens_a_sentence(rest: &str) -> bool {
 /// in a sentence.
 fn is_abbreviation(piece: &str) -> bool {
     let word = piece.trim_end_matches(TERMINATORS);
-    let word = &word[word
-        .rfind(|character: char| !(character.is_alphanumeric() || character == '.'))
-        .map_or(0, |offset| offset + 1)..];
+    // The last word starts after the separator before it. `char_indices`
+    // rather than `rfind`, because `rfind` gives the offset the separator
+    // *starts* at: adding one lands inside it whenever it is not one byte, and
+    // slicing there panics. A comment carrying `§7.2.` or a pasted `”` is
+    // enough, and this runs on the worker's task rather than inside
+    // `spawn_blocking`, so the panic took translation down for the session.
+    let start = word
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !(character.is_alphanumeric() || *character == '.'))
+        .map_or(0, |(offset, character)| offset + character.len_utf8());
+    let word = &word[start..];
 
     // `Returns A. B is the other one.` - a lone capital is an initial, not a
     // sentence.
@@ -179,6 +188,35 @@ pub fn join_sentences(translations: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `rfind` reports where a character starts, so the old `+ 1` sliced into
+    /// any separator wider than a byte and panicked. These are the two shapes
+    /// that reach it from real comments: a section sign written before a
+    /// numbered reference, and a quotation mark pasted in from prose.
+    #[test]
+    fn a_multibyte_separator_before_a_full_stop_does_not_panic() {
+        assert_eq!(
+            split_sentences("See docs \u{a7}7.2. The rest is here."),
+            ["See docs \u{a7}7.2.", "The rest is here."]
+        );
+        assert_eq!(
+            split_sentences("It is called \u{201c}the handle\u{201d}. The rest is here."),
+            [
+                "It is called \u{201c}the handle\u{201d}.",
+                "The rest is here."
+            ]
+        );
+    }
+
+    /// The separator is found the same way it was; only the offset changed.
+    #[test]
+    fn the_last_word_is_still_what_decides_an_abbreviation() {
+        assert!(is_abbreviation("e.g."));
+        assert!(is_abbreviation("Returns A."));
+        assert!(!is_abbreviation("the socket."));
+        // No separator at all: the whole piece is the word.
+        assert!(is_abbreviation("etc."));
+    }
 
     #[test]
     fn a_single_sentence_is_one_piece() {
