@@ -127,7 +127,8 @@ pub struct GlossKey(pub [u8; 32]);
 ///
 /// - `1` - one segment per unit.
 /// - `2` - one segment per sentence.
-pub const PIPELINE_VERSION: &str = "2";
+/// - `3` - a Javadoc inline tag is one protected span.
+pub const PIPELINE_VERSION: &str = "3";
 
 impl GlossKey {
     /// Separator between the hashed fields. NUL cannot appear in a language tag
@@ -165,7 +166,7 @@ mod tests {
     fn the_key_encoding_is_stable() {
         assert_eq!(
             GlossKey::new("fugumt-en-ja@1", "en", "ja", "Returns the user.").to_hex(),
-            "cf0ba6d78b58af57c024b600e0767307601d713cba9145d38a30a41adc00c81e"
+            "186012f40bfcef80f988ef815b0e52db8c0b5728cb16ac2da7042658749575ac"
         );
     }
 
