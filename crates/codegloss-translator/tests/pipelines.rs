@@ -49,8 +49,8 @@ use std::fmt::Write as _;
 use std::sync::OnceLock;
 
 use codegloss_core::{
-    CommentShape, GlossPlan, Masked, Segment, SpanKind, join_sentences, mask, placeholder,
-    split_sentences,
+    CommentShape, GlossPlan, Masked, Segment, SpanKind, engine_form, join_sentences, mask,
+    placeholder, split_sentences,
 };
 use codegloss_translator::{PassthroughTranslator, Translator};
 
@@ -225,10 +225,26 @@ impl Corpus {
             .flat_map(|unit| unit.fragments.iter().map(move |fragment| (unit, fragment)))
     }
 
-    /// What `policy` hands the engine, one entry per fragment.
+    /// Each fragment as `policy` reveals it, one entry per fragment.
+    ///
+    /// The arm's fragment as it is written: what the answer is put back
+    /// against, and what a fragment that lost a placeholder falls back to.
+    /// [`Self::engine_inputs`] is what actually goes to the engine.
     fn inputs(&self, policy: Policy) -> Vec<String> {
         self.fragments()
             .map(|(unit, fragment)| reveal(&unit.masked, &fragment.sentence, policy))
+            .collect()
+    }
+
+    /// What `policy` hands the engine, one entry per fragment.
+    ///
+    /// [`Self::inputs`] through `engine_form`: a fragment cut off at a comma is
+    /// sent with a full stop in the comma's place, which is what `GlossPlan`
+    /// does and so what arm A has to do too.
+    fn engine_inputs(&self, policy: Policy) -> Vec<String> {
+        self.inputs(policy)
+            .iter()
+            .map(|input| engine_form(input).into_owned())
             .collect()
     }
 
@@ -458,7 +474,11 @@ fn measurement() -> &'static Measurement {
             .into_iter()
             .map(|policy| {
                 let inputs = corpus.inputs(policy);
-                let segments: Vec<Segment> = inputs.iter().map(Segment::new).collect();
+                let segments: Vec<Segment> = corpus
+                    .engine_inputs(policy)
+                    .into_iter()
+                    .map(Segment::new)
+                    .collect();
                 let started = std::time::Instant::now();
                 let answers = translator
                     .translate(&segments)
@@ -527,7 +547,8 @@ fn arm_a_reproduces_the_shipped_pipeline() {
     assert!(!corpus.blocks.is_empty(), "the corpus is empty");
 
     let inputs = corpus.inputs(Policy::Everything);
-    let segments: Vec<Segment> = inputs.iter().map(Segment::new).collect();
+    let sent = corpus.engine_inputs(Policy::Everything);
+    let segments: Vec<Segment> = sent.iter().map(Segment::new).collect();
     let answers = PassthroughTranslator
         .translate(&segments)
         .expect("the passthrough engine answers");
@@ -543,12 +564,12 @@ fn arm_a_reproduces_the_shipped_pipeline() {
             .collect();
 
         assert!(
-            offset + shipped.len() <= inputs.len(),
+            offset + shipped.len() <= sent.len(),
             "GlossPlan cut {:?} into more segments than arm A did",
             block.raw
         );
         assert_eq!(
-            inputs[offset..offset + shipped.len()],
+            sent[offset..offset + shipped.len()],
             shipped[..],
             "arm A cuts {:?} into different segments than GlossPlan does",
             block.raw

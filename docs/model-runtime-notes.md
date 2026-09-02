@@ -493,6 +493,12 @@ Returns None once the queue is closed, which happens when the server is shutting
   -> キューが閉じられたら None を返します。          ← which 以下が消滅
 ```
 
+→ **カンマのあとの `which` に限っては 7.6 で切るようにした**（`, which …` を 1 つの
+文として分ける）。なお**この例は測り直すと今は落ちない**。上の実測は貪欲法のもので、
+ビーム幅 4 の今日は同じ文が `キューが閉じられたら None を返します。これはサーバーが
+シャットダウンしているときに発生します。` と節ごと返る。**落ちるのはマスクした形のほう**
+（`None` → `X0Q`）で、そちらは幅 4 でも 12 でも消える。詳しくは 7.6。
+
 **2. 意味が反転する。**
 
 ```
@@ -585,6 +591,10 @@ marian はもともとクロスアテンションの K/V を毎ステップ計�
   `docs/masking-ab.md` に人間が埋める欄として置いてある。
 - ~~**`{@code ...}` などの Javadoc インラインタグ。**前処理が見ていない。~~
   → **7.5 で直した**（構文まるごと 1 スパンとして退避する）。
+- **節がまるごと消える（7.1 の 1）。**カンマのあとに関係節が来る形（`, which …`）
+  だけは **7.6 で直した**。それ以外の位置で節が落ちるのは残っている——`, and …` や
+  `, so …` で切るのは測っていないし、`§12` の腕 D のように「落ちたのを検知して
+  訳し直す」検出器も無い（プレースホルダは戻ってきてしまうので既存の番人は鳴らない）。
 
 ### 7.5 Javadoc のインラインタグを 1 つのスパンにした
 
@@ -648,6 +658,214 @@ Use {@literal a < b} in prose.
 消える）で、インラインタグとは別の問題。
 
 `preserve` の出力が変わるので `PIPELINE_VERSION` は `3` に上げた。
+
+### 7.6 カンマのあとの関係節を 1 つの文として切った
+
+7.1 の 1（節がまるごと消える）のうち、**カンマのあとに関係節が来る形**を直した回。
+**Issue #31。**実測はすべてモデルパック（FuguMT en-ja、f32、幅 4 ＝既定、CPU、release）
+に対して取った。
+
+#### コーパス
+
+正直な母集団は**サーバが実際に見る形のコメント**なので、凍結コーパス（12.1 の 62 ブロック）
+ではなく抽出器で作り直した。この枝（`97b66bd`）で:
+
+```sh
+cargo run -p codegloss-parser --example extract -- $(find crates -name '*.rs') > /tmp/corpus.txt
+```
+
+**1093 ブロック / 1817 断片**（規則を入れる前の断片数）。12.1 のとおり凍結コーパスは
+長いブロックに偏っているので、長い文についての規則はこちらで測るほうが実態に近い。
+
+#### どの規則がどれだけ当たるか
+
+| 規則 | 切る断片 |
+|---|---|
+| **カンマ ＋ 関係代名詞、両側 4 語以上（入れたもの）** | **79（4.3%）** |
+| カンマなら何でも、両側 4 語以上 | 737 |
+| カンマなら何でも、両側 6 語以上 | 513 |
+| カンマなら何でも、両側 8 語以上 | 319 |
+| カンマなら何でも、両側 10 語以上 | 170 |
+
+**カンマなら何でも切る規則は広すぎる。**6 語で 1817 中 513＝6 断片に 1 つ。7.2 は
+「分割だけでは悪くなる」を実測している（ビームサーチが無かった頃の話とはいえ）ので、
+6 つに 1 つを切るのはその実験のやり直しになる。**23 に 1 つ**を、しかも関係節が開く
+ところだけで切るのは別の話。
+
+当たった 79 件の内訳は `which` 74・`where` 4・`whose` 1。`who` / `whom` は 0 件で、
+表に入れてあるのは同じ構文だからであって測ったからではない。
+
+**誤爆は語数ではなく形が防いでいる。** `1,000` はカンマの後ろに空白が無い
+（`split_sentences` はどの境界にも空白を要求する）。`however,` はカンマが語の**後ろ**
+なので次の語が関係代名詞にならない。列挙（`a, b, and c`）・同格（`the cache, a bounded
+map, is shared`）も同じ試験で落ちる。同梱のフィクスチャ
+`crates/codegloss-core/tests/fixtures/line_comments.txt` のカンマは `and` が続くので
+切れない——**6 語規則なら切れていた**。
+
+凍結コーパス（12 のハーネスが使うもの）では **156 → 163 断片**、7 件（4.5%）が動く。
+
+#### 左側の断片の終わり方（これが決め手だった）
+
+同じ 79 件を 4 通りに訳し、**日本語の文字数**で採点した（分割側は左＋右の合計、
+±5 文字は「同じ」）:
+
+| 左側の終わり方 | 長い / 短い / 同じ | 文字数 |
+|---|---|---|
+| 分割しない（1 文のまま） | — | 3140 |
+| `,` のまま | 26 / 19 / 34 | 3385 |
+| カンマを落とす | 28 / 16 / 35 | 3393 |
+| **`.` にする（採用）** | **31 / 10 / 38** | **3538** |
+
+**カンマを残すと 26 対 19 で、出す価値が無い。**末尾のカンマはモデルに「文はまだ
+終わっていない」と伝えるので、終わっていない日本語が返る。カンマを落とすだけでも
+ほぼ変わらない——**効いているのは句点であって、カンマの除去ではない**。
+
+```
+Losing the second race means another process got there first,
+  -> 2回目のレースで負けるということは別のプロセスが最初に        ← 動詞が無い
+Losing the second race means another process got there first.
+  -> 第2レースで負けたということは、別のプロセスが最初に着いたことを意味します。
+
+Opening this pack has to succeed,
+  -> この箱を開ければ成功です                                    ← pack → 箱
+Opening this pack has to succeed.
+  -> このパックを開けることは成功しなければならない。
+```
+
+**短くなった 10 件は全部読んだ。**読者が失うものがあるのは 4 件:
+
+```
+The directory X1Q downloads into, which is the same one the glosses go to:
+  分割なし ディレクトリ X1Q は、gloss が行くのと同じディレクトリにダウンロードします。
+  分割あり ディレクトリ X1Q は . / 光沢が行くのと同じです            ← 左が壊れた
+… which is what makes that promise checkable - a handler that …     ← checkable の節が消えた
+Translation is serialised as a result, which costs nothing: …       ← 「費用はかからない」が消えた
+… leaves the peak alone, which over-reports rather than under-reports.
+  分割あり … / 過度な報告ではなく                                  ← 後半が消えた
+```
+
+残り 6 件は短いだけで内容は両側に載っている。むしろ分割したほうが読める例もある:
+
+```
+Everything slow happens on the worker task, which asks the client to refetch its hints once results are in.
+  分割なし 全てが遅くなると、ワーカタスクが実行され、結果が出たら、クライアントにそのヒントを再取得するように要求される。
+  分割あり 作業者のタスクでは、すべてが遅くなります。／ 結果が出たら、クライアントにヒントの再取得を要求します。
+```
+
+**長くなった 31 件のほうは、ほとんどが「節が丸ごと戻ってきた」である。**
+
+```
+Such a translation is discarded and the English source is returned instead, which is wrong in an obvious way rather than in a subtle one.
+  分割なし このような翻訳は破棄され、代わりに英語のソースが返されます。          ← which 以下が消滅
+  分割あり 同上 ／ 微妙なことではなく、明らかな方法で間違っているのです。
+```
+
+つまり **31 件の救出に対して、読者が失うのは 4 件**。どちらの方向も読者には見えない
+（訳文は日本語として自然なまま）ので、数を数えるしかなく、そして接戦ではない。
+
+#### `;` と `:` には効かない（一般化しないこと）
+
+同じ書き換えを、いま出荷している `;` / `:` の分割が作る断片**全 341 件**に当てた:
+
+| | 日本語の文字数 |
+|---|---|
+| そのまま（`;` / `:` で終わる） | 7978 |
+| 終端を `.` に置き換える | 7929 |
+
+6 件が長く、12 件が短い。**利得は無く、わずかに悪い。**「断片の終端をぜんぶ揃える」
+という一般化は、既存のセミコロンの訳をすべて作り直させてこの結果になる。だから
+`engine_form` はカンマだけを見る。ユニットテストで固定してある。
+
+#### ビーム幅では届かない
+
+「デコーダの問題ならデコーダで直せ」への答え。節を落とす文を幅 4 / 8 / 12 で訳した
+（`MAX_NEW_TOKENS` は 512、`LENGTH_PENALTY` は 1.0 なので、打ち切りの上限には
+当たっていない）:
+
+| 文 | 幅 4 | 幅 8 | 幅 12 |
+|---|---|---|---|
+| `Returns X0Q once the queue is closed, which happens …` | 消える | **戻る** | 消える |
+| `Dropping it closes the socket …, which is why the shutdown is not graceful.` | 消える | 消える | 消える |
+
+**単調ですらない。**幅を上げれば直るものではないし、8.2 は幅 12 を費用で却下済み。
+前処理から手が届く梃子は分割だけで、それは効く。
+
+#### マスクは節の脱落を「増やす」
+
+7.1 の 1 の例は**マスクしていない**形で書かれている。同じ文を並べると:
+
+```
+Returns None once the queue is closed, which happens when the server is shutting down.
+  -> キューが閉じられたら None を返します。これはサーバーがシャットダウンしているときに発生します。
+Returns X0Q  once the queue is closed, which happens when the server is shutting down.
+  -> キューが閉じられたら X0Q を返します。                       ← 節が消える
+```
+
+**パイプラインが送るのはマスクした側**なので、7.1 の例と
+`tests/decoding.rs::beam_search_keeps_a_clause_that_greedy_drops`（マスクなしの文を
+使っている）は、どちらも実際の入力を再現していない。これは 1 例であって測定ではないが、
+§12 / Issue #32 のマスク論争にそのまま効く材料でもある（測るならあちら側で）。
+
+#### 入れたもの
+
+`sentence.rs` に `RELATIVE_OPENERS`（`which` / `who` / `whom` / `whose` / `where`）と、
+`is_a_boundary` のカンマ用の枝（両側 `MIN_CLAUSE_WORDS` ＝ 4 語以上）。
+`TERMINATORS` / `CLAUSE_TERMINATORS` / `OPENERS` / `opens_a_sentence` /
+`is_abbreviation` は触っていない。
+
+**句点はエンジンへ渡す側にだけ付く。**`split_sentences` は原文のスライス
+（`Vec<&str>`、カンマ付き）を返したままで、`GlossPlan::segments()` が
+`engine_form` を通す。理由は 2 つ:
+
+1. **断片が原文へフォールバックしたときの英語が、切り出し元の散文と 1 バイトも
+   変わらない。**`Masked::unmask_fragment(sentence, translated)` の第 1 引数は
+   「その断片がどのプレースホルダを持っていたか」と英語の作成にしか使われず、
+   合成した句点はプレースホルダを持たない。`join_sentences` はカンマの後ろに空白を
+   入れるので、`plan.restore(plan.sources())` は `plan.source()` と一致する。
+2. 公開シグネチャ（`Vec<&str>`）を変えずに済み、§12 のハーネスにも波及しない。
+
+**ただし「入力をそのまま返すエンジンが原文を再現する」という言い方は、これで
+カンマ分割のユニットには当てはまらなくなる。**エンジンが受け取る断片には原文に無い
+句点が入っているので、それを echo すればその句点が返る。厳密な往復として言えるのは
+`restore(sources()) == source()` のほうで、テストもそちらで書いた
+（`docblock.rs::a_comma_split_reaches_the_engine_terminated_and_falls_back_untouched`）。
+
+なお**これは今回入った性質ではない**。`join_sentences` は `.` の後ろに空白を入れない
+ので、以前から `/// Returns the user. Nothing is cached.` を passthrough で通すと
+`Returns the user.Nothing is cached.` になる（実測）。英語が出るのはモデルパックが
+無いときとフォールバックのときだけなので目立っていないが、**別の欠陥として issue に
+する価値がある**。今回の変更はその形をもう 1 つ増やしただけで、新種ではない。
+
+#### §12 の採点表（前後）
+
+凍結コーパスに対してハーネスを規則の前後で走らせた
+（`cargo test -p codegloss-translator --features candle --release --test pipelines -- --ignored`）:
+
+```
+前（62 ブロック, 156 断片）              後（62 ブロック, 163 断片）
+arm             japanese  english  spans lost    japanese  english  spans lost
+A hide everything   5103        0     0 / 61  ->     5162        0     0 / 61
+B hide nothing      5166        0    22 / 61  ->     5158        0    22 / 61
+C keep identifiers  5098        0     3 / 61  ->     5154        0     3 / 61
+D verify, else A    5151        0     0 / 61  ->     5138        0     0 / 61
+```
+
+**出荷している腕 A は日本語が 5103 → 5162 に増え、英語の残りとスパンの脱落は 0 の
+まま。**動いたのは 7 断片（156 の 4.5%）だけである。腕 B（何も隠さない）が
+5166 → 5158 とわずかに減るのは上の「マスクが脱落を増やす」と整合する——隠さなければ
+節はもともと残りやすいので、分割で買えるものが少なく、たまに損をする。
+`arm_a_reproduces_the_shipped_pipeline` は通っている（ハーネスの組み立ても
+`engine_form` を通したため。通し忘れるとこのテストが落ちる＝設計どおり）。
+
+#### Issue #31 の例そのもの
+
+```
+/// Dropping it closes the socket and wakes every task blocked on accept, which is why the shutdown is not graceful.
+  分割なし それをドロップすると、ソケットが閉じて、acceptでブロックされたすべてのタスクが起動します。
+  分割あり ドロップするとソケットが閉じて、acceptでブロックされたすべてのタスクが起動します。シャットダウンが優雅でない理由です
+```
+
+`sentence` の出力が変わるので `PIPELINE_VERSION` は `4` に上げた。
 
 ## 8. marian のフォーク
 
