@@ -38,7 +38,7 @@
 
 use crate::Segment;
 use crate::preserve::{Masked, mask};
-use crate::sentence::{join_sentences, split_sentences};
+use crate::sentence::{engine_form, join_sentences, split_sentences};
 
 /// Openers of a block comment, longest first so that `/**` is not read as `/*`.
 const BLOCK_OPENERS: [&str; 3] = ["/**", "/*!", "/*"];
@@ -200,6 +200,15 @@ pub struct GlossPlan {
 /// clauses out of a paragraph (see [`split_sentences`]), but a placeholder is
 /// only meaningful against the table that produced it, so the table cannot be
 /// cut up with the text.
+///
+/// What the engine sees and what a fragment falls back to are deliberately not
+/// the same string. A sentence cut off at a comma is sent with the comma turned
+/// into a full stop, because a trailing comma tells the model the sentence is
+/// unfinished and it answers with an unfinished Japanese fragment
+/// ([`engine_form`] carries the measurement). What is kept here is the piece as
+/// it was written, so that the English a lost fragment falls back to is the
+/// prose it was cut from, byte for byte. [`Self::sentences`] is therefore the
+/// restore side, and [`GlossPlan::segments`] the engine side, of one list.
 #[derive(Debug, Clone)]
 struct Unit {
     masked: Masked,
@@ -227,11 +236,15 @@ impl GlossPlan {
 
     /// What the engine is asked to translate: one masked segment per sentence,
     /// units in order.
+    ///
+    /// Every sentence goes through [`engine_form`], which is the one place a
+    /// segment is allowed to differ from the piece [`Self::restore`] pairs it
+    /// with. The count and the order are the same either way.
     pub fn segments(&self) -> Vec<Segment> {
         self.units
             .iter()
             .flat_map(|unit| unit.sentences.iter().map(String::as_str))
-            .map(Segment::new)
+            .map(|sentence| Segment::new(engine_form(sentence)))
             .collect()
     }
 
@@ -610,8 +623,58 @@ mod tests {
         );
     }
 
+    /// A sentence cut off at a comma reaches the engine with a full stop in the
+    /// comma's place, and falls back to the prose it was cut from.
+    ///
+    /// The two halves of the one decision this change is: the rewrite is on the
+    /// way out and only there. [`GlossPlan::sources`] is what a fragment whose
+    /// translation loses a placeholder is shown as, and putting those back
+    /// reproduces the comment exactly - the comma is where it was written, and
+    /// [`join_sentences`] puts the space after it.
+    #[test]
+    fn a_comma_split_reaches_the_engine_terminated_and_falls_back_untouched() {
+        let plan = GlossPlan::new(
+            "/// Dropping it closes the socket and wakes every task blocked on accept, \
+             which is why the shutdown is not graceful.",
+        );
+
+        let segments: Vec<String> = plan
+            .segments()
+            .iter()
+            .map(|segment| segment.text().to_owned())
+            .collect();
+        assert_eq!(
+            segments,
+            [
+                "Dropping it closes the socket and wakes every task blocked on accept.",
+                "which is why the shutdown is not graceful.",
+            ]
+        );
+
+        let sources = plan.sources();
+        assert_eq!(
+            sources,
+            [
+                "Dropping it closes the socket and wakes every task blocked on accept,",
+                "which is why the shutdown is not graceful.",
+            ]
+        );
+        assert_eq!(plan.restore(&sources), plan.source());
+    }
+
     /// The property the whole phase exists for: with an engine that returns its
     /// input, a block comes back exactly as its prose went in.
+    ///
+    /// Every raw here is one whose segments are its sentences. A unit split at
+    /// a comma is not, and cannot be: what such a segment carries is a full stop
+    /// the comment never had ([`engine_form`]), so an engine that echoes it
+    /// echoes that too. The exact property for those is stated one test up, over
+    /// [`GlossPlan::sources`] - the English a fragment actually falls back to -
+    /// which is the string the rewrite was kept out of. (A unit holding two
+    /// full-stopped sentences is already not exact either, for an older reason:
+    /// `join_sentences` puts no space after a full stop, so an echoed
+    /// `Returns the user. Nothing is cached.` comes back with the space gone.
+    /// Only the model ever sees that path, and only English reaches it.)
     #[test]
     fn a_passthrough_translation_restores_the_source_exactly() {
         for raw in [

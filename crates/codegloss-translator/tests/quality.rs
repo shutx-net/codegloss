@@ -122,6 +122,59 @@ fn the_identifier_of_issue_1_survives_the_real_model() {
     );
 }
 
+/// Issue #31's example: the clause after the comma survives the split, and does
+/// not survive without it.
+///
+/// The failure this is about is invisible - the Japanese for the undivided
+/// sentence is perfectly fluent and simply does not say what the second half
+/// of the English says - so what is asserted is length against the same
+/// engine's answer for the same sentence handed over whole. Not an exact
+/// string: the model is not pinned, and a better one would have to keep
+/// passing this.
+///
+/// `tests/decoding.rs::beam_search_keeps_a_clause_that_greedy_drops` looks like
+/// this test and is not: it translates the sentence **unmasked**, and an
+/// identifier hidden behind a placeholder makes the truncation more likely, not
+/// less (`docs/model-runtime-notes.md` §7.6). What the pipeline sends is the
+/// masked form, which is what goes through `GlossPlan` here.
+#[test]
+#[ignore = "needs a model pack"]
+fn the_clause_after_a_comma_survives_the_split() {
+    let translator = support::translator();
+    let raw = "/// Dropping it closes the socket and wakes every task blocked on accept, \
+               which is why the shutdown is not graceful.";
+
+    let plan = GlossPlan::new(raw);
+    let segments = plan.segments();
+    assert_eq!(
+        segments.len(),
+        2,
+        "the comma was not a boundary: {segments:?}"
+    );
+    assert!(
+        segments[0].text().ends_with('.'),
+        "the engine was given an unfinished sentence: {:?}",
+        segments[0].text()
+    );
+
+    // What the pipeline sent before the split: the same unit, masked, whole.
+    let whole = mask(CommentShape::parse(raw).units()[0])
+        .masked()
+        .to_owned();
+    let undivided = translator
+        .translate(&[Segment::new(whole)])
+        .expect("the engine answers")
+        .remove(0);
+    let split = gloss(&translator, raw);
+
+    eprintln!("undivided -> {undivided}\nsplit     -> {split}");
+    assert!(
+        split.chars().count() > undivided.chars().count(),
+        "the split gloss is no longer than the undivided one, so the clause is \
+         still missing:\nundivided: {undivided}\nsplit:     {split}"
+    );
+}
+
 /// The pre- and post-processing fixtures, re-run against candle.
 #[test]
 #[ignore = "needs a model pack"]

@@ -19,7 +19,17 @@
 //! [`mask`](crate::mask) has run, every one of those is a placeholder and the
 //! only full stops left are punctuation.
 //!
+//! A comma is a boundary too, but only where a relative clause opens after it -
+//! `..., which ...` - and only then. That is the same failure again, hiding in
+//! one sentence rather than in one paragraph: the clause after the comma is
+//! dropped and the Japanese reads as if it had never been written. See
+//! [`RELATIVE_OPENERS`], and [`engine_form`] for why the piece the engine gets
+//! ends in a full stop while the piece kept here ends in the comma it was
+//! written with.
+//!
 //! [`CommentShape`]: crate::CommentShape
+
+use std::borrow::Cow;
 
 /// Characters that can end a sentence.
 const TERMINATORS: [char; 3] = ['.', '!', '?'];
@@ -37,6 +47,31 @@ const TERMINATORS: [char; 3] = ['.', '!', '?'];
 ///            インデントのみが異なる2つのコメントは…
 /// ```
 const CLAUSE_TERMINATORS: [char; 2] = [';', ':'];
+
+/// The character a trailing relative clause hangs off.
+///
+/// Deliberately not one of [`CLAUSE_TERMINATORS`]: a comma divides a sentence
+/// far too often to be a boundary on the strength of the word count that rule
+/// uses. It is a boundary only when a relative clause opens after it - see
+/// [`RELATIVE_OPENERS`] - which is a branch of its own in [`is_a_boundary`].
+const CLAUSE_SEPARATOR: char = ',';
+
+/// Words that open a relative clause, and so make the comma before them a
+/// sentence boundary.
+///
+/// Deliberately short, for the reason [`ABBREVIATIONS`] is, and short in a
+/// second way as well: measured. On the 1817 fragments the extractor produces
+/// from this repository's own Rust, any comma with at least six words each side
+/// would cut 513 of them; this rule cuts 79 - one in twenty-three - of which
+/// `which` alone accounts for 74, `where` for 4 and `whose` for 1. `who` and
+/// `whom` never fire here and are in the table because they are the same
+/// construct, not because anything measured them.
+///
+/// `so`, `because`, `but` and `and` are not in it. They open a clause too, but
+/// nothing has measured what cutting there does, and §7.2 of
+/// `docs/model-runtime-notes.md` records that splitting more was worse before
+/// beam search existed.
+const RELATIVE_OPENERS: [&str; 5] = ["which", "who", "whom", "whose", "where"];
 
 /// How many words each side of a clause break needs before it is one.
 ///
@@ -75,7 +110,10 @@ pub fn split_sentences(text: &str) -> Vec<&str> {
             .chars()
             .next()
             .expect("the cursor is on a character boundary");
-        if !TERMINATORS.contains(&character) && !CLAUSE_TERMINATORS.contains(&character) {
+        if !TERMINATORS.contains(&character)
+            && !CLAUSE_TERMINATORS.contains(&character)
+            && character != CLAUSE_SEPARATOR
+        {
             cursor += character.len_utf8();
             continue;
         }
@@ -115,15 +153,36 @@ pub fn split_sentences(text: &str) -> Vec<&str> {
 
 /// Whether the terminator between `before` and `after` divides two units.
 ///
-/// A sentence end and a clause end are told apart by different things. After a
-/// full stop the next word is capitalised, which is nearly proof on its own;
-/// after a semicolon or a colon it is not, so the length of the two sides is
-/// all there is to go on.
+/// A sentence end, a clause end and a comma are told apart by different things.
+/// After a full stop the next word is capitalised, which is nearly proof on its
+/// own; after a semicolon or a colon it is not, so the length of the two sides
+/// is all there is to go on; after a comma the length says nothing at all - a
+/// list, an appositive and a `however,` all pass it - so the word that follows
+/// has to name the construct.
 fn is_a_boundary(before: &str, after: &str) -> bool {
+    if before.ends_with(CLAUSE_SEPARATOR) {
+        return opens_a_relative_clause(after)
+            && words(before) >= MIN_CLAUSE_WORDS
+            && words(after) >= MIN_CLAUSE_WORDS;
+    }
     if before.ends_with(CLAUSE_TERMINATORS) {
         return words(before) >= MIN_CLAUSE_WORDS && words(after) >= MIN_CLAUSE_WORDS;
     }
     opens_a_sentence(after) && !is_abbreviation(before)
+}
+
+/// Whether `after` starts with one of [`RELATIVE_OPENERS`].
+///
+/// The word is taken as it is written and stripped of what is not a letter or a
+/// digit, so a quoted or bracketed `which` still counts.
+fn opens_a_relative_clause(after: &str) -> bool {
+    let Some(word) = after.split_whitespace().next() else {
+        return false;
+    };
+    let word = word.trim_matches(|character: char| !character.is_alphanumeric());
+    RELATIVE_OPENERS
+        .iter()
+        .any(|opener| word.eq_ignore_ascii_case(opener))
 }
 
 fn words(text: &str) -> usize {
@@ -162,6 +221,50 @@ fn is_abbreviation(piece: &str) -> bool {
     }
     let word = word.to_ascii_lowercase();
     ABBREVIATIONS.contains(&word.as_str())
+}
+
+/// The form of one piece of [`split_sentences`] that the engine is given.
+///
+/// A piece cut off at a comma is handed over with the comma turned into a full
+/// stop; every other piece is handed over as it stands, borrowed.
+///
+/// **The rewrite lives here rather than in the piece itself.** What
+/// [`split_sentences`] returns is a slice of the text it was given, and that is
+/// what a fragment whose translation lost a placeholder falls back to. Keeping
+/// the comma there is what keeps that English byte-identical to the prose it
+/// was cut from - the reader who is shown the fallback is shown the sentence as
+/// it is written, joined back up by [`join_sentences`], which puts a space after
+/// a comma and none after a full stop.
+///
+/// **The full stop is what makes the split worth making.** A trailing comma
+/// tells the model the sentence has not finished, and it answers with a
+/// Japanese fragment that has not finished either. Measured over the 79
+/// candidates of this repository's own comments (FuguMT en-ja, f32, beam 4,
+/// CPU), scoring each left piece by Japanese character count against the
+/// undivided sentence with a five-character dead band:
+///
+/// ```text
+/// left piece ends in           longer / shorter / same   characters
+/// (undivided sentence)                                       3140
+/// , as it is written               26 / 19 / 34              3385
+/// nothing, the comma dropped       28 / 16 / 35              3393
+/// . what is sent                   31 / 10 / 38              3538
+/// ```
+///
+/// Reading the ten that come out shorter, four lose something a reader would
+/// want (`docs/model-runtime-notes.md` §7.6); the rest are terser or clearer.
+///
+/// **It is a rule about commas and nothing else.** The same rewrite applied to
+/// the `;` and `:` pieces [`CLAUSE_TERMINATORS`] already produces is worth
+/// nothing: over all 341 of them in the same corpus, 7978 Japanese characters
+/// as they are written against 7929 with a full stop, 6 longer and 12 shorter.
+/// Generalising this into "normalise every fragment's terminator" would churn
+/// the gloss of every semicolon in every cache for less than nothing.
+pub fn engine_form(sentence: &str) -> Cow<'_, str> {
+    match sentence.strip_suffix(CLAUSE_SEPARATOR) {
+        Some(body) => Cow::Owned(format!("{body}.")),
+        None => Cow::Borrowed(sentence),
+    }
 }
 
 /// Puts translated sentences back together as the one line they came from.
@@ -339,10 +442,88 @@ mod tests {
         );
     }
 
+    /// The failure Issue #31 names: the clause after the comma is dropped, and
+    /// the Japanese is fluent enough that nobody can tell.
+    ///
+    /// The pieces keep the comma, because they are slices of the text that was
+    /// given. What the engine is handed instead is [`engine_form`]'s copy.
+    #[test]
+    fn a_relative_clause_after_a_comma_is_its_own_sentence() {
+        assert_eq!(
+            split_sentences(
+                "Dropping it closes the socket and wakes every task blocked on accept, \
+                 which is why the shutdown is not graceful."
+            ),
+            [
+                "Dropping it closes the socket and wakes every task blocked on accept,",
+                "which is why the shutdown is not graceful.",
+            ]
+        );
+    }
+
+    /// Every shape a comma takes that is not a relative clause.
+    ///
+    /// The reason the rule is written as a word rather than as a word count.
+    /// An any-comma rule at six words each side cuts 513 of this repository's
+    /// 1817 fragments, the shipped fixture below among them; this rule cuts 79,
+    /// and none of these.
+    #[test]
+    fn a_comma_that_does_not_open_a_relative_clause_is_not_a_boundary() {
+        for text in [
+            // An abbreviation, and a list.
+            "Uses a cache, e.g. an LRU one.",
+            "Wraps the reader, the writer and the clock.",
+            // The shipped fixture: the word after the comma is `and`.
+            "X0Q return the cached user when X1Q hits, and fall back to X2Q otherwise.",
+            // No white space after the comma, so not a boundary at all.
+            "The limit is 1,000 entries and no more.",
+            // An adverb between commas: the comma comes after the word.
+            "It is slower, however, than the map.",
+            // An appositive.
+            "The cache, a bounded map, is shared.",
+            // A relative clause with too little in front of it.
+            "Fails, which is fine.",
+            // ... and too little after it.
+            "The socket is closed by the drop, which is odd.",
+        ] {
+            let pieces = split_sentences(text);
+            assert_eq!(pieces[0], text.trim(), "cut {text:?} into {pieces:?}");
+        }
+    }
+
+    /// What the engine is given is not what the fragment falls back to. The
+    /// comma becomes a full stop on the way out, and only there.
+    #[test]
+    fn the_engine_gets_a_full_stop_where_the_piece_has_a_comma() {
+        let piece = "Dropping it closes the socket and wakes every task blocked on accept,";
+        assert_eq!(
+            engine_form(piece),
+            "Dropping it closes the socket and wakes every task blocked on accept."
+        );
+
+        // Everything else is handed over as it stands, without a copy.
+        for piece in [
+            "which is why the shutdown is not graceful.",
+            "Translation is serialised so that one inference runs at a time;",
+            "The shutdown is not graceful:",
+            "No terminator at all",
+        ] {
+            assert!(
+                matches!(engine_form(piece), Cow::Borrowed(borrowed) if borrowed == piece),
+                "{piece:?} was rewritten"
+            );
+        }
+    }
+
     #[test]
     fn splitting_loses_no_prose() {
-        let text = "Returns the user. Fails when the id is unknown. Nothing is cached.";
-        assert_eq!(split_sentences(text).join(" "), text);
+        for text in [
+            "Returns the user. Fails when the id is unknown. Nothing is cached.",
+            "Dropping it closes the socket and wakes every task blocked on accept, \
+             which is why the shutdown is not graceful.",
+        ] {
+            assert_eq!(split_sentences(text).join(" "), text);
+        }
     }
 
     #[test]
