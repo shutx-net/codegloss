@@ -64,3 +64,10 @@ required-features = ["candle"]
 [[test]]
 name = "decoding"
 required-features = ["candle"]
+
+# マスク方針（何をエンジンから隠すか）を実コーパスで突き合わせる測定ハーネス。
+# 採点にはモデルが要るので #[ignore]、ただし「腕 A が出荷パイプラインと一致する」
+# 漂流防止だけはモデル無しで走る。数字は docs/model-runtime-notes.md §12。
+[[test]]
+name = "pipelines"
+required-features = ["candle"]

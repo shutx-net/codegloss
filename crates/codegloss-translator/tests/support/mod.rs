@@ -5,7 +5,7 @@
 //! CI cannot run them. Point `CODEGLOSS_MODEL_PACK` at a pack built with
 //! `tools/convert-fugumt` and run them with `-- --ignored`.
 
-// Two test binaries share this, and neither of them uses all of it.
+// Several test binaries share this, and none of them uses all of it.
 #![allow(dead_code)]
 
 use std::path::PathBuf;

@@ -1,0 +1,320 @@
+//! The background translation pipeline.
+//!
+//! IMPORTANT (AGENTS.md): an LSP request handler must never run the engine.
+//! Handlers touch two methods here, and neither of them can block:
+//! [`TranslationService::lookup`] reads the cache, and
+//! [`TranslationService::enqueue`] pushes onto an unbounded channel. Everything
+//! slow happens on the worker task, which asks the client to refetch its hints
+//! once results are in.
+//!
+//! The engine in the tree today returns its input unchanged and takes
+//! microseconds, so a synchronous handler would look perfectly healthy. That is
+//! precisely why the pipeline is built now: with candle in place a synchronous
+//! handler freezes the editor for as long as inference takes, and by then the
+//! shortcut is load-bearing.
+//!
+//! Shape of one round trip:
+//!
+//! ```text
+//! didOpen / didChange / hover miss
+//!   -> enqueue(uri, sources)              (returns immediately)
+//!   -> worker collects jobs for 150 ms    (a burst of keystrokes is one batch)
+//!   -> drops cached and duplicate blocks
+//!   -> GlossPlan::new                     (pre-processing: mask)
+//!   -> spawn_blocking(translate(batch))   (off the async executor)
+//!   -> GlossPlan::restore                 (post-processing: unmask, rebuild)
+//!   -> cache.insert(..)
+//!   -> workspace/inlayHint/refresh + workspace/codeLens/refresh
+//! ```
+//!
+//! IMPORTANT (AGENTS.md): the two steps around `translate` are what keep
+//! identifiers, inline code, URLs and doc tags out of the engine's reach, and
+//! they live in `codegloss-core` rather than in a [`Translator`]. This worker is
+//! the only place they are applied, so an engine swap cannot lose them: what
+//! [`Translator::translate`] receives is always a masked segment.
+%%%
+/// The only language pair v0.1 handles.
+///
+/// Both halves go into the cache key, so widening this later (P9) cannot serve
+/// an English-to-Japanese translation for another target language.
+%%%
+/// Target language. See [`SOURCE_LANGUAGE`].
+%%%
+/// How long jobs are collected before a batch is run.
+///
+/// A typing burst produces one `didChange` per keystroke, and each of them
+/// re-extracts every comment in the file. Without this window the engine would
+/// be handed a batch per keystroke; with it, the user stops typing and one
+/// batch runs.
+%%%
+/// Smallest gap between two rounds of refresh requests.
+///
+/// `workspace/*/refresh` is a global ask: the editor refetches hints for every
+/// visible buffer. Sending one per finished translation would make a large file
+/// unusable, so a batch sends at most one round and rounds stay this far apart.
+%%%
+/// How long to wait for the client to answer a refresh request.
+///
+/// The worker is a single long-lived task: a client that accepts the request
+/// and never answers would otherwise stop every future translation, not just
+/// this one.
+%%%
+/// One document's worth of comments to translate.
+%%%
+    /// Every comment of the document, not only the ones that prompted the job,
+    /// each as it is written in the file. Jobs for the same document supersede
+    /// one another inside the debounce window, which is only correct because
+    /// each one is complete.
+%%%
+/// The handle the LSP handlers hold: a cache to read and a queue to write.
+%%%
+    /// Starts the worker task and returns the handle to talk to it.
+    ///
+    /// Exactly one worker, on purpose. Translation is serialised so that a real
+    /// engine holds one model in memory and runs one inference at a time;
+    /// `spawn_blocking`'s pool would otherwise happily start hundreds.
+    ///
+    /// Must be called from inside a tokio runtime.
+%%%
+    /// Records that the client has sent `initialized`.
+    ///
+    /// Until it has, the worker keeps its results to itself: a refresh request
+    /// sent too early is refused by the client with -32002, and the client is
+    /// about to ask for everything anyway.
+%%%
+    /// The finished gloss of the comment written as `source`, if there is one.
+    ///
+    /// `source` is the comment exactly as it appears in the file
+    /// ([`CommentBlock::raw`](codegloss_core::CommentBlock::raw)), which is what
+    /// the gloss was built from: the same prose written as `//` and as `/** */`
+    /// glosses differently, because the structure of the block is part of the
+    /// answer.
+    ///
+    /// This is the only thing a request handler may call to obtain a gloss. A
+    /// miss is a miss: it never waits for one to be produced.
+%%%
+    /// Queues a document for translation and returns immediately.
+    ///
+    /// `sources` should be every comment of the document. Sending the whole
+    /// document is what makes it safe for a later job to supersede an earlier
+    /// one; sending only the comment under the cursor would drop the rest.
+%%%
+        // Cached comments are filtered by the worker rather than here: this
+        // runs inside a request handler, and the worker has to re-check anyway
+        // because entries can land between the two points.
+%%%
+    /// Number of batches the worker has finished, for anyone that needs to wait
+    /// for the pipeline to settle. The counter is bumped once per batch, after
+    /// its results are cached and its refresh requests have been answered, so
+    /// observing a change means the new translations are readable.
+%%%
+    /// Cache key of the comment written as `source`, under the engine currently
+    /// loaded.
+%%%
+/// The task that owns the engine.
+%%%
+    /// Translates whatever of `pending` is not cached yet, then asks the client
+    /// to refetch.
+%%%
+        // Bumped for every batch, including one that had nothing left to do:
+        // the counter says "the queue has been drained up to here", which is
+        // what a caller waiting for the pipeline to settle needs to know.
+%%%
+    /// Pre-processes, runs the engine off the async executor, post-processes and
+    /// caches what comes back. Returns how many glosses were stored.
+%%%
+        // Pre-processing (`codegloss-core`): each comment is taken apart into
+        // the units a translator should see, with identifiers, inline code,
+        // URLs and doc tags replaced by placeholders.
+%%%
+        // A block that is pure decoration has nothing to translate. It is still
+        // stored, so that the next request finds an answer instead of queueing
+        // it again for ever.
+%%%
+        // IMPORTANT: inference is CPU-bound and blocking. Running it on the
+        // executor would stall every other LSP handler on the same thread.
+%%%
+                // The trait says one output per input. An engine that breaks
+                // that would otherwise pair every following comment with the
+                // wrong translation, and the cache would keep serving the mix-up.
+%%%
+                // A failed batch is dropped rather than retried: the next
+                // didChange or hover queues it again, and an engine that fails
+                // on a given text will keep failing on it.
+%%%
+    /// Post-processing (`codegloss-core`): puts the protected spans back into
+    /// each unit and rebuilds the structure of the block around them, then
+    /// caches the gloss under the comment it was made from.
+%%%
+    /// Asks the client to refetch the hints it is showing.
+    ///
+    /// Hover has no counterpart to this - the protocol has no
+    /// `workspace/hover/refresh` - so a hover that missed the cache stays as it
+    /// was until the user hovers again.
+%%%
+/// Keeps taking jobs until the queue stays quiet for [`DEBOUNCE`].
+///
+/// A later job for a document replaces the earlier one: it was built from a
+/// newer buffer, and it carries every comment of it.
+///
+/// Returns `false` once the queue is closed, which happens when the server is
+/// shutting down.
+%%%
+/// Drops the comments that are already glossed and the ones that repeat, so
+/// that each distinct comment is prepared exactly once.
+///
+/// Two files quoting the same sentence, or one file whose other comments
+/// survived an edit, must not pay for it twice.
+%%%
+/// The engine input of one batch: every unit of every comment, deduplicated,
+/// plus where each comment's units ended up.
+///
+/// The deduplication is a second one, below the one `uncached_sources` does:
+/// two comments that differ only in their indentation, or a `@return` line
+/// repeated across a file, share a single segment and a single inference.
+%%%
+    /// One entry per comment, holding the index into `segments` of each of its
+    /// units, in order.
+%%%
+        // Not every client supports these requests, and one that does not says
+        // so per request. It is not an error worth bothering the user with.
+%%%
+/// Cache key of the comment written as `source`, for the given engine.
+///
+/// IMPORTANT: what is hashed is the comment as the file has it, before any
+/// masking. The masked form would be the wrong key twice over: `Returns \`A\`.`
+/// and `Returns \`B\`. ` mask to the same string and would collide, and a
+/// lookup would have to re-run the masking to build the key at all - inside a
+/// request handler, and only to hand back a value it could not unmask without
+/// the table that mask produced. Hashing the source keeps the read path a plain
+/// map lookup, and what is stored is the finished, already unmasked gloss.
+///
+/// Free-standing so that the model version cannot be left out of a key by
+/// accident: every path that builds one goes through here.
+%%%
+    /// The same sentence in two files is one unit of work.
+%%%
+    /// A batch whose comments are all glossed leaves the engine alone entirely.
+%%%
+    /// Entries cached under another engine are not reused, so the same comment
+    /// has to be translated again after a model swap.
+%%%
+    /// What reaches the engine is the masked prose of each unit, not the
+    /// comment: the Javadoc stars, the `@return` and the identifier after it
+    /// are all gone by then.
+%%%
+    /// Two comments that share a unit share the inference that produces it.
+%%%
+//! Cache of finished translations: a bounded map, optionally over a directory
+//! that survives the process.
+//!
+//! Every LSP request is answered from here: running the engine takes hundreds
+//! of milliseconds, and a request handler is not allowed to wait that long
+//! (AGENTS.md). The cache is what turns "translate on demand" into "look up
+//! what a background task has already produced".
+//!
+//! IMPORTANT: this crate must keep building without an async runtime, so the
+//! shared state is a `std::sync::Mutex` and never a `tokio` one. The lock is
+//! only ever held for a hash lookup - never across the store's file IO - so no
+//! `.await` can happen underneath it.
+%%%
+/// How many translations to keep before the least recently used one is dropped.
+///
+/// A comment block is a sentence or two, so a few thousand entries cover every
+/// file a reader is likely to have open while staying small in memory.
+%%%
+/// A bounded, thread-safe map from [`GlossKey`] to translated text.
+///
+/// The key already carries the model version, so entries produced by a
+/// different engine or a different set of weights can never be served after a
+/// swap: they simply hash elsewhere.
+///
+/// Values are `Arc<str>` so that handing one to a request handler costs a
+/// refcount bump rather than a copy.
+///
+/// With a [`GlossStore`] behind it the map becomes the hot half of a two-level
+/// cache: a miss consults the directory, and what is found there is promoted
+/// into the map so the next lookup is a hash lookup again. Both halves stay
+/// infallible - a store that cannot be read or written is a miss, never an
+/// error a request handler has to deal with.
+%%%
+    /// Where glosses outlive the process, when the server was given somewhere
+    /// to put them.
+%%%
+    /// Monotonic counter standing in for a clock. Comparing ticks is what
+    /// makes "least recently used" meaningful without pulling in `Instant`,
+    /// which is not available on every target this crate has to build for.
+%%%
+    /// A cache holding at most `capacity` entries. A capacity of zero is
+    /// raised to one: a cache that stores nothing would silently turn every
+    /// lookup into a miss and re-run the engine forever.
+%%%
+    /// A cache of `capacity` entries in memory, over glosses kept in `store`.
+    ///
+    /// The store is not bounded by `capacity`: it holds what it was opened
+    /// with, and evicting from memory does not delete from disk. That is the
+    /// point - the map is what makes a lookup fast, the directory is what
+    /// makes a restart free.
+%%%
+    /// The directory glosses are kept in, if there is one.
+%%%
+    /// The translation stored under `key`, marking it as recently used.
+    ///
+    /// A miss in memory falls through to the store, which is a file read - on
+    /// the order of microseconds, against the hundreds of milliseconds not
+    /// finding it would cost. What comes back is promoted into the map.
+%%%
+    /// Whether `key` has a translation, without disturbing the eviction order.
+    ///
+    /// This is the question the background worker asks before queueing work,
+    /// and answering it must not make an entry look freshly read.
+%%%
+    /// Stores a translation, evicting the least recently used entry if the
+    /// cache is full.
+    ///
+    /// A store that refuses the write is ignored: the gloss is still in memory
+    /// and still correct, and a read-only cache directory must not turn into
+    /// an error on the path that has just produced a translation.
+%%%
+    /// Puts a gloss in the map alone, leaving the store as it is.
+%%%
+    /// The gloss the map holds for `key`, marking it as recently used.
+%%%
+    /// How many translations are held **in memory**. The store, if there is
+    /// one, has its own [`len`](GlossStore::len).
+%%%
+    /// A poisoned lock is recovered from rather than propagated: the only code
+    /// under the lock is a hash lookup, so a panic elsewhere leaves the map
+    /// intact, and losing the cache would take the whole server's usefulness
+    /// with it.
+%%%
+    /// Linear scan for the oldest entry.
+    ///
+    /// It runs only when the cache is full, and only on the path that has just
+    /// finished a model inference: a few thousand comparisons are invisible
+    /// next to that, and they buy a cache with no linked list to keep correct.
+%%%
+    /// Entries from another model version must not be served after a swap.
+%%%
+        // Reading `a` makes `b` the oldest, so `b` is what the third insert
+        // pushes out.
+%%%
+        // If `contains` bumped recency, `a` would survive and `b` would go.
+%%%
+    /// A restart is what the store exists for: a fresh cache over the same
+    /// directory answers without the engine.
+%%%
+        // The hit was promoted, so the next one is a map lookup.
+%%%
+    /// Evicting from memory must not delete from disk: the map is bounded, the
+    /// directory is not.
+%%%
+    /// The LSP handlers read the cache while a worker thread writes it, so
+    /// sharing one across threads has to compile and has to stay consistent.
+%%%
+//! Comment extraction for CodeGloss.
+//!
+//! Reads a source file with Tree-sitter and returns the comments in it as
+//! [`codegloss_core::CommentBlock`] values, positions expressed as byte offsets
+//! and zero-based line numbers. No LSP type reaches this crate: mapping those
+//! offsets onto editor coordinates is the language server's job.

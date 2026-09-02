@@ -11,7 +11,7 @@
 //! ([`CommentBlock::raw`](codegloss_core::CommentBlock::raw)), because that is
 //! what the pipeline hands to [`GlossPlan`].
 
-use codegloss_core::{CommentShape, GlossPlan};
+use codegloss_core::{CommentShape, GlossPlan, mask};
 
 const JAVADOC: &str = include_str!("fixtures/javadoc.txt");
 const RUSTDOC: &str = include_str!("fixtures/rustdoc.txt");
@@ -178,6 +178,85 @@ fn a_gloss_that_lost_a_placeholder_falls_back_to_the_english() {
     assert_eq!(
         plan.restore(&["認証に成功したときに返します。".to_owned()]),
         "Returns `UserDetails` when authentication succeeds."
+    );
+}
+
+/// What [`mask`] produces for the three fixtures, written out.
+///
+/// This is not a round-trip property; it is a pin. A change to `preserve`,
+/// `sentence` or `docblock` that moves what comes out of the pipeline has to be
+/// paid for with a bump of `PIPELINE_VERSION`, because what a cache directory
+/// holds is finished glosses and an unbumped upgrade keeps serving what the old
+/// code wrote (`model.rs`). The round-trip tests above cannot see such a
+/// change: they compare the pipeline against itself, so they pass just as
+/// happily on either side of one.
+///
+/// Which is to say the point of this test is to fail. When it does, the
+/// question it is asking is "did you mean to, and did you bump the version?"
+#[test]
+fn the_fixtures_mask_into_exactly_these_segments() {
+    let masked = |raw: &str| {
+        CommentShape::parse(raw)
+            .units()
+            .into_iter()
+            .map(|unit| {
+                let masked = mask(unit);
+                (
+                    masked.masked().to_owned(),
+                    masked
+                        .preserved()
+                        .iter()
+                        .map(|span| span.text().to_owned())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        masked(fixture(JAVADOC)),
+        [
+            ("Returns the currently authenticated user.", vec![]),
+            ("the id to look up", vec![]),
+            ("authenticated user", vec![]),
+            ("if authentication failed", vec![]),
+        ]
+        .map(|(text, spans)| (text.to_owned(), spans))
+    );
+
+    assert_eq!(
+        masked(fixture(RUSTDOC)),
+        [
+            (
+                "Returns X0Q when authentication succeeds.",
+                vec!["`UserDetails`"]
+            ),
+            (
+                "The protocol is described at X0Q.",
+                vec!["https://example.com/docs/auth"]
+            ),
+            ("Panics", vec![]),
+            (
+                "Panics when X0Q is called before X1Q.",
+                vec!["`find_user`", "UserRepository::open()"]
+            ),
+        ]
+        .map(|(text, spans)| (
+            text.to_owned(),
+            spans.into_iter().map(str::to_owned).collect::<Vec<_>>()
+        ))
+    );
+
+    assert_eq!(
+        masked(fixture(LINE_COMMENTS)),
+        [(
+            "X0Q return the cached user when X1Q hits, and fall back to X2Q otherwise.",
+            vec!["TODO:", "find_user", "UserRepository::load()"]
+        )]
+        .map(|(text, spans)| (
+            text.to_owned(),
+            spans.into_iter().map(str::to_owned).collect::<Vec<_>>()
+        ))
     );
 }
 
