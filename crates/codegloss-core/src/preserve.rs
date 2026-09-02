@@ -82,7 +82,8 @@ pub enum SpanKind {
     Code,
     /// An `http://` or `https://` URL.
     Url,
-    /// A doc tag: `@return`, `@param`, ...
+    /// A doc tag: `@return`, `@param`, ... - or a whole `{@code ...}`, whose
+    /// braces and body travel with the tag word.
     Tag,
     /// A `TODO:` / `FIXME:` style marker.
     Marker,
@@ -239,9 +240,11 @@ impl Masked {
 ///    be confused with one of ours
 /// 2. inline code between back quotes
 /// 3. an `http://` or `https://` URL
-/// 4. a doc tag: `@return`, `@param`, `@throws`, ...
-/// 5. a `TODO:` / `FIXME:` style marker
-/// 6. a word that reads as code rather than as prose - see [`looks_like_code`]
+/// 4. a Javadoc inline tag: `{@code ...}`, `{@link ...}`, ... - the whole
+///    construct, braces and body included
+/// 5. a doc tag: `@return`, `@param`, `@throws`, ...
+/// 6. a `TODO:` / `FIXME:` style marker
+/// 7. a word that reads as code rather than as prose - see [`looks_like_code`]
 pub fn mask(text: &str) -> Masked {
     let mut masked = String::with_capacity(text.len());
     let mut preserved: Vec<Preserved> = Vec::new();
@@ -288,6 +291,11 @@ fn protected_span(rest: &str, previous: Option<char>) -> Option<(usize, SpanKind
     }
     if let Some(length) = url(rest) {
         return Some((length, SpanKind::Url));
+    }
+    // A brace is not a word, so this rule belongs above the guard below rather
+    // than beside the tag rule it extends.
+    if let Some(length) = inline_doc_tag(rest) {
+        return Some((length, SpanKind::Tag));
     }
 
     // The rules below match words, and a word only starts where the previous
@@ -350,6 +358,56 @@ fn url(rest: &str) -> Option<usize> {
     }
 
     (end > scheme.len()).then_some(end)
+}
+
+/// `{@code findUserById}`, `{@link Foo#bar}`, `{@literal a < b}` - the whole
+/// construct, both braces and the body between them included.
+///
+/// [`doc_tag`] already claims the tag word, because a brace is not a word
+/// character and so does not stop it. What it leaves behind is the braces and
+/// the body, which reach the engine as loose punctuation and are rewritten like
+/// any other: `Calls {X0Q X1Q} to load the user.` comes back as
+/// `X0Q X1Q} を呼び出して...`, so the reader is shown `@code findUserById}` -
+/// a construct that no longer parses. The measurements are in
+/// `docs/model-runtime-notes.md` §7.5.
+///
+/// The rule is the shape `{@name ...}` and never a table of tag names. The
+/// family is open - the JDK keeps adding to it and JSDoc has its own - and a
+/// name missing from a table would fall back to the breakage above without
+/// anyone noticing. Shape is also how the rules either side of this one are
+/// written: back quotes for inline code, `@` and letters for a tag.
+///
+/// The body travels with the construct, which costs the prose label of
+/// `{@link Foo#bar the display label}` its translation. That is a choice: an
+/// English label is visibly untranslated, while a broken construct is not.
+///
+/// An unbalanced `{@` is not a match, and neither is one whose `}` is on the
+/// next line - the refusal [`inline_code`] makes of a lone back quote, for the
+/// same reason. Swallowing the rest of the comment behind a stray brace would
+/// be worse than leaving the brace where it is.
+fn inline_doc_tag(rest: &str) -> Option<usize> {
+    let body = rest.strip_prefix('{')?;
+    // The tag word is whatever `doc_tag` calls one, so the two rules cannot
+    // drift apart over what `@name` means.
+    doc_tag(body)?;
+
+    // Depth, not the first `}`: the body of `{@code {1, 2}}` carries braces of
+    // its own, and the construct ends where they are all closed.
+    let mut depth = 1usize;
+    for (offset, character) in body.char_indices() {
+        match character {
+            '\n' => return None,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some('{'.len_utf8() + offset + '}'.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `@return`, `@param`, `@throws`, `@see`, ... - the tag alone, not its
@@ -537,6 +595,90 @@ mod tests {
         assert_eq!(masked.preserved()[0].text(), "@return");
     }
 
+    /// A Javadoc inline tag is one construct, not a tag standing next to a
+    /// word. Protecting only the tag word hands the engine the braces and the
+    /// body as loose punctuation, and it rewrites them: the reader is shown
+    /// `@code findUserById}`, which no longer parses. See
+    /// `docs/model-runtime-notes.md` §7.5.
+    #[test]
+    fn a_javadoc_inline_tag_is_one_span_braces_included() {
+        for tag in [
+            "{@code findUserById}",
+            "{@link UserRepository#load}",
+            "{@link UserRepository#load the loader}",
+            "{@literal a < b}",
+            "{@value #DEFAULT_TIMEOUT}",
+            "{@inheritDoc}",
+            // Braces inside the body belong to the construct.
+            "{@code new int[]{1, 2}}",
+        ] {
+            let text = format!("Calls {tag} to load the user.");
+            let masked = mask(&text);
+
+            assert_eq!(masked.masked(), "Calls X0Q to load the user.", "in {tag:?}");
+            assert_eq!(
+                masked
+                    .preserved()
+                    .iter()
+                    .map(|span| (span.kind(), span.text()))
+                    .collect::<Vec<_>>(),
+                [(SpanKind::Tag, tag)],
+                "in {tag:?}"
+            );
+        }
+
+        // The construct opens with a brace rather than with a word, so - like
+        // inline code and a URL - it is claimed where a word would not even be
+        // offered.
+        let masked = mask("Returns an id{@code s} list.");
+        assert_eq!(masked.masked(), "Returns an idX0Q list.");
+        assert_eq!(masked.preserved()[0].text(), "{@code s}");
+
+        // The rule is the shape `{@name ...}`, so a brace group that is not a
+        // tag stays prose.
+        assert!(spans("Returns a {key: value} map.").is_empty());
+    }
+
+    /// The sibling of [`an_unclosed_back_quote_is_prose`]: an unbalanced `{@`
+    /// falls through to the rules below it - the tag word alone is protected,
+    /// as it was before this rule existed - rather than swallowing what follows
+    /// it.
+    #[test]
+    fn an_unclosed_inline_tag_is_prose() {
+        for text in [
+            // No closing brace at all.
+            "Calls {@code findUserById to load.",
+            // Closed, but on the next line.
+            "Calls {@code findUserById\nto load.}",
+            // The body opened a brace that never closed.
+            "Calls {@code new int[]{1, 2} to load.",
+        ] {
+            let masked = mask(text);
+
+            assert!(
+                masked
+                    .preserved()
+                    .iter()
+                    .all(|span| !span.text().contains(['{', '}', '\n'])),
+                "swallowed a brace or a line in {text:?}: {:?}",
+                masked.preserved()
+            );
+            assert!(masked.masked().contains('{'), "in {text:?}");
+            assert_eq!(
+                masked.masked().matches('\n').count(),
+                text.matches('\n').count(),
+                "in {text:?}"
+            );
+            assert_eq!(round_trip(text), text, "in {text:?}");
+        }
+        // The tag word is still a span of its own, which is what the brace rule
+        // is measured against.
+        assert_eq!(
+            spans("Calls {@code findUserById to load."),
+            ["@code".to_owned(), "findUserById".to_owned()]
+        );
+    }
+
     #[test]
     fn attention_markers_are_protected_wherever_they_appear() {
         assert_eq!(spans("TODO: drop this."), ["TODO:".to_owned()]);
@@ -652,6 +794,7 @@ mod tests {
             "Returns `UserDetails` when authentication succeeds.",
             "See https://example.com/docs for the protocol.",
             "@throws AuthenticationException if authentication failed",
+            "Calls {@code findUserById} before {@link Foo#bar}.",
             "TODO: replace find_user with UserRepository::load().",
             "SAFETY: `ptr` is aligned and non-null.",
             "Fails when the id is unknown.",
