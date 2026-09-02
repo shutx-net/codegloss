@@ -32,6 +32,12 @@ pub fn translator_with_beams(beams: usize) -> CandleTranslator {
     let started = Instant::now();
     let translator = CandleTranslator::load_with_beams(&pack, precision(), beams)
         .unwrap_or_else(|error| panic!("{} is not a usable model pack: {error:?}", pack.display()));
+    // Opening a pack no longer reads it, so the weights are asked for here
+    // rather than being left to the first assertion that translates
+    // something: a bad pack should fail a test while it is setting up.
+    translator
+        .prepare()
+        .unwrap_or_else(|error| panic!("{} could not be loaded: {error:?}", pack.display()));
     eprintln!(
         "loaded {} in {:?}",
         translator.model_version(),

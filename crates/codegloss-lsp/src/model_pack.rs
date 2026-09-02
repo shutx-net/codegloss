@@ -159,9 +159,10 @@ pub fn spawn_download(config: &ServerConfig, switch: EngineSwitch) {
             }
         };
 
-        // Loading is a second slow step - the weights are read and the
-        // tokenizers built - and it is on this task for the same reason the
-        // download is.
+        // Opening the pack is cheap - the manifest and a few checks - and the
+        // weights are read by the worker on its first batch. It stays on this
+        // task all the same: it touches the disk, and this is the task that is
+        // allowed to.
         let Some(engine) = crate::config::load(&pack, &config) else {
             return;
         };
@@ -171,7 +172,10 @@ pub fn spawn_download(config: &ServerConfig, switch: EngineSwitch) {
             tracing::debug!("the server stopped before the model pack was ready");
             return;
         }
-        tracing::info!(model_version, "the engine is now translating");
+        // The swap changes the model version, so every gloss the passthrough
+        // made misses and the worker translates them again - which is where
+        // the weights are read.
+        tracing::info!(model_version, "the engine is ready to translate");
     });
 }
 
