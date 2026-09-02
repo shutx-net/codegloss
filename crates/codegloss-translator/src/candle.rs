@@ -272,30 +272,95 @@ fn sha256(path: &Path) -> Result<String> {
         .collect())
 }
 
-/// FuguMT, loaded and ready to translate.
+/// FuguMT, ready to translate - though not read until it has to be.
 ///
-/// The model is loaded once, when this is constructed, and held for the life
-/// of the process: the weights are ~120 MB and re-reading them per batch would
-/// dwarf the inference itself.
+/// The weights are read once, the first time something is actually
+/// translated, and held for the life of the process: they are ~120 MB and
+/// re-reading them per batch would dwarf the inference itself. Reading them
+/// only then is what lets a server whose gloss cache is already warm answer
+/// every request without ever paying for them - the cache key needs
+/// [`model_version`](Translator::model_version), and that comes from the
+/// pack's manifest.
 pub struct CandleTranslator {
     manifest: Manifest,
     /// [`ENGINE_VERSION`] and the pack's version together: a translation
     /// depends on both, so a cache key has to depend on both.
+    ///
+    /// IMPORTANT: this is a stored string and must stay one. It is read on the
+    /// path of every LSP request, to look a gloss up; answering it by loading
+    /// the model would put the ~280 MiB back on the first hover and buy
+    /// nothing.
     model_version: String,
+    /// What the deferred load will need, resolved when the pack was opened.
+    recipe: Recipe,
     /// `marian::MTModel` needs `&mut self` for every forward pass because it
     /// owns the KV cache, while `Translator::translate` takes `&self`. One
-    /// mutex reconciles the two. Translation is serialised as a result, which
-    /// costs nothing: `codegloss-lsp` runs exactly one worker.
-    engine: Mutex<Engine>,
+    /// mutex reconciles the two, and the deferred load happens under it as
+    /// well. Translation is serialised as a result, which costs nothing:
+    /// `codegloss-lsp` runs exactly one worker.
+    engine: Mutex<Load>,
 }
 
 impl std::fmt::Debug for CandleTranslator {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `try_lock`, because a load holds this for the better part of a
+        // second and whatever is logging must not wait for it.
+        let weights = match self.engine.try_lock() {
+            Ok(slot) => slot.state(),
+            Err(std::sync::TryLockError::Poisoned(_)) => "poisoned",
+            Err(std::sync::TryLockError::WouldBlock) => "in use",
+        };
         formatter
             .debug_struct("CandleTranslator")
             .field("model_id", &self.manifest.model_id)
             .field("model_version", &self.model_version)
+            .field("weights", &weights)
             .finish_non_exhaustive()
+    }
+}
+
+/// Everything the real load needs, kept from when the pack was opened.
+///
+/// It holds no weights: this is the recipe, not the meal. Resolving the paths
+/// up front is also what makes a remembered failure meaningful - a retry could
+/// not pick a different file to be unhappy about.
+struct Recipe {
+    /// The pack directory, for the error messages.
+    pack: PathBuf,
+    config: marian::Config,
+    weights: PathBuf,
+    precision: Precision,
+    beams: usize,
+}
+
+/// The model slot: empty until something is translated, and settled after.
+enum Load {
+    /// The pack has been opened and nothing has been read from it yet.
+    Deferred,
+    /// The weights are in memory. Boxed because an `Engine` is 352 bytes and
+    /// the other two states are not, and this is held for the life of the
+    /// process either way.
+    Ready(Box<Engine>),
+    /// The load was tried and failed; the string is why.
+    ///
+    /// A failure is remembered rather than retried. A corrupt pack is the case
+    /// that matters - without this, every `didChange` would re-read 120 MB to
+    /// fail the same way. It does mean a load that failed for a passing reason
+    /// (no memory at that moment, say) stays failed for the life of the
+    /// process: that is a deliberate trade, not an oversight, and the way out
+    /// of it is to restart the server rather than to make the engine retry on
+    /// a schedule nobody can see.
+    Failed(String),
+}
+
+impl Load {
+    /// What [`CandleTranslator`]'s `Debug` calls the slot.
+    fn state(&self) -> &'static str {
+        match self {
+            Self::Deferred => "deferred",
+            Self::Ready(_) => "loaded",
+            Self::Failed(_) => "failed",
+        }
     }
 }
 
@@ -346,18 +411,31 @@ impl Hypothesis {
 }
 
 impl CandleTranslator {
-    /// Loads the model pack in `pack`.
+    /// Opens the model pack in `pack`.
     ///
-    /// Everything that can go wrong goes wrong here, which is the point: a
-    /// caller can fall back to [`PassthroughTranslator`] on an error and know
-    /// that the engine it did get will not fail later.
+    /// This reads the manifest and the model config and checks that the
+    /// weights and both tokenizers are where they should be. It does not read
+    /// them: the 280.8 MiB and the ~0.4 s they cost (measured, f32) are paid
+    /// on the first call to [`translate`](Translator::translate) instead, so a
+    /// server whose gloss cache is already warm never pays them at all - it
+    /// costs 4.2 MiB and stops there. That is the whole point of the deferral;
+    /// the numbers are in `docs/model-runtime-notes.md` §11.
+    ///
+    /// What it gives up is the old guarantee that an engine which opened will
+    /// not fail later. A pack that passes the checks here and still cannot be
+    /// read reports the failure from the first batch, where the worker drops
+    /// it (`codegloss-lsp`: hover still answers with the English source, and
+    /// the code lens keeps saying it is translating). Everything a missing or
+    /// malformed pack can be caught by cheaply is still caught here, which is
+    /// what keeps a caller's fallback to [`PassthroughTranslator`] where it
+    /// was.
     ///
     /// [`PassthroughTranslator`]: crate::PassthroughTranslator
     pub fn load(pack: impl AsRef<Path>) -> Result<Self> {
         Self::load_with(pack, Precision::default())
     }
 
-    /// Loads the model pack in `pack`, holding the weights in `precision`.
+    /// Opens the model pack in `pack`, to hold the weights in `precision`.
     ///
     /// See [`load`](CandleTranslator::load); this is the same thing with the
     /// numeric type spelled out. The precision is part of
@@ -367,8 +445,8 @@ impl CandleTranslator {
         Self::load_with_beams(pack, precision, DEFAULT_BEAMS)
     }
 
-    /// Loads the model pack in `pack`, holding the weights in `precision` and
-    /// searching `beams` hypotheses wide.
+    /// Opens the model pack in `pack`, to hold the weights in `precision` and
+    /// search `beams` hypotheses wide.
     ///
     /// `beams` of `1` is greedy decoding. Like the precision, the width is part
     /// of [`model_version`](Translator::model_version): two widths do not agree
@@ -390,12 +468,120 @@ impl CandleTranslator {
                 .with_context(|| format!("{} is not a Marian config", path.display()))?
         };
 
-        let device = Device::Cpu;
-        let dtype = precision.dtype();
+        // Both of these only stat: what is left of the old load that is cheap
+        // enough to keep doing at startup, and enough to catch an incomplete
+        // pack while the caller can still fall back to English.
         let weights = weight_file(pack)?;
-        let variables = load_weights(&weights, dtype, &device)?;
-        let context = || format!("{} does not hold a Marian model", weights.display());
+        tokenizer_files(pack)?;
 
+        tracing::info!(
+            model = %manifest.model_id,
+            version = %manifest.model_version,
+            weights = %weights.display(),
+            precision = %precision,
+            beams,
+            "opened the model pack; its weights are read on the first translation"
+        );
+
+        Ok(Self {
+            model_version: format!(
+                "{ENGINE_VERSION}-{precision}-b{beams}+{}",
+                manifest.model_version
+            ),
+            manifest,
+            recipe: Recipe {
+                pack: pack.to_path_buf(),
+                config,
+                weights,
+                precision,
+                beams,
+            },
+            engine: Mutex::new(Load::Deferred),
+        })
+    }
+
+    /// What the pack says about the weights, for anyone that has to reproduce
+    /// the attribution the licence asks for.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// Reads the weights now, instead of at the first translation.
+    ///
+    /// For measurement and for tests: `examples/measure.rs` would otherwise
+    /// report the memory of a model it never read, and the model-backed tests
+    /// want a bad pack to fail while they are setting up rather than in the
+    /// middle of an assertion. **The server does not call this** - a warm
+    /// cache never paying for the model is exactly what the deferral is for.
+    pub fn prepare(&self) -> Result<()> {
+        self.with_engine(|_| Ok(()))
+    }
+
+    /// Runs `work` against the engine, loading it if this is the first thing
+    /// to ask for it.
+    ///
+    /// IMPORTANT: this blocks for as long as the load takes. It is reachable
+    /// only from [`translate`](Translator::translate) and
+    /// [`prepare`](CandleTranslator::prepare), and `codegloss-lsp` calls the
+    /// first from `spawn_blocking` and the second not at all.
+    fn with_engine<T>(&self, work: impl FnOnce(&mut Engine) -> Result<T>) -> Result<T> {
+        let mut slot = self
+            .engine
+            .lock()
+            .map_err(|_| anyhow!("the translation engine was poisoned by an earlier panic"))?;
+
+        if matches!(*slot, Load::Deferred) {
+            *slot = match self.recipe.build() {
+                Ok(engine) => Load::Ready(Box::new(engine)),
+                Err(error) => {
+                    let reason = format!("{error:#}");
+                    // The one line that explains a server which answers every
+                    // hover in English and never finishes a code lens. The
+                    // failure is reported from every batch after this, but
+                    // only ever logged here.
+                    tracing::error!(
+                        pack = %self.recipe.pack.display(),
+                        "the model pack passed its checks but could not be read, so nothing \
+                         will be translated: {reason}"
+                    );
+                    Load::Failed(reason)
+                }
+            };
+        }
+
+        match &mut *slot {
+            Load::Ready(engine) => work(engine),
+            Load::Failed(reason) => Err(anyhow!(
+                "the model pack at {} could not be read: {reason}",
+                self.recipe.pack.display()
+            )),
+            // Not reachable: the slot was just filled. An error rather than a
+            // panic all the same, because an engine must never be the reason
+            // the server stops.
+            Load::Deferred => Err(anyhow!(
+                "the model pack at {} was not loaded",
+                self.recipe.pack.display()
+            )),
+        }
+    }
+}
+
+impl Recipe {
+    /// Reads the weights and builds the tokenizers: everything the open
+    /// deferred.
+    ///
+    /// The order here is load-bearing and is the one that was measured. The
+    /// `VarBuilder` is lazy and [`Weights`] memoises what it hands out, so
+    /// asking for `model.shared.weight` before `MTModel::new` consumes the
+    /// builder costs nothing, where asking after it would cost another copy of
+    /// the embedding matrix. See `docs/model-runtime-notes.md` §6.2.
+    fn build(&self) -> Result<Engine> {
+        let device = Device::Cpu;
+        let dtype = self.precision.dtype();
+        let variables = load_weights(&self.weights, dtype, &device)?;
+        let context = || format!("{} does not hold a Marian model", self.weights.display());
+
+        let config = self.config.clone();
         let vocabulary = config.decoder_vocab_size.unwrap_or(config.vocab_size);
         let lm_head = Linear::new(
             variables
@@ -408,7 +594,7 @@ impl CandleTranslator {
             .with_context(context)?;
         let model = marian::MTModel::new(&config, variables).with_context(context)?;
 
-        let (source, target) = tokenizers(pack)?;
+        let (source, target) = tokenizers(&self.pack)?;
 
         // `bad_words_ids` in the upstream config forbids exactly one token, the
         // padding one. candle has no such mechanism, so it is applied here.
@@ -416,50 +602,38 @@ impl CandleTranslator {
             forbidden_logits(&config, target.token_to_id(UNKNOWN_TOKEN), dtype, &device)?;
 
         tracing::info!(
-            model = %manifest.model_id,
-            version = %manifest.model_version,
-            weights = %weights.display(),
-            precision = %precision,
-            beams,
+            weights = %self.weights.display(),
+            precision = %self.precision,
+            beams = self.beams,
             "loaded the translation model"
         );
 
-        Ok(Self {
-            model_version: format!(
-                "{ENGINE_VERSION}-{precision}-b{beams}+{}",
-                manifest.model_version
-            ),
-            manifest,
-            engine: Mutex::new(Engine {
-                config,
-                model,
-                source,
-                target,
-                device,
-                dtype,
-                lm_head,
-                final_logits_bias,
-                forbidden,
-                beams,
-            }),
+        Ok(Engine {
+            config,
+            model,
+            source,
+            target,
+            device,
+            dtype,
+            lm_head,
+            final_logits_bias,
+            forbidden,
+            beams: self.beams,
         })
-    }
-
-    /// What the pack says about the weights, for anyone that has to reproduce
-    /// the attribution the licence asks for.
-    pub fn manifest(&self) -> &Manifest {
-        &self.manifest
     }
 }
 
 impl Translator for CandleTranslator {
     fn translate(&self, segments: &[Segment]) -> Result<Vec<String>> {
-        let mut engine = self
-            .engine
-            .lock()
-            .map_err(|_| anyhow!("the translation engine was poisoned by an earlier panic"))?;
+        // Before the lock and before the load: a batch with nothing in it is
+        // not a reason to read 120 MB. `codegloss-lsp`'s worker returns early
+        // on one of its own accord, and this keeps that true for every other
+        // caller too.
+        if segments.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        engine.translate(segments)
+        self.with_engine(|engine| engine.translate(segments))
     }
 
     fn model_version(&self) -> &str {
@@ -872,6 +1046,21 @@ fn weight_file(pack: &Path) -> Result<PathBuf> {
     )
 }
 
+/// Checks that both tokenizers are there, without building either.
+///
+/// Building one is 30 MiB and is deferred with the weights, but a pack that is
+/// missing one is a pack that will never translate anything, and the moment to
+/// say so is while the caller can still fall back to English.
+fn tokenizer_files(pack: &Path) -> Result<()> {
+    for name in [SOURCE_TOKENIZER_FILE, TARGET_TOKENIZER_FILE] {
+        let path = pack.join(name);
+        if !path.is_file() {
+            bail!("{} is missing from the model pack", path.display());
+        }
+    }
+    Ok(())
+}
+
 /// Opens either weight format, lazily: one tensor is read, converted to
 /// `dtype` and handed over each time the model asks for a name.
 ///
@@ -1068,6 +1257,31 @@ mod pack_tests {
         }
     }"#;
 
+    /// FuguMT's own hyper-parameters, cut down to the fields
+    /// `marian::Config` reads. Nothing is built from them here - they are only
+    /// what makes the pack openable.
+    const CONFIG: &str = r#"{
+        "vocab_size": 32001,
+        "decoder_vocab_size": 32001,
+        "max_position_embeddings": 512,
+        "encoder_layers": 6,
+        "encoder_ffn_dim": 2048,
+        "encoder_attention_heads": 8,
+        "decoder_layers": 6,
+        "decoder_ffn_dim": 2048,
+        "decoder_attention_heads": 8,
+        "use_cache": true,
+        "is_encoder_decoder": true,
+        "activation_function": "swish",
+        "d_model": 512,
+        "decoder_start_token_id": 32000,
+        "scale_embedding": true,
+        "pad_token_id": 32000,
+        "eos_token_id": 0,
+        "forced_eos_token_id": 0,
+        "share_encoder_decoder_embeddings": true
+    }"#;
+
     /// A directory of this test's own. The harness runs these in one process
     /// and in parallel, so a name shared between them is a name they race on.
     fn directory(test: &str) -> std::path::PathBuf {
@@ -1076,6 +1290,118 @@ mod pack_tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("a temporary directory");
         path
+    }
+
+    /// A pack that can be opened and can never be loaded: a real manifest and
+    /// a real config, and empty files standing in for the 120 MB of weights
+    /// and the two tokenizers.
+    ///
+    /// That is what makes it a test of the deferral. Opening this pack has to
+    /// succeed, which it can only do without reading the files that are junk;
+    /// loading it has to fail, which is the other half of the state machine.
+    fn deferred_pack(test: &str) -> std::path::PathBuf {
+        let path = directory(test);
+        fs::write(path.join(MANIFEST_FILE), MANIFEST).expect("the manifest is written");
+        fs::write(path.join(CONFIG_FILE), CONFIG).expect("the config is written");
+        for name in [PYTORCH_FILE, SOURCE_TOKENIZER_FILE, TARGET_TOKENIZER_FILE] {
+            fs::write(path.join(name), b"").expect("the stand-in is written");
+        }
+        path
+    }
+
+    /// Opening a pack must not read its weights, and the version a cache key
+    /// is built from must come out of the manifest.
+    ///
+    /// The pack below holds nothing that could be read as weights or as a
+    /// tokenizer, so an open that succeeds is proof that neither was touched.
+    #[test]
+    fn opening_a_pack_reads_only_its_manifest() {
+        let pack = deferred_pack("deferred-open");
+        let translator = CandleTranslator::load_with_beams(&pack, Precision::Float32, 4)
+            .expect("nothing that is read at open time is missing");
+
+        assert_eq!(
+            translator.model_version(),
+            format!(
+                "{ENGINE_VERSION}-{}-b4+fugumt-en-ja-test",
+                Precision::Float32.as_str()
+            )
+        );
+        let _ = fs::remove_dir_all(&pack);
+    }
+
+    /// A batch with nothing in it must not be what pays for the model.
+    #[test]
+    fn an_empty_batch_never_loads_the_weights() {
+        let pack = deferred_pack("deferred-empty");
+        let translator = CandleTranslator::load_with_beams(&pack, Precision::Float32, 4)
+            .expect("the pack opens");
+
+        let translations = translator
+            .translate(&[])
+            .expect("an empty batch is answered without loading anything");
+        assert!(translations.is_empty());
+        let _ = fs::remove_dir_all(&pack);
+    }
+
+    /// A load that fails must not move the cache key.
+    ///
+    /// The version is what every gloss already on disk is filed under. An
+    /// engine that renamed itself on a bad day would orphan all of them, and
+    /// the point of this change is that a warm cache keeps working.
+    #[test]
+    fn a_deferred_load_that_fails_keeps_the_model_version() {
+        let pack = deferred_pack("deferred-failure");
+        let translator = CandleTranslator::load_with_beams(&pack, Precision::Float32, 4)
+            .expect("the pack opens");
+        let before = translator.model_version().to_owned();
+
+        translator
+            .translate(&[Segment::new("Return the user.")])
+            .expect_err("an empty file is not a Marian model");
+
+        assert_eq!(translator.model_version(), before);
+        let _ = fs::remove_dir_all(&pack);
+    }
+
+    /// A pack that cannot be read must be read once, not once per batch.
+    ///
+    /// The weight path was resolved when the pack was opened, so a retry would
+    /// go looking for a file that is no longer there and say something else.
+    /// Two identical messages are therefore proof that the second call read
+    /// nothing at all.
+    #[test]
+    fn a_failed_load_is_not_retried() {
+        let pack = deferred_pack("deferred-sticky");
+        let translator = CandleTranslator::load_with_beams(&pack, Precision::Float32, 4)
+            .expect("the pack opens");
+
+        let first = translator
+            .translate(&[Segment::new("Return the user.")])
+            .expect_err("an empty file is not a Marian model");
+        fs::remove_file(pack.join(PYTORCH_FILE)).expect("the weights are removed");
+        let second = translator
+            .translate(&[Segment::new("Return the user.")])
+            .expect_err("a failed engine keeps failing");
+
+        assert_eq!(format!("{first:#}"), format!("{second:#}"));
+        let _ = fs::remove_dir_all(&pack);
+    }
+
+    /// An incomplete pack has to be refused while the caller can still fall
+    /// back to English, not at the first gloss.
+    #[test]
+    fn a_pack_missing_a_tokenizer_is_refused_when_it_is_opened() {
+        let pack = deferred_pack("deferred-tokenizer");
+        fs::remove_file(pack.join(TARGET_TOKENIZER_FILE)).expect("the tokenizer is removed");
+
+        let error = CandleTranslator::load_with_beams(&pack, Precision::Float32, 4)
+            .expect_err("half a pack is not a pack");
+        assert!(
+            format!("{error:#}").contains(TARGET_TOKENIZER_FILE),
+            "{error:#}"
+        );
+        let _ = fs::remove_dir_all(&pack);
     }
 
     #[test]

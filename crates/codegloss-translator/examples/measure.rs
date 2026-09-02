@@ -45,7 +45,7 @@ fn main() -> ExitCode {
     report("before load");
 
     reset_peak();
-    let started = Instant::now();
+    let opened = Instant::now();
     let translator =
         match CandleTranslator::load_with_beams(&options.pack, options.precision, options.beams) {
             Ok(translator) => translator,
@@ -57,11 +57,26 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+    println!("open:    {:.0} ms", opened.elapsed().as_secs_f64() * 1000.0);
+    println!("version: {}", translator.model_version());
+    // What a server with a fully warm gloss cache costs: it can answer every
+    // lookup from the version above, and never gets as far as the line below.
+    report("after opening the pack");
+
+    // Forced, because the server would not read the weights until its first
+    // batch and this has to measure them. Peak reset first, so that "after
+    // load" is the load's own peak and stays comparable with the older
+    // numbers in `docs/model-runtime-notes.md`.
+    reset_peak();
+    let started = Instant::now();
+    if let Err(error) = translator.prepare() {
+        eprintln!("{} could not be loaded: {error:?}", options.pack.display());
+        return ExitCode::FAILURE;
+    }
     println!(
         "load:    {:.0} ms",
         started.elapsed().as_secs_f64() * 1000.0
     );
-    println!("version: {}", translator.model_version());
     report("after load");
 
     if options.load_only {

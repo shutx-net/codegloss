@@ -19,9 +19,11 @@ async fn main() -> std::process::ExitCode {
     }
 
     // The engine the server starts on: candle when a model pack is already
-    // there, the passthrough otherwise. Loading a model takes long enough that
-    // doing it inside `initialize` would delay the editor's first paint, so it
-    // is settled before the first request either way.
+    // there, the passthrough otherwise. Which one it is has to be settled
+    // before the first request, because it names the cache keys. The weights
+    // are not read here - candle opens its pack and reads it the first time
+    // something is actually translated, so a session that answers everything
+    // from the gloss cache never pays for the model at all.
     let settings = ServerConfig::from_environment();
     let engine = config::engine(&settings);
     tracing::info!(model_version = engine.model_version(), "starting");

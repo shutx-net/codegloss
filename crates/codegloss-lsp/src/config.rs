@@ -200,6 +200,13 @@ pub fn engine(config: &ServerConfig) -> Arc<dyn Translator> {
 /// downloader has one to load and the same reasons to keep serving English if
 /// it cannot. Neither caller has an error to handle - there is nothing either
 /// could do with it that is better than English.
+///
+/// This *opens* the pack rather than loading it: `CandleTranslator` reads the
+/// manifest and checks the files, and reads the weights on its first
+/// translation. So an error here still falls back to English, but a pack that
+/// passes these checks and then cannot be read fails a batch instead - hover
+/// keeps answering with the English source, and the code lens keeps saying it
+/// is translating. The translator logs that failure once, naming the pack.
 pub fn load(pack: &Path, config: &ServerConfig) -> Option<Arc<dyn Translator>> {
     #[cfg(feature = "candle")]
     match codegloss_translator::CandleTranslator::load_with_beams(
