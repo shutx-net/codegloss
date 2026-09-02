@@ -17,6 +17,6 @@ mod store;
 pub use cache::{DEFAULT_CAPACITY, GlossCache};
 pub use docblock::{CommentShape, GlossPlan};
 pub use model::{CommentBlock, CommentStyle, Gloss, GlossKey, PIPELINE_VERSION, Segment};
-pub use preserve::{Masked, Preserved, mask, placeholder};
+pub use preserve::{Masked, Preserved, SpanKind, mask, placeholder};
 pub use sentence::{join_sentences, split_sentences};
 pub use store::GlossStore;

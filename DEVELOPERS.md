@@ -193,6 +193,34 @@ CI が重くなるため）。モデル無しでもサーバは動き、コメ�
 
    実測値は [docs/model-runtime-notes.md](docs/model-runtime-notes.md)。
 
+7. **マスク方針**（識別子やインラインコードをエンジンから隠すか否か）の比較は
+   測定ハーネスで回す。実モデルが要るので `#[ignore]` 付き、`--release` で。
+
+   ```sh
+   CODEGLOSS_MODEL_PACK=~/codegloss-model \
+     cargo test -p codegloss-translator --features candle --release \
+     --test pipelines -- --ignored --nocapture
+   ```
+
+   4 つの腕（全部隠す＝出荷しているもの／何も隠さない／識別子だけ本文に残す／
+   隠さずに訳して保全が全部通った断片だけ採る）を 1 プロセス 1 モデルで回し、
+   採点表を出す。
+
+   | 環境変数 | 既定 | 何が変わるか |
+   |---|---|---|
+   | `CODEGLOSS_CORPUS` | 同梱の 62 ブロック | 測るコーパス（`%%%` 区切りのファイル） |
+   | `CODEGLOSS_SHEET` | 標準エラー出力へ | 伏せ字の A/B シートの書き出し先 |
+
+   コーパスは `codegloss-parser` の example で作れる。**第三者のソースから作った
+   ものはリポジトリに置かないこと**（コメント文もその著作物の一部）。
+
+   ```sh
+   cargo run -p codegloss-parser --example extract -- src/*.rs > /tmp/corpus.txt
+   ```
+
+   実測値は [docs/model-runtime-notes.md](docs/model-runtime-notes.md) の §12、
+   人間が読んで埋める A/B シートは [docs/masking-ab.md](docs/masking-ab.md)。
+
 ## Zed 拡張の動作確認
 
 1. LSP サーバを先にビルドする。拡張はこのバイナリを起動するだけで、翻訳処理は

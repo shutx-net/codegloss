@@ -62,16 +62,65 @@ fn placeholder_at(text: &str) -> Option<(usize, usize)> {
     ))
 }
 
+/// Which of [`mask`]'s rules claimed a span.
+///
+/// Reported because the rules are not equally worth applying. Hiding
+/// `` `UserDetails` `` behind a placeholder costs the engine nothing - the back
+/// quotes already told the reader it is code - while hiding a bare
+/// `find_user` also hides the noun that decides how the rest of the sentence is
+/// translated. Weighing that trade-off means counting the two separately, and
+/// the only place that knows which rule fired is the pass that fired it: a
+/// consumer re-deriving "is this an identifier?" from the span text would be
+/// keeping a second copy of [`looks_like_code`], and the two would drift.
+///
+/// `codegloss-translator/tests/pipelines.rs` is what asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SpanKind {
+    /// Something already shaped like one of our placeholders.
+    Placeholder,
+    /// Inline code between back quotes.
+    Code,
+    /// An `http://` or `https://` URL.
+    Url,
+    /// A doc tag: `@return`, `@param`, ...
+    Tag,
+    /// A `TODO:` / `FIXME:` style marker.
+    Marker,
+    /// A bare word that reads as code: `find_user`, `UserDetails`, `a::b`.
+    Identifier,
+}
+
+impl SpanKind {
+    /// Every kind, in the order [`mask`] tries the rules.
+    ///
+    /// A table over the kinds iterates this rather than listing them, so a new
+    /// rule appears in the table without anyone remembering to add it.
+    pub const ALL: [Self; 6] = [
+        Self::Placeholder,
+        Self::Code,
+        Self::Url,
+        Self::Tag,
+        Self::Marker,
+        Self::Identifier,
+    ];
+}
+
 /// One span that was taken out of the text before translation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Preserved {
     text: String,
+    kind: SpanKind,
 }
 
 impl Preserved {
     /// The original span, exactly as it appeared in the comment.
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// The rule that protected it.
+    pub fn kind(&self) -> SpanKind {
+        self.kind
     }
 }
 
@@ -200,11 +249,12 @@ pub fn mask(text: &str) -> Masked {
     let mut previous: Option<char> = None;
 
     while cursor < text.len() {
-        if let Some(end) = protected_span(&text[cursor..], previous) {
+        if let Some((end, kind)) = protected_span(&text[cursor..], previous) {
             let span = &text[cursor..cursor + end];
             masked.push_str(&placeholder(preserved.len()));
             preserved.push(Preserved {
                 text: span.to_owned(),
+                kind,
             });
             previous = span.chars().next_back();
             cursor += end;
@@ -227,17 +277,17 @@ pub fn mask(text: &str) -> Masked {
     }
 }
 
-/// Length of the protected span starting at the front of `rest`, if there is
-/// one. `previous` is the character before it.
-fn protected_span(rest: &str, previous: Option<char>) -> Option<usize> {
+/// Length of the protected span starting at the front of `rest` and the rule
+/// that claimed it, if there is one. `previous` is the character before it.
+fn protected_span(rest: &str, previous: Option<char>) -> Option<(usize, SpanKind)> {
     if let Some((_, length)) = placeholder_at(rest) {
-        return Some(length);
+        return Some((length, SpanKind::Placeholder));
     }
     if let Some(length) = inline_code(rest) {
-        return Some(length);
+        return Some((length, SpanKind::Code));
     }
     if let Some(length) = url(rest) {
-        return Some(length);
+        return Some((length, SpanKind::Url));
     }
 
     // The rules below match words, and a word only starts where the previous
@@ -247,12 +297,12 @@ fn protected_span(rest: &str, previous: Option<char>) -> Option<usize> {
         return None;
     }
     if let Some(length) = attention_prefix(rest) {
-        return Some(length);
+        return Some((length, SpanKind::Marker));
     }
     if let Some(length) = doc_tag(rest) {
-        return Some(length);
+        return Some((length, SpanKind::Tag));
     }
-    identifier(rest)
+    Some((identifier(rest)?, SpanKind::Identifier))
 }
 
 /// `` `UserDetails` ``, back quotes included.
@@ -610,6 +660,44 @@ mod tests {
         ] {
             assert_eq!(round_trip(text), text, "did not round-trip: {text:?}");
         }
+    }
+
+    /// Every rule, in one text, reporting which one fired.
+    ///
+    /// The kinds are what `tests/pipelines.rs` selects on when it measures
+    /// masking policies against each other, so a span filed under the wrong
+    /// rule would move a segment between the arms of that experiment without
+    /// changing anything a reader could see.
+    #[test]
+    fn every_span_reports_the_rule_that_matched_it() {
+        let masked = mask("TODO: X9Q and `code` at https://example.com, @return find_user.");
+
+        assert_eq!(
+            masked
+                .preserved()
+                .iter()
+                .map(|span| (span.kind(), span.text()))
+                .collect::<Vec<_>>(),
+            [
+                (SpanKind::Marker, "TODO:"),
+                (SpanKind::Placeholder, "X9Q"),
+                (SpanKind::Code, "`code`"),
+                (SpanKind::Url, "https://example.com"),
+                (SpanKind::Tag, "@return"),
+                (SpanKind::Identifier, "find_user"),
+            ]
+        );
+        // Every kind there is, so a rule added without a kind of its own shows
+        // up here rather than silently sharing another rule's row.
+        assert_eq!(
+            masked
+                .preserved()
+                .iter()
+                .map(Preserved::kind)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            SpanKind::ALL.len()
+        );
     }
 
     /// Two spans of different rules in one sentence keep their own identities.

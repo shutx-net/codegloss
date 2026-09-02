@@ -225,6 +225,38 @@ comments in English.
    The measurements are in
    [docs/model-runtime-notes.md](docs/model-runtime-notes.md) (Japanese).
 
+7. Comparing **masking policies** - whether identifiers and inline code are
+   hidden from the engine or not - is what the measurement harness is for. It
+   needs a real model, so it is `#[ignore]`d; use `--release`.
+
+   ```sh
+   CODEGLOSS_MODEL_PACK=~/codegloss-model \
+     cargo test -p codegloss-translator --features candle --release \
+     --test pipelines -- --ignored --nocapture
+   ```
+
+   It runs four arms - hide everything (what ships), hide nothing, keep only
+   bare identifiers in the text, and translate unhidden but keep the answer
+   only where every protected span came back - through one model in one
+   process, and prints a scoreboard.
+
+   | Environment variable | Default | What it changes |
+   |---|---|---|
+   | `CODEGLOSS_CORPUS` | the 62 blocks that ship with the test | the corpus to measure (a file with `%%%` between blocks) |
+   | `CODEGLOSS_SHEET` | standard error | where to write the blinded A/B sheet |
+
+   A corpus is built with `codegloss-parser`'s example. **Do not commit one
+   built from third-party sources** - the comments are part of that work too.
+
+   ```sh
+   cargo run -p codegloss-parser --example extract -- src/*.rs > /tmp/corpus.txt
+   ```
+
+   The measurements are §12 of
+   [docs/model-runtime-notes.md](docs/model-runtime-notes.md) (Japanese), and
+   the A/B sheet a human fills in is
+   [docs/masking-ab.md](docs/masking-ab.md) (Japanese).
+
 ## Trying the Zed extension
 
 1. Build the language server first. The extension only starts this binary; it
