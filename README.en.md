@@ -24,9 +24,11 @@ changes, and copying the code gives you the original.
 
 ## Status
 
-Early. The Zed extension and the language server are in place, Rust comments are
-extracted with Tree-sitter, and they come back as hovers and as code lenses (a
-line of their own above the comment). **Translation works for real** (candle +
+Early. The Zed extension and the language server are in place, **Rust and Go**
+comments are extracted with Tree-sitter, and they come back as hovers and as code
+lenses (a line of their own above the comment). In a Go doc comment an indented
+run of lines is an example, so it is copied through rather than translated, and
+so are toolchain directives such as `//go:build`. **Translation works for real** (candle +
 FuguMT, about 0.15 s per sentence on a CPU, when a batch of them is translated
 at once as it is when a file is opened).
 

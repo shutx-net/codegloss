@@ -189,13 +189,20 @@ async fn initialize(service: &mut LspService<Backend>, send_initialized: bool) {
 }
 
 async fn did_open(service: &mut LspService<Backend>, text: &str) {
+    did_open_as(service, DOCUMENT_URI, "rust", text).await;
+}
+
+/// The `languageId` is how the server learns what a buffer is - no extension is
+/// consulted anywhere - and it decides which comment rules the document's
+/// blocks carry.
+async fn did_open_as(service: &mut LspService<Backend>, uri: &str, language_id: &str, text: &str) {
     call(
         service,
         Request::build("textDocument/didOpen")
             .params(json!({
                 "textDocument": {
-                    "uri": DOCUMENT_URI,
-                    "languageId": "rust",
+                    "uri": uri,
+                    "languageId": language_id,
                     "version": 1,
                     "text": text,
                 }
@@ -220,11 +227,20 @@ async fn did_change(service: &mut LspService<Backend>, version: i32, text: &str)
 
 /// The hover answer at a position, as the string the editor would render.
 async fn hover_value(service: &mut LspService<Backend>, line: u32, character: u32) -> Value {
+    hover_value_in(service, DOCUMENT_URI, line, character).await
+}
+
+async fn hover_value_in(
+    service: &mut LspService<Backend>,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> Value {
     let response = call(
         service,
         Request::build("textDocument/hover")
             .params(json!({
-                "textDocument": { "uri": DOCUMENT_URI },
+                "textDocument": { "uri": uri },
                 "position": { "line": line, "character": character },
             }))
             .id(2)
@@ -557,4 +573,52 @@ async fn replacing_the_engine_makes_the_client_come_back_for_new_glosses() {
     // The engine that was replaced ran for the first batch and never again.
     assert_eq!(english.calls(), 1);
     assert_eq!(japanese.calls(), 1);
+}
+
+/// The chain this whole change is about, end to end: `didOpen` says the buffer
+/// is Go, the registry stamps its blocks with Go's rules, the queue carries
+/// them, and the worker builds the plan with them. An indented run is then an
+/// example, and its gloss is the code itself rather than a translation of it.
+///
+/// A worker that assumed one language would still pass every other test in this
+/// file - `// Return the cached user.` is a comment in both - which is why the
+/// two travel together (`CommentSource`).
+#[tokio::test(flavor = "current_thread")]
+async fn a_go_document_is_glossed_under_go_rules() {
+    const GO_URI: &str = "file:///tmp/codegloss/main.go";
+
+    let engine = TestEngine::new();
+    let (mut service, _seen) = server(Arc::clone(&engine));
+    let mut batches = service.inner().glosses().batches_completed();
+
+    initialize(&mut service, true).await;
+    did_open_as(
+        &mut service,
+        GO_URI,
+        "go",
+        concat!(
+            "// Find returns the user.\n",
+            "//\n",
+            "//\tuser := Find(id)\n",
+            "func Find(id uint64) {}\n",
+        ),
+    )
+    .await;
+
+    engine.release_one_batch();
+    next_batch(&mut batches).await;
+
+    // The prose was translated.
+    assert_eq!(
+        hover_value_in(&mut service, GO_URI, 0, 5).await,
+        json!("[ja] Find returns the user.\n\n> Find returns the user.")
+    );
+
+    // The example was not. It is copied through with the tab that said it was
+    // an example, and the engine never saw it.
+    assert_eq!(
+        hover_value_in(&mut service, GO_URI, 2, 5).await,
+        json!("\tuser := Find(id)\n\n> user := Find(id)")
+    );
+    assert_eq!(engine.calls(), 1);
 }

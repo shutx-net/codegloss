@@ -33,12 +33,18 @@
 //! `///`) are not echoed: a gloss is shown beside the comment it belongs to, so
 //! repeating its syntax would only take up the width.
 //!
+//! Not every language marks an example with a fence. Go's doc comments have no
+//! fence at all and indent the example instead, so under
+//! [`CommentRules::Indented`] a run of indented lines is copied through the way
+//! a fenced one is. Which of the two a comment is read under is the parser's to
+//! say - this module owns the vocabulary, never the list of languages.
+//!
 //! [`CommentBlock::text`]: crate::CommentBlock::text
 //! [`CommentBlock::raw`]: crate::CommentBlock::raw
 
-use crate::Segment;
 use crate::preserve::{Masked, mask};
 use crate::sentence::{engine_form, join_sentences, split_sentences};
+use crate::{CommentRules, Segment};
 
 /// Openers of a block comment, longest first so that `/**` is not read as `/*`.
 const BLOCK_OPENERS: [&str; 3] = ["/**", "/*!", "/*"];
@@ -131,7 +137,8 @@ enum Piece {
     /// An empty line: a paragraph break.
     Blank,
     /// A line that is copied through as it stands - a fence, the code inside
-    /// one, or a tag with no prose after it.
+    /// one, a tag with no prose after it, or an indented example in a language
+    /// that marks one that way.
     Verbatim(String),
     /// Prose to translate, and the text emitted in front of it (`@return `,
     /// `- `, `# `).
@@ -147,8 +154,16 @@ pub struct CommentShape {
 impl CommentShape {
     /// Reads the structure off a comment exactly as it appears in the file
     /// (that is, off [`CommentBlock::raw`](crate::CommentBlock::raw)).
-    pub fn parse(raw: &str) -> Self {
+    pub fn parse(raw: &str, rules: CommentRules) -> Self {
         let block = raw.trim_start().starts_with("/*");
+        // Whether a line is an example is a property of the run it stands in
+        // and not of the line, so the runs are found before the walk. Empty
+        // under rules that mark an example with a fence, and read with `get`,
+        // which makes that one branch below rather than two code paths.
+        let examples = match rules {
+            CommentRules::Fenced => Vec::new(),
+            CommentRules::Indented => indented_examples(raw, block),
+        };
         let mut pieces = Vec::new();
         let mut paragraph: Option<String> = None;
         let mut fenced = false;
@@ -167,6 +182,14 @@ impl CommentShape {
                 pieces.push(Piece::Verbatim(
                     after_markers(line, block, index == 0).to_owned(),
                 ));
+                continue;
+            }
+
+            if let Some(example) = examples.get(index).and_then(Option::as_ref) {
+                flush(&mut paragraph, &mut pieces);
+                // With its indentation: that is the shape of the example, and
+                // under these rules it is the only thing that said so.
+                pieces.push(Piece::Verbatim(example.clone()));
                 continue;
             }
 
@@ -296,8 +319,8 @@ struct Unit {
 
 impl GlossPlan {
     /// Prepares the comment written as `raw`.
-    pub fn new(raw: &str) -> Self {
-        let shape = CommentShape::parse(raw);
+    pub fn new(raw: &str, rules: CommentRules) -> Self {
+        let shape = CommentShape::parse(raw, rules);
         let units = shape
             .units()
             .into_iter()
@@ -448,6 +471,202 @@ fn after_markers(line: &str, block: bool, first: bool) -> &str {
     content.strip_prefix(' ').unwrap_or(content).trim_end()
 }
 
+/// One line with its comment syntax gone and its indentation exactly as
+/// written, the undecorated continuation lines of a block comment included.
+///
+/// The question [`after_markers`] answers, asked by a caller that is allowed a
+/// different answer - so a second function and not a flag, the way
+/// [`opens_or_closes_a_fence`] and [`opens_or_closes_a_rendered_fence`] are two
+/// functions. [`after_markers`] trims a line before it does anything else,
+/// which throws away the leading whitespace of a `/* ... */` continuation line
+/// that carries no `*`. It does that deliberately: there, that whitespace is
+/// the file's indentation and the writer's at the same time, and one line on
+/// its own cannot say which.
+///
+/// Under [`CommentRules::Indented`] nothing else says it either, so the
+/// indentation is kept and the ambiguity is paid for instead - by
+/// [`indented_examples`], which takes the whole block's common indentation off
+/// before it reads anything.
+fn after_markers_as_written(line: &str, block: bool, first: bool) -> &str {
+    if !block {
+        // A line comment's marker ends at a fixed column, so what follows it is
+        // the writer's alone and `after_markers` already keeps it. Measured
+        // over 828,934 comment lines the two never disagree here
+        // (`docs/model-runtime-notes.md` §16).
+        return after_markers(line, block, first);
+    }
+
+    let mut content = line.trim_end();
+    if first {
+        content = content.trim_start();
+        if let Some(opener) = BLOCK_OPENERS.iter().find(|o| content.starts_with(**o)) {
+            content = &content[opener.len()..];
+        }
+    }
+    // IMPORTANT: the closer comes off before the star, in the order
+    // [`after_markers`] takes them off. The other way round reads the `*` of a
+    // line that is only `*/` as the decoration and leaves a `/` behind - a
+    // non-blank line at column 0 that no writer typed, which ends an example
+    // and empties the common indentation of every block that has one.
+    if let Some(rest) = content.strip_suffix(BLOCK_CLOSER) {
+        content = rest;
+    }
+    if !first && let Some(rest) = content.trim_start().strip_prefix('*') {
+        // A decorated continuation line: the `*` is the marker, and what
+        // follows it is read exactly as [`after_markers`] reads it.
+        content = rest;
+    }
+    content.strip_prefix(' ').unwrap_or(content).trim_end()
+}
+
+/// The lines of `raw` that belong to an indented example, each with the
+/// indentation that says so, and `None` for every other line.
+///
+/// `go/doc/comment`'s span rule (`parse.go`, `parseSpans`), with its `unindent`
+/// step narrowed and its `forceIndent` fix-ups left out: blank lines are
+/// skipped, a line beginning with a space or a tab opens a span, the span runs
+/// to the line before the next one that is neither blank nor indented, trailing
+/// blank lines are dropped, and one following line is taken in if it begins
+/// with `}`. A span whose first line carries a list marker is a list, not an
+/// example.
+///
+/// `unindent` is Go's first step and is kept here only for a `/* ... */`
+/// comment, where the leading whitespace of a continuation line is the file's
+/// indentation and the writer's at once and only the block as a whole tells
+/// them apart. It is dropped for a run of `//` lines, where applying it would
+/// be actively wrong: CodeGloss cuts a doc comment into one block per
+/// paragraph, so a gofmt'ed example is a block of its own whose common prefix
+/// is the very tab that says it is an example. Measured over `GOROOT`,
+/// unindenting everything reaches 58.2% of Go's own code lines and unindenting
+/// only block comments 91.6% (`docs/model-runtime-notes.md` §16).
+///
+/// `forceIndent` is Go's rescue for code that was pasted in without being
+/// indented. Go says itself that it can never fire on a gofmt'ed comment, and
+/// it costs prose, so it is left out; the 385 lines that costs are counted in
+/// §16.
+fn indented_examples(raw: &str, block: bool) -> Vec<Option<String>> {
+    let mut lines: Vec<&str> = raw
+        .lines()
+        .enumerate()
+        .map(|(index, line)| after_markers_as_written(line, block, index == 0))
+        .collect();
+    if block {
+        let common = common_indentation(&lines);
+        for line in &mut lines {
+            *line = line.strip_prefix(common).unwrap_or(line);
+        }
+    }
+
+    let indented = |line: &str| line.starts_with([' ', '\t']);
+    let blank = |line: &str| line.trim().is_empty();
+    let mut example = vec![None; lines.len()];
+    let mut index = 0;
+
+    while index < lines.len() {
+        while index < lines.len() && blank(lines[index]) {
+            index += 1;
+        }
+        if index >= lines.len() {
+            break;
+        }
+
+        let start = index;
+        if !indented(lines[index]) {
+            // Prose. It ends at the next blank or indented line, and the line
+            // that ends it is looked at again as the start of the next span.
+            index += 1;
+            while index < lines.len() && !blank(lines[index]) && !indented(lines[index]) {
+                index += 1;
+            }
+            continue;
+        }
+
+        index += 1;
+        while index < lines.len() && (blank(lines[index]) || indented(lines[index])) {
+            index += 1;
+        }
+        let mut end = index;
+        while end > start && blank(lines[end - 1]) {
+            end -= 1;
+        }
+        // Somebody pasted a function in and forgot to indent its closing brace.
+        // Go takes that line too, and says why: a gofmt'ed comment can never
+        // reach here, because a gofmt'ed example is followed by a blank line or
+        // by the end of the comment.
+        if end < lines.len() && lines[end].starts_with('}') {
+            end += 1;
+        }
+        if !opens_a_list(lines[start]) {
+            for (slot, line) in example.iter_mut().zip(&lines).take(end).skip(start) {
+                *slot = Some((*line).to_owned());
+            }
+        }
+        index = end;
+    }
+
+    example
+}
+
+/// The run of spaces and tabs that every non-blank line of `lines` begins with.
+///
+/// Borrowed from the first non-blank line, so what comes back is always a whole
+/// number of characters of that line. Spaces and tabs are one byte each, which
+/// is what makes counting the shared prefix in bytes both correct and cheap.
+fn common_indentation<'a>(lines: &[&'a str]) -> &'a str {
+    let mut common: Option<&'a str> = None;
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let end = line
+            .char_indices()
+            .find(|(_, character)| *character != ' ' && *character != '\t')
+            .map_or(line.len(), |(offset, _)| offset);
+        let indentation = &line[..end];
+        common = Some(match common {
+            None => indentation,
+            Some(common) => {
+                let shared = common
+                    .bytes()
+                    .zip(indentation.bytes())
+                    .take_while(|(one, other)| one == other)
+                    .count();
+                &common[..shared]
+            }
+        });
+    }
+    common.unwrap_or_default()
+}
+
+/// `go/doc/comment`'s `listMarker`: a bullet or a number, then a space or a
+/// tab, then something.
+///
+/// A list is written indented and is still a list, so without this every
+/// bulleted paragraph in a Go comment would be copied through untranslated.
+/// Measured over `GOROOT` it is the difference between 1,208 lines wrongly
+/// copied and 3,821 (`docs/model-runtime-notes.md` §16).
+fn opens_a_list(line: &str) -> bool {
+    let line = line.trim();
+    let Some(marker) = line.chars().next() else {
+        return false;
+    };
+
+    let rest = if matches!(marker, '\u{2022}' | '*' | '+' | '-') {
+        &line[marker.len_utf8()..]
+    } else if marker.is_ascii_digit() {
+        let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+        let after = &line[digits..];
+        match after.strip_prefix('.').or_else(|| after.strip_prefix(')')) {
+            Some(rest) => rest,
+            None => return false,
+        }
+    } else {
+        return false;
+    };
+
+    rest.starts_with([' ', '\t']) && !rest.trim().is_empty()
+}
+
 /// The part of a line that is emitted verbatim in front of its translation:
 /// a doc tag, a list bullet or a Markdown heading.
 fn lead_of(content: &str) -> Option<(String, &str)> {
@@ -528,7 +747,7 @@ mod tests {
     #[test]
     fn a_javadoc_block_becomes_one_unit_per_paragraph_and_per_tag() {
         assert_eq!(
-            CommentShape::parse(JAVADOC).units(),
+            CommentShape::parse(JAVADOC, CommentRules::Fenced).units(),
             [
                 "Returns the currently authenticated user.",
                 "authenticated user",
@@ -542,7 +761,7 @@ mod tests {
     #[test]
     fn the_structure_of_a_javadoc_block_survives_the_round_trip() {
         assert_eq!(
-            CommentShape::parse(JAVADOC).source(),
+            CommentShape::parse(JAVADOC, CommentRules::Fenced).source(),
             concat!(
                 "Returns the currently authenticated user.\n",
                 "\n",
@@ -554,7 +773,7 @@ mod tests {
 
     #[test]
     fn a_translation_is_poured_back_into_the_same_shape() {
-        let shape = CommentShape::parse(JAVADOC);
+        let shape = CommentShape::parse(JAVADOC, CommentRules::Fenced);
         let gloss = shape.rebuild(&[
             "現在認証されているユーザーを返します。".to_owned(),
             "認証済みのユーザー".to_owned(),
@@ -576,8 +795,10 @@ mod tests {
     /// the single line it was written as.
     #[test]
     fn a_unit_is_asked_for_one_sentence_at_a_time() {
-        let plan =
-            GlossPlan::new("/// Returns the user. Fails when `id` is unknown. Nothing is cached.");
+        let plan = GlossPlan::new(
+            "/// Returns the user. Fails when `id` is unknown. Nothing is cached.",
+            CommentRules::Fenced,
+        );
         assert_eq!(
             plan.segments()
                 .iter()
@@ -603,7 +824,10 @@ mod tests {
     /// the sentence beside it was fine and stays glossed.
     #[test]
     fn only_the_sentence_that_lost_a_placeholder_falls_back() {
-        let plan = GlossPlan::new("/// Returns the user. Fails when `id` is unknown.");
+        let plan = GlossPlan::new(
+            "/// Returns the user. Fails when `id` is unknown.",
+            CommentRules::Fenced,
+        );
         assert_eq!(
             plan.sources(),
             ["Returns the user.", "Fails when `id` is unknown."]
@@ -621,7 +845,10 @@ mod tests {
     /// the number of sentences now, not the number of units.
     #[test]
     fn a_batch_of_the_wrong_length_falls_back() {
-        let plan = GlossPlan::new("/// Returns the user. Nothing is cached.");
+        let plan = GlossPlan::new(
+            "/// Returns the user. Nothing is cached.",
+            CommentRules::Fenced,
+        );
         assert_eq!(plan.segments().len(), 2);
         assert_eq!(
             plan.restore(&["ユーザを返します。".to_owned()]),
@@ -633,7 +860,10 @@ mod tests {
     /// here: the engine must see the sentence, not three fragments.
     #[test]
     fn consecutive_prose_lines_are_one_unit() {
-        let shape = CommentShape::parse("// Return the cached user\n// if there is one.");
+        let shape = CommentShape::parse(
+            "// Return the cached user\n// if there is one.",
+            CommentRules::Fenced,
+        );
         assert_eq!(shape.units(), ["Return the cached user if there is one."]);
         assert_eq!(shape.source(), "Return the cached user if there is one.");
     }
@@ -648,35 +878,41 @@ mod tests {
             "/** Note. */",
             "/*! Note. */",
         ] {
-            assert_eq!(CommentShape::parse(raw).units(), ["Note."], "in {raw:?}");
+            assert_eq!(
+                CommentShape::parse(raw, CommentRules::Fenced).units(),
+                ["Note."],
+                "in {raw:?}"
+            );
         }
     }
 
     #[test]
     fn a_blank_line_separates_two_paragraphs() {
-        let shape = CommentShape::parse("/// One.\n///\n/// Two.");
+        let shape = CommentShape::parse("/// One.\n///\n/// Two.", CommentRules::Fenced);
         assert_eq!(shape.units(), ["One.", "Two."]);
         assert_eq!(shape.source(), "One.\n\nTwo.");
     }
 
     #[test]
     fn a_named_tag_keeps_its_argument_out_of_the_translation() {
-        let shape = CommentShape::parse("/// @param id the user to load");
+        let shape = CommentShape::parse("/// @param id the user to load", CommentRules::Fenced);
         assert_eq!(shape.units(), ["the user to load"]);
         assert_eq!(shape.source(), "@param id the user to load");
     }
 
     #[test]
     fn a_tag_without_prose_is_copied_through() {
-        let shape = CommentShape::parse("/// @deprecated");
+        let shape = CommentShape::parse("/// @deprecated", CommentRules::Fenced);
         assert!(shape.units().is_empty());
         assert_eq!(shape.source(), "@deprecated");
     }
 
     #[test]
     fn a_list_item_and_a_heading_keep_their_markers() {
-        let shape =
-            CommentShape::parse("/// # Panics\n///\n/// - Fails on a miss.\n/// 1. Then this.");
+        let shape = CommentShape::parse(
+            "/// # Panics\n///\n/// - Fails on a miss.\n/// 1. Then this.",
+            CommentRules::Fenced,
+        );
         assert_eq!(shape.units(), ["Panics", "Fails on a miss.", "Then this."]);
         assert_eq!(
             shape.source(),
@@ -688,13 +924,16 @@ mod tests {
     /// fence is copied through instead.
     #[test]
     fn a_fenced_code_block_is_never_translated() {
-        let shape = CommentShape::parse(concat!(
-            "/// Loads a user.\n",
-            "///\n",
-            "/// ```\n",
-            "/// let user = find_user(id);\n",
-            "/// ```",
-        ));
+        let shape = CommentShape::parse(
+            concat!(
+                "/// Loads a user.\n",
+                "///\n",
+                "/// ```\n",
+                "/// let user = find_user(id);\n",
+                "/// ```",
+            ),
+            CommentRules::Fenced,
+        );
 
         assert_eq!(shape.units(), ["Loads a user."]);
         assert_eq!(
@@ -708,13 +947,16 @@ mod tests {
     /// it - the blank one included - is code.
     #[test]
     fn a_fenced_example_with_a_blank_line_in_it_is_still_verbatim() {
-        let shape = CommentShape::parse(concat!(
-            "/// ```\n",
-            "/// a = 1;\n",
-            "///\n",
-            "/// b = 2;\n",
-            "/// ```",
-        ));
+        let shape = CommentShape::parse(
+            concat!(
+                "/// ```\n",
+                "/// a = 1;\n",
+                "///\n",
+                "/// b = 2;\n",
+                "/// ```",
+            ),
+            CommentRules::Fenced,
+        );
 
         assert!(shape.units().is_empty());
         assert_eq!(shape.source(), "```\na = 1;\n\nb = 2;\n```");
@@ -725,14 +967,17 @@ mod tests {
     /// looking at, rewritten.
     #[test]
     fn the_indentation_inside_a_fence_is_kept() {
-        let shape = CommentShape::parse(concat!(
-            "/// ```\n",
-            "/// if let Some(user) = find_user(id) {\n",
-            "///     println!(\"{user}\");\n",
-            "///     log(user);\n",
-            "/// }\n",
-            "/// ```",
-        ));
+        let shape = CommentShape::parse(
+            concat!(
+                "/// ```\n",
+                "/// if let Some(user) = find_user(id) {\n",
+                "///     println!(\"{user}\");\n",
+                "///     log(user);\n",
+                "/// }\n",
+                "/// ```",
+            ),
+            CommentRules::Fenced,
+        );
 
         assert!(shape.units().is_empty());
         assert_eq!(
@@ -753,13 +998,16 @@ mod tests {
     /// space, and nobody writing `///     y();` means it to start flush.
     #[test]
     fn the_space_after_a_marker_is_not_indentation() {
-        let shape = CommentShape::parse(concat!(
-            "/// ```\n",
-            "///     four();\n",
-            "/// one();\n",
-            "///none();\n",
-            "/// ```",
-        ));
+        let shape = CommentShape::parse(
+            concat!(
+                "/// ```\n",
+                "///     four();\n",
+                "/// one();\n",
+                "///none();\n",
+                "/// ```",
+            ),
+            CommentRules::Fenced,
+        );
 
         assert_eq!(shape.source(), "```\n    four();\none();\nnone();\n```");
     }
@@ -769,12 +1017,16 @@ mod tests {
     /// fence in it, so this is the only place the shape is pinned at all.
     #[test]
     fn a_starred_block_comment_keeps_the_indentation_inside_its_fence() {
-        let spaced = CommentShape::parse("/**\n * ```\n *     y();\n * ```\n */");
+        let spaced = CommentShape::parse(
+            "/**\n * ```\n *     y();\n * ```\n */",
+            CommentRules::Fenced,
+        );
         assert_eq!(spaced.source(), "```\n    y();\n```");
 
         // The space after the star is optional, and its absence is not
         // indentation either: what the star sheds is the star.
-        let tight = CommentShape::parse("/**\n *```\n *     y();\n *```\n */");
+        let tight =
+            CommentShape::parse("/**\n *```\n *     y();\n *```\n */", CommentRules::Fenced);
         assert_eq!(tight.source(), "```\n    y();\n```");
     }
 
@@ -782,13 +1034,16 @@ mod tests {
     /// `regex-syntax` writes its `hir` doctests this way.
     #[test]
     fn a_tab_inside_a_fence_is_content() {
-        let shape = CommentShape::parse(concat!(
-            "/// ```\n",
-            "///\tif x {\n",
-            "///\t\ty();\n",
-            "/// }\n",
-            "/// ```",
-        ));
+        let shape = CommentShape::parse(
+            concat!(
+                "/// ```\n",
+                "///\tif x {\n",
+                "///\t\ty();\n",
+                "/// }\n",
+                "/// ```",
+            ),
+            CommentRules::Fenced,
+        );
 
         assert_eq!(shape.source(), "```\n\tif x {\n\t\ty();\n}\n```");
     }
@@ -803,15 +1058,19 @@ mod tests {
     #[test]
     fn a_fence_line_survives_crlf_and_multibyte_input() {
         assert_eq!(
-            CommentShape::parse("/// ```\r\n///     let x = 1;\r\n/// ```").source(),
+            CommentShape::parse(
+                "/// ```\r\n///     let x = 1;\r\n/// ```",
+                CommentRules::Fenced
+            )
+            .source(),
             "```\n    let x = 1;\n```"
         );
         assert_eq!(
-            CommentShape::parse("/// ```\n///     日本語\n/// ```").source(),
+            CommentShape::parse("/// ```\n///     日本語\n/// ```", CommentRules::Fenced).source(),
             "```\n    日本語\n```"
         );
         assert_eq!(
-            CommentShape::parse("/// ```\n///\u{3000}全角\n/// ```").source(),
+            CommentShape::parse("/// ```\n///\u{3000}全角\n/// ```", CommentRules::Fenced).source(),
             "```\n\u{3000}全角\n```"
         );
     }
@@ -821,7 +1080,10 @@ mod tests {
     /// continuation lines were laid out.
     #[test]
     fn prose_lines_are_still_trimmed() {
-        let shape = CommentShape::parse("///   Prose   \n///     wrapped onto two lines.");
+        let shape = CommentShape::parse(
+            "///   Prose   \n///     wrapped onto two lines.",
+            CommentRules::Fenced,
+        );
         assert_eq!(shape.units(), ["Prose wrapped onto two lines."]);
         assert_eq!(shape.source(), "Prose wrapped onto two lines.");
     }
@@ -834,7 +1096,10 @@ mod tests {
     /// out flush - the same as before Issue #55, not worse.
     #[test]
     fn a_block_comment_without_stars_cannot_keep_its_indentation() {
-        let shape = CommentShape::parse("/*!\n```\nif x {\n    y();\n}\n```\n*/");
+        let shape = CommentShape::parse(
+            "/*!\n```\nif x {\n    y();\n}\n```\n*/",
+            CommentRules::Fenced,
+        );
         assert_eq!(shape.source(), "```\nif x {\ny();\n}\n```");
     }
 
@@ -918,7 +1183,11 @@ mod tests {
                 "~~~~~~~~~~ Prose after a bare tilde rule.",
             ),
         ] {
-            assert_eq!(CommentShape::parse(raw).units(), [unit], "in {raw:?}");
+            assert_eq!(
+                CommentShape::parse(raw, CommentRules::Fenced).units(),
+                [unit],
+                "in {raw:?}"
+            );
         }
     }
 
@@ -930,13 +1199,16 @@ mod tests {
     /// (`docs/model-runtime-notes.md` §15.1).
     #[test]
     fn a_tilde_line_inside_a_fence_does_not_close_it() {
-        let shape = CommentShape::parse(concat!(
-            "/// ```text\n",
-            "/// #[derive(Copy, Clone)]\n",
-            "///   ~~~~~~Path\n",
-            "///   ^^^^^^^^^^^^^^^^^^^Meta::List\n",
-            "/// ```",
-        ));
+        let shape = CommentShape::parse(
+            concat!(
+                "/// ```text\n",
+                "/// #[derive(Copy, Clone)]\n",
+                "///   ~~~~~~Path\n",
+                "///   ^^^^^^^^^^^^^^^^^^^Meta::List\n",
+                "/// ```",
+            ),
+            CommentRules::Fenced,
+        );
 
         assert!(shape.units().is_empty(), "{shape:?}");
         assert_eq!(
@@ -953,20 +1225,26 @@ mod tests {
 
     #[test]
     fn a_block_comment_without_stars_keeps_its_prose() {
-        let shape = CommentShape::parse("/* Loads the user\n   from the cache. */");
+        let shape = CommentShape::parse(
+            "/* Loads the user\n   from the cache. */",
+            CommentRules::Fenced,
+        );
         assert_eq!(shape.units(), ["Loads the user from the cache."]);
     }
 
     #[test]
     fn a_comment_with_no_prose_has_no_units() {
-        let shape = CommentShape::parse("//");
+        let shape = CommentShape::parse("//", CommentRules::Fenced);
         assert!(shape.units().is_empty());
         assert_eq!(shape.source(), "");
     }
 
     #[test]
     fn a_plan_hands_the_engine_masked_segments() {
-        let plan = GlossPlan::new("/// Returns `UserDetails` when authentication succeeds.");
+        let plan = GlossPlan::new(
+            "/// Returns `UserDetails` when authentication succeeds.",
+            CommentRules::Fenced,
+        );
         assert_eq!(
             plan.segments()
                 .iter()
@@ -989,6 +1267,7 @@ mod tests {
         let plan = GlossPlan::new(
             "/// Dropping it closes the socket and wakes every task blocked on accept, \
              which is why the shutdown is not graceful.",
+            CommentRules::Fenced,
         );
 
         let segments: Vec<String> = plan
@@ -1058,7 +1337,7 @@ mod tests {
     #[test]
     fn a_passthrough_translation_restores_the_source_exactly() {
         for raw in RAWS {
-            let plan = GlossPlan::new(raw);
+            let plan = GlossPlan::new(raw, CommentRules::Fenced);
             let translations: Vec<String> = plan
                 .segments()
                 .iter()
@@ -1082,7 +1361,7 @@ mod tests {
             "/// Dropping it closes the socket and wakes every task blocked on accept, \
              which is why the shutdown is not graceful.",
         ]) {
-            let plan = GlossPlan::new(raw);
+            let plan = GlossPlan::new(raw, CommentRules::Fenced);
             assert_eq!(plan.restore(&plan.sources()), plan.source(), "in {raw:?}");
         }
     }
@@ -1091,16 +1370,240 @@ mod tests {
     /// engine; pairing them up anyway would gloss each line with its neighbour.
     #[test]
     fn a_batch_of_the_wrong_length_falls_back_to_the_source() {
-        let plan = GlossPlan::new(JAVADOC);
+        let plan = GlossPlan::new(JAVADOC, CommentRules::Fenced);
         assert_eq!(plan.restore(&["訳".to_owned()]), plan.source());
     }
 
     #[test]
     fn a_unit_that_lost_a_placeholder_falls_back_on_its_own() {
-        let plan = GlossPlan::new("/// Returns `UserDetails`.\n///\n/// @return the user");
+        let plan = GlossPlan::new(
+            "/// Returns `UserDetails`.\n///\n/// @return the user",
+            CommentRules::Fenced,
+        );
         let gloss = plan.restore(&["返します。".to_owned(), "ユーザー".to_owned()]);
 
         // The first unit lost `X0Q` and keeps its English; the second is fine.
         assert_eq!(gloss, "Returns `UserDetails`.\n\n@return ユーザー");
+    }
+
+    /// The one test that pins both directions of the gate. Ungate the rule and
+    /// the `Fenced` half fails, which is every Rust comment ever indented for
+    /// looks; delete the branch and the `Indented` half fails, which is Issue
+    /// #30 back again.
+    #[test]
+    fn an_indented_run_is_an_example_only_under_the_rules_that_say_so() {
+        let raw = "//\tpattern:\n//\t\t{ term }";
+
+        let fenced = CommentShape::parse(raw, CommentRules::Fenced);
+        assert_eq!(fenced.units(), ["pattern: { term }"]);
+        assert_eq!(fenced.source(), "pattern: { term }");
+
+        let indented = CommentShape::parse(raw, CommentRules::Indented);
+        assert!(indented.units().is_empty(), "{indented:?}");
+        assert_eq!(indented.source(), "\tpattern:\n\t\t{ term }");
+    }
+
+    /// A span ends at the first line that is neither blank nor indented, and
+    /// the prose on either side of it is still prose.
+    #[test]
+    fn an_example_ends_where_the_indentation_does() {
+        let shape = CommentShape::parse(
+            "// Example:\n//\n//\tf(x)\n//\n//\tg(y)\n//\n// Both return an error.",
+            CommentRules::Indented,
+        );
+
+        assert_eq!(shape.units(), ["Example:", "Both return an error."]);
+        assert_eq!(
+            shape.source(),
+            "Example:\n\n\tf(x)\n\n\tg(y)\n\nBoth return an error."
+        );
+    }
+
+    /// Go takes the unindented `}` that closes a pasted-in function, and so
+    /// does this. Without it the brace is glossed as if it were a sentence.
+    #[test]
+    fn an_unindented_closing_brace_belongs_to_the_example_above_it() {
+        let shape = CommentShape::parse(
+            "// Example:\n//\n//\tfunc main() {\n//\t\tprintln()\n// }",
+            CommentRules::Indented,
+        );
+
+        assert_eq!(shape.units(), ["Example:"]);
+        assert_eq!(
+            shape.source(),
+            "Example:\n\n\tfunc main() {\n\t\tprintln()\n}"
+        );
+    }
+
+    /// A list is written indented and is still a list. Without the guard every
+    /// bulleted paragraph in a Go comment is copied through untranslated -
+    /// measured, 3,821 lines instead of 1,208
+    /// (`docs/model-runtime-notes.md` §16).
+    #[test]
+    fn a_list_is_not_an_example() {
+        let shape = CommentShape::parse(
+            "//   - Anything else comes before RC4\n//   - ECDHE comes before anything else",
+            CommentRules::Indented,
+        );
+
+        assert_eq!(
+            shape.units(),
+            [
+                "Anything else comes before RC4",
+                "ECDHE comes before anything else"
+            ]
+        );
+    }
+
+    /// A `/* ... */` written inside a function indents every line of itself,
+    /// and that indentation is the file's rather than the writer's. Taking the
+    /// block's common prefix off first is what keeps its prose prose; without
+    /// it the whole comment reads as one example and its gloss disappears.
+    #[test]
+    fn a_block_comment_is_unindented_before_the_rule_is_applied() {
+        let tabs = CommentShape::parse(
+            "/*\n\t\tProse that wraps.\n\t\tSecond line.\n\t*/",
+            CommentRules::Indented,
+        );
+        assert_eq!(tabs.units(), ["Prose that wraps. Second line."]);
+
+        let spaces = CommentShape::parse(
+            "/*\n\n   Prose.\n\n   More prose.\n*/",
+            CommentRules::Indented,
+        );
+        assert_eq!(spaces.units(), ["Prose.", "More prose."]);
+    }
+
+    /// The same step must not reach a run of `//` lines. CodeGloss cuts a doc
+    /// comment into one block per paragraph, so a gofmt'ed example arrives as a
+    /// block of its own whose common prefix is the very tab that says it is an
+    /// example. Measured over `GOROOT`, unindenting everything reaches 58.2% of
+    /// Go's code lines against 91.6% (`docs/model-runtime-notes.md` §16).
+    #[test]
+    fn a_run_of_line_comments_is_not_unindented() {
+        let shape = CommentShape::parse("//\tf(x)\n//\tg(y)", CommentRules::Indented);
+
+        assert!(shape.units().is_empty(), "{shape:?}");
+        assert_eq!(shape.source(), "\tf(x)\n\tg(y)");
+    }
+
+    /// [`after_markers`] and [`after_markers_as_written`] answer the same
+    /// question for everything but one shape, and this is the table of it. The
+    /// disagreement is the last row: a continuation line of a block comment
+    /// that carries no `*`, where one of them keeps the indentation and the
+    /// other does not.
+    #[test]
+    fn the_two_marker_strippers_agree_except_on_an_undecorated_continuation_line() {
+        for (line, block, first) in [
+            ("// prose", false, true),
+            ("/// prose", false, false),
+            ("//\tf(x)", false, false),
+            ("/* prose", true, true),
+            ("/** prose", true, true),
+            (" * prose", true, false),
+            (" *\tf(x)", true, false),
+            // Only the closer. Taking the star off first would answer "/",
+            // a line at column 0 that nobody typed, and every block's common
+            // indentation would come out empty.
+            (" */", true, false),
+            ("   ", true, false),
+            ("", true, false),
+        ] {
+            assert_eq!(
+                after_markers_as_written(line, block, first),
+                after_markers(line, block, first),
+                "in {line:?}"
+            );
+        }
+
+        assert_eq!(after_markers("   prose", true, false), "prose");
+        assert_eq!(after_markers_as_written("   prose", true, false), "  prose");
+    }
+
+    /// This rule is entirely about leading whitespace, and it runs inside the
+    /// LSP worker's task, where one panic stops every gloss of the session
+    /// (`git show 3ea8a36`). Nothing here asserts an answer - the assertion is
+    /// that there is one.
+    #[test]
+    fn an_example_does_not_panic_on_awkward_input() {
+        for raw in [
+            "",
+            "//",
+            "/*",
+            "*/",
+            "/*\n*/",
+            "//\t",
+            "//\t日本語",
+            "//\t\t§ 4",
+            "//\u{3000}全角",
+            "// - ",
+            "//1.\ta",
+            "//1.",
+            // Indented, so the list marker is looked at - and it is three
+            // bytes wide.
+            "//\t•\tbullet",
+            "//\t•",
+            "//\t1.\ta",
+            "//\t§",
+            "//\t```\r\n//\tx\r\n//\t```",
+            "/*\n\t日本語が\n\t続く\n*/",
+            "/*\r\n\tx\r\n*/",
+            "\t\t",
+        ] {
+            for rules in [CommentRules::Fenced, CommentRules::Indented] {
+                let shape = CommentShape::parse(raw, rules);
+                let _ = shape.source();
+                let _ = GlossPlan::new(raw, rules).segments();
+            }
+        }
+    }
+
+    /// A fence still decides, and it decides first. Under these rules an
+    /// indented fence line would otherwise open nothing, and the prose after it
+    /// would be glossed inside what the writer marked as code.
+    #[test]
+    fn a_fence_outranks_indentation() {
+        let shape = CommentShape::parse(
+            "// Example:\n//\n//\t```\n// prose inside the fence\n//\t```",
+            CommentRules::Indented,
+        );
+
+        assert_eq!(shape.units(), ["Example:"]);
+        assert_eq!(
+            shape.source(),
+            "Example:\n\n\t```\nprose inside the fence\n\t```"
+        );
+    }
+
+    /// The regression anchor: in a Rust comment indentation means nothing, and
+    /// every one of these would lose its gloss if the rule fired outside the
+    /// rules that ask for it. Measured, that is 246,002 blocks of Rust that do
+    /// not move (`docs/model-runtime-notes.md` §16).
+    #[test]
+    fn indentation_in_a_rust_comment_is_not_an_example() {
+        for (raw, units) in [
+            (
+                "///   Prose\n///     wrapped onto two lines.",
+                vec!["Prose wrapped onto two lines."],
+            ),
+            (
+                "/// Loads a user.\n///\n///     let user = find_user(id);",
+                vec!["Loads a user.", "let user = find_user(id);"],
+            ),
+            (
+                "/**\n *   Prose.\n *     More prose.\n */",
+                vec!["Prose. More prose."],
+            ),
+            (
+                "//\tTODO: indent means nothing here.",
+                vec!["TODO: indent means nothing here."],
+            ),
+        ] {
+            assert_eq!(
+                CommentShape::parse(raw, CommentRules::Fenced).units(),
+                units,
+                "in {raw:?}"
+            );
+        }
     }
 }

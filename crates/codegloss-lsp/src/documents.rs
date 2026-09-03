@@ -5,7 +5,7 @@
 //! Each stored buffer keeps the comment blocks extracted from it, which is what
 //! the request handlers answer from.
 
-use codegloss_core::CommentBlock;
+use codegloss_core::{CommentBlock, CommentRules};
 use codegloss_parser::{SupportedLanguage, extract_comment_blocks};
 use dashmap::DashMap;
 use tower_lsp_server::ls_types::{Position, Range, Uri};
@@ -22,6 +22,31 @@ pub struct DocumentState {
     /// CodeGloss cannot parse, which is not an error: the document simply has
     /// nothing to gloss.
     pub blocks: Vec<CommentBlock>,
+}
+
+/// One comment queued for translation: the text the file has, and the rules of
+/// the language it was read from.
+///
+/// The two travel together to the end of the pipeline. The rules select how the
+/// block comes apart and are hashed into its cache key, so a comment sent on
+/// without them would be glossed under whichever rules the worker assumed - and
+/// `// Returns the user.` is a comment in both of the languages CodeGloss
+/// reads, so nothing downstream could notice the mix-up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentSource {
+    /// The comment exactly as the file has it
+    /// ([`CommentBlock::raw`](codegloss_core::CommentBlock::raw)).
+    pub raw: String,
+    pub rules: CommentRules,
+}
+
+impl CommentSource {
+    pub fn of(block: &CommentBlock) -> Self {
+        Self {
+            raw: block.raw.clone(),
+            rules: block.rules,
+        }
+    }
 }
 
 /// A comment block together with the editor coordinates it occupies.
@@ -127,13 +152,9 @@ impl DocumentStore {
     /// The whole document goes at once, even when a single hover prompted it: a
     /// job carrying only part of a document could not safely replace an earlier
     /// job for the same one.
-    pub fn comment_sources(&self, uri: &Uri) -> Vec<String> {
+    pub fn comment_sources(&self, uri: &Uri) -> Vec<CommentSource> {
         self.documents.get(uri).map_or_else(Vec::new, |document| {
-            document
-                .blocks
-                .iter()
-                .map(|block| block.raw.clone())
-                .collect()
+            document.blocks.iter().map(CommentSource::of).collect()
         })
     }
 
@@ -266,7 +287,8 @@ mod tests {
     }
 
     /// The markers are part of what is queued: the gloss of a `/** */` block is
-    /// not the gloss of the same sentence written as `//`.
+    /// not the gloss of the same sentence written as `//`. So are the rules of
+    /// the language it came from, which is what the queue is keyed on.
     #[test]
     fn comment_sources_lists_every_comment_as_written_in_order() {
         let store = DocumentStore::new();
@@ -275,7 +297,38 @@ mod tests {
 
         assert_eq!(
             store.comment_sources(&uri()),
-            vec!["// First.".to_owned(), "/// Second.".to_owned()]
+            vec![
+                CommentSource {
+                    raw: "// First.".to_owned(),
+                    rules: CommentRules::Fenced,
+                },
+                CommentSource {
+                    raw: "/// Second.".to_owned(),
+                    rules: CommentRules::Fenced,
+                },
+            ]
+        );
+    }
+
+    /// The `languageId` is the only thing that says what a buffer is, and it is
+    /// where a block's rules come from. A Go comment queued as if it were Rust
+    /// would be glossed with its examples handed to the engine as prose.
+    #[test]
+    fn a_go_document_is_queued_under_go_rules() {
+        let store = DocumentStore::new();
+        store.open(
+            uri(),
+            "go".to_owned(),
+            1,
+            "// Returns the user.\nfunc f() {}\n".to_owned(),
+        );
+
+        assert_eq!(
+            store.comment_sources(&uri()),
+            vec![CommentSource {
+                raw: "// Returns the user.".to_owned(),
+                rules: CommentRules::Indented,
+            }]
         );
     }
 

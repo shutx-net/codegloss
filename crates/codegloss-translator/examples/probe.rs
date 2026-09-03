@@ -19,7 +19,7 @@ use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use codegloss_core::{GlossPlan, Segment};
+use codegloss_core::{CommentRules, GlossPlan, Segment};
 use codegloss_translator::{CandleTranslator, DEFAULT_BEAMS, Precision, Translator};
 
 /// Comments chosen to stress the cases a reader complains about: fragments,
@@ -109,7 +109,7 @@ fn main() -> ExitCode {
         println!("{raw}");
         println!("----------------------------------------------------------------");
 
-        let plan = GlossPlan::new(raw);
+        let plan = GlossPlan::new(raw, CommentRules::Fenced);
         let sources = plan.sources();
         let segments = plan.segments();
         let masked: Vec<&str> = segments.iter().map(Segment::text).collect();

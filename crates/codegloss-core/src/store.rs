@@ -166,10 +166,12 @@ fn is_key(name: &str) -> bool {
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use crate::CommentRules;
+
     use super::*;
 
     fn key(text: &str) -> GlossKey {
-        GlossKey::new("fugumt-en-ja@1", "en", "ja", text)
+        GlossKey::new(CommentRules::Fenced, "fugumt-en-ja@1", "en", "ja", text)
     }
 
     /// A directory of this test's own, removed when the guard is dropped.
@@ -234,12 +236,21 @@ mod tests {
         let scratch = Scratch::new();
         let store = GlossStore::open(&scratch.0, 16).expect("the directory is writable");
         store
-            .insert(&GlossKey::new("passthrough-1", "en", "ja", "text"), "old")
+            .insert(
+                &GlossKey::new(CommentRules::Fenced, "passthrough-1", "en", "ja", "text"),
+                "old",
+            )
             .expect("the gloss is written");
 
         assert!(
             store
-                .get(&GlossKey::new("fugumt-en-ja@1", "en", "ja", "text"))
+                .get(&GlossKey::new(
+                    CommentRules::Fenced,
+                    "fugumt-en-ja@1",
+                    "en",
+                    "ja",
+                    "text"
+                ))
                 .is_none()
         );
     }
@@ -294,7 +305,9 @@ mod tests {
 
     #[test]
     fn only_key_shaped_names_are_glosses() {
-        assert!(is_key(&GlossKey::new("m", "en", "ja", "text").to_hex()));
+        assert!(is_key(
+            &GlossKey::new(CommentRules::Fenced, "m", "en", "ja", "text").to_hex()
+        ));
         assert!(!is_key("notes.txt"));
         assert!(!is_key(&"z".repeat(64)));
         assert!(!is_key(&"0".repeat(63)));

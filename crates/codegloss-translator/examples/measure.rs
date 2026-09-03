@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use codegloss_core::{GlossPlan, Segment};
+use codegloss_core::{CommentRules, GlossPlan, Segment};
 use codegloss_translator::{CandleTranslator, DEFAULT_BEAMS, Precision, Translator};
 
 /// The corpus `tests/quality.rs` checks against, so that the timings and the
@@ -147,7 +147,7 @@ fn corpus() -> Vec<Segment> {
             let raw = value["raw"]
                 .as_str()
                 .expect("every entry has a raw comment");
-            GlossPlan::new(raw).segments()
+            GlossPlan::new(raw, CommentRules::Fenced).segments()
         })
         .collect()
 }

@@ -1,0 +1,53 @@
+//go:build linux
+
+// Package fixture holds one of every comment shape Go writes. It is stored as
+// .go.txt so that neither cargo nor go build picks it up.
+package fixture
+
+import "strings"
+
+// Find looks the user up in the cache.
+//
+// The example below is indented, which is the only thing that says it is one:
+//
+//	user, err := Find(id)
+//	if err != nil {
+//		return err
+//	}
+//
+// Anything after it is prose again.
+func Find(id uint64) string {
+	// The // in the URL below is not a comment. It sits inside a string
+	// literal, and Tree-sitter leaves it there instead of guessing from the
+	// raw text.
+	endpoint := "https://example.com/users" // Trailing note.
+
+	/*
+		This block comment is indented by the file rather than by its writer,
+		and its prose has to stay prose.
+	*/
+	return strings.TrimSpace(endpoint)
+}
+
+// Order applies the rules in this order:
+//
+//   - Anything else comes before RC4
+//   - ECDHE comes before anything else
+//
+// A list is written indented and is still a list.
+func Order() {}
+
+/*
+Sum adds two numbers. This comment carries no stars, and its example is
+indented with spaces:
+
+    total := Sum(1, 2)
+
+See [strings.TrimSpace] for the shape of a doc link.
+*/
+func Sum(a, b int) int { return a + b }
+
+// 日本語のコメントも字下げされた例を持てる:
+//
+//	fmt.Println("こんにちは")
+func Greet() {}

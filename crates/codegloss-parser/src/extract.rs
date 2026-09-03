@@ -4,7 +4,7 @@
 //! expression: `//` inside a string literal such as `"https://example.com"`
 //! belongs to the string node and must not be picked up.
 
-use codegloss_core::{CommentBlock, CommentStyle};
+use codegloss_core::{CommentBlock, CommentRules, CommentStyle};
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::languages::{CommentSyntax, SupportedLanguage};
@@ -116,6 +116,10 @@ enum Marker {
 #[derive(Debug)]
 struct RawComment {
     style: CommentStyle,
+    /// Taken from the registry, carried into the block and from there into
+    /// `CommentShape::parse` and the cache key. The parser is the one place
+    /// that knows the language, so it is the one place that says this.
+    rules: CommentRules,
     marker: Marker,
     /// The comment text with its markers stripped.
     body: String,
@@ -129,6 +133,10 @@ struct RawComment {
     /// `false` for a comment that trails code, as in `let x = 1; // note`.
     /// Trailing comments never join a block.
     own_line: bool,
+    /// Whether the line speaks to the toolchain rather than to a reader
+    /// (`//go:build linux`). Dropped the way a rule or a banner is, and it ends
+    /// the run it interrupts for the same reason.
+    directive: bool,
 }
 
 impl RawComment {
@@ -178,6 +186,7 @@ impl RawComment {
             .map_or(0, |index| index + 1);
 
         Some(Self {
+            rules: syntax.rules,
             style: match (is_block, marker) {
                 (false, Marker::Plain) => CommentStyle::Line,
                 (false, _) => CommentStyle::DocLine,
@@ -194,15 +203,19 @@ impl RawComment {
             own_line: source[line_start..start_byte]
                 .chars()
                 .all(char::is_whitespace),
+            directive: !is_block && syntax.directives.matches(content),
         })
     }
 
     /// Whether the comment carries words worth translating.
     ///
     /// An empty `//`, a `//////////` rule and a `// ====` banner all reduce to
-    /// punctuation and are skipped.
+    /// punctuation and are skipped. So is a line addressed to the toolchain:
+    /// `//go:build linux` is not a sentence, and 3.3% of every comment block in
+    /// `GOROOT` is nothing but such lines
+    /// (`docs/model-runtime-notes.md` §16).
     fn is_translatable(&self) -> bool {
-        self.body.chars().any(char::is_alphanumeric)
+        !self.directive && self.body.chars().any(char::is_alphanumeric)
     }
 
     fn is_line_comment(&self) -> bool {
@@ -239,6 +252,7 @@ impl RawComment {
     fn into_block(self, source: &str) -> CommentBlock {
         CommentBlock {
             style: self.style,
+            rules: self.rules,
             text: self.body,
             raw: source[self.start_byte..self.end_byte].to_owned(),
             start_line: self.start_line,
@@ -530,7 +544,9 @@ mod tests {
             "both fences and every line between them belong to the block"
         );
         assert!(
-            CommentShape::parse(&example.raw).units().is_empty(),
+            CommentShape::parse(&example.raw, CommentRules::Fenced)
+                .units()
+                .is_empty(),
             "a fenced example has nothing to translate"
         );
     }
@@ -581,7 +597,11 @@ mod tests {
 
         assert_eq!(example.len(), 1, "{example:#?}");
         assert_eq!(example[0].raw, "/// ```\n/// a();\n///\n/// b();\n/// ```");
-        assert!(CommentShape::parse(&example[0].raw).units().is_empty());
+        assert!(
+            CommentShape::parse(&example[0].raw, CommentRules::Fenced)
+                .units()
+                .is_empty()
+        );
     }
 
     /// A block names the comment it is about, never the decoration around it.
@@ -620,7 +640,10 @@ mod tests {
         assert_eq!(markers.len(), 3, "{markers:#?}");
         assert_eq!(markers[1].raw, "//! b();");
         assert_eq!(markers[2].raw, "//! c();");
-        assert_eq!(CommentShape::parse(&markers[1].raw).units(), ["b();"]);
+        assert_eq!(
+            CommentShape::parse(&markers[1].raw, CommentRules::Fenced).units(),
+            ["b();"]
+        );
 
         // A change of indentation.
         let source = concat!(
