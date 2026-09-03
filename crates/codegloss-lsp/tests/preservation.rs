@@ -11,9 +11,12 @@
 //! when a gloss then comes out wrong: if they still hold, the model is at fault
 //! and not this code.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use codegloss_core::Segment;
 use codegloss_lsp::Backend;
+use codegloss_translator::Translator;
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -121,11 +124,20 @@ async fn glossed_document() -> LspService<Backend> {
 
 /// The gloss a hover shows, without the quoted English underneath it.
 async fn gloss_at(service: &mut LspService<Backend>, line: u32, character: u32) -> String {
+    gloss_at_in(service, DOCUMENT_URI, line, character).await
+}
+
+async fn gloss_at_in(
+    service: &mut LspService<Backend>,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> String {
     let response = call(
         service,
         Request::build("textDocument/hover")
             .params(json!({
-                "textDocument": { "uri": DOCUMENT_URI },
+                "textDocument": { "uri": uri },
                 "position": { "line": line, "character": character },
             }))
             .id(2)
@@ -146,10 +158,14 @@ async fn gloss_at(service: &mut LspService<Backend>, line: u32, character: u32) 
 }
 
 async fn lens_titles(service: &mut LspService<Backend>) -> Vec<(u64, String)> {
+    lens_titles_in(service, DOCUMENT_URI).await
+}
+
+async fn lens_titles_in(service: &mut LspService<Backend>, uri: &str) -> Vec<(u64, String)> {
     let response = call(
         service,
         Request::build("textDocument/codeLens")
-            .params(json!({ "textDocument": { "uri": DOCUMENT_URI } }))
+            .params(json!({ "textDocument": { "uri": uri } }))
             .id(3)
             .finish(),
     )
@@ -296,4 +312,209 @@ async fn every_comment_of_the_document_is_glossed() {
             "the comment on line {line} was never glossed"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #53: a doctest is code, and code is not translated.
+// ---------------------------------------------------------------------------
+
+const DOCTEST_URI: &str = "file:///tmp/codegloss/doctest.rs";
+
+/// The snippet Issue #53 is written around, with the two shapes that used to
+/// tear it apart: blank `///` lines between the paragraphs and brace-only lines
+/// inside the example.
+const DOCTEST_TEXT: &str = concat!(
+    "/// Writes the whole buffer.\n",
+    "///\n",
+    "/// # Examples\n",
+    "///\n",
+    "/// ```\n",
+    "/// let mut pos = 0;\n",
+    "/// while pos < data.len() {\n",
+    "///     let n = writer.write(&data[pos..]).await?;\n",
+    "///     pos += n;\n",
+    "/// }\n",
+    "/// Ok(())\n",
+    "/// ```\n",
+    "pub fn write_all() {}\n",
+);
+
+/// An engine that records what it is asked and marks what it answers.
+///
+/// Both halves are load-bearing. [`PassthroughTranslator`] returns its input,
+/// so with it a doctest that went through the model and one that never did look
+/// exactly alike; the recording is what tells them apart. The `[ja] ` mark then
+/// says, in the finished gloss, which lines came from the engine and which came
+/// from the source.
+struct RecordingEngine {
+    asked: Mutex<Vec<String>>,
+}
+
+impl RecordingEngine {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            asked: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn asked(&self) -> Vec<String> {
+        self.asked
+            .lock()
+            .expect("the recorder is not poisoned")
+            .clone()
+    }
+}
+
+impl Translator for RecordingEngine {
+    fn translate(&self, segments: &[Segment]) -> anyhow::Result<Vec<String>> {
+        let mut asked = self.asked.lock().expect("the recorder is not poisoned");
+        Ok(segments
+            .iter()
+            .map(|segment| {
+                asked.push(segment.text().to_owned());
+                format!("[ja] {}", segment.text())
+            })
+            .collect())
+    }
+
+    fn model_version(&self) -> &str {
+        "recording-engine"
+    }
+}
+
+/// Brings a server up on [`DOCTEST_TEXT`] with a recording engine and waits for
+/// its glosses.
+async fn glossed_doctest() -> (LspService<Backend>, Arc<RecordingEngine>) {
+    let engine = RecordingEngine::new();
+    let handle = Arc::clone(&engine);
+    let (mut service, socket) = LspService::new(move |client| {
+        Backend::with_engine(client, Arc::clone(&handle) as Arc<dyn Translator>)
+    });
+    let (mut requests, mut responses) = socket.split();
+    tokio::spawn(async move {
+        while let Some(request) = requests.next().await {
+            if let Some(id) = request.id().cloned() {
+                let _ = futures::SinkExt::send(&mut responses, Response::from_ok(id, Value::Null))
+                    .await;
+            }
+        }
+    });
+
+    let mut batches: watch::Receiver<u64> = service.inner().glosses().batches_completed();
+    call(
+        &mut service,
+        Request::build("initialize")
+            .params(json!({ "capabilities": {} }))
+            .id(1)
+            .finish(),
+    )
+    .await;
+    call(
+        &mut service,
+        Request::build("initialized").params(json!({})).finish(),
+    )
+    .await;
+    call(
+        &mut service,
+        Request::build("textDocument/didOpen")
+            .params(json!({
+                "textDocument": {
+                    "uri": DOCTEST_URI,
+                    "languageId": "rust",
+                    "version": 1,
+                    "text": DOCTEST_TEXT,
+                }
+            }))
+            .finish(),
+    )
+    .await;
+
+    timeout(SETTLE_TIMEOUT, batches.changed())
+        .await
+        .expect("the pipeline finished a batch")
+        .expect("the pipeline is still running");
+    (service, engine)
+}
+
+/// The defect of Issue #53, stated where the reader meets it: no line of the
+/// example is ever handed to the engine.
+///
+/// The prose around it still is. Before the parser carried a run through a
+/// fence this document reached the model as four blocks with no fence in any of
+/// them, and it answered `mut pos = 0 とする。` for `let mut pos = 0;` and
+/// `OK()` for `Ok(())`.
+#[tokio::test(flavor = "current_thread")]
+async fn a_doctest_never_reaches_the_engine() {
+    let (mut service, engine) = glossed_doctest().await;
+    let asked = engine.asked();
+
+    assert!(
+        asked.iter().any(|segment| segment.contains("whole buffer")),
+        "the prose is still translated: {asked:?}"
+    );
+    for fragment in [
+        "pos", "writer", "Ok(", "await", "{", "}", "```", "let ", ";",
+    ] {
+        assert!(
+            !asked.iter().any(|segment| segment.contains(fragment)),
+            "the engine was asked for {fragment:?}: {asked:?}"
+        );
+    }
+
+    let titles = lens_titles_in(&mut service, DOCTEST_URI).await;
+    assert_eq!(titles.len(), 3, "{titles:?}");
+    assert_eq!(
+        titles[2],
+        (
+            4,
+            concat!(
+                "``` let mut pos = 0; while pos < data.len() { let n = ",
+                "writer.write(&data[pos..]).await?; pos += n; } Ok(()) ```",
+            )
+            .to_owned()
+        ),
+        "the lens on the example carries the code as it was written"
+    );
+    assert!(
+        titles[0].1.starts_with("[ja] "),
+        "the prose above it did go through the engine: {:?}",
+        titles[0]
+    );
+}
+
+/// Hover answers on every line of the example, with the code the reader is
+/// looking at rather than with a translation of it.
+///
+/// The fence and the brace-only lines belong to no block at all today, so
+/// `comment_block_at` answers `null` on them and the code lines answer with a
+/// gloss of their own.
+#[tokio::test(flavor = "current_thread")]
+async fn a_doctest_answers_hover_on_every_one_of_its_lines() {
+    let (mut service, _engine) = glossed_doctest().await;
+
+    let fence = gloss_at_in(&mut service, DOCTEST_URI, 4, 5).await;
+    let code = gloss_at_in(&mut service, DOCTEST_URI, 5, 5).await;
+    let brace = gloss_at_in(&mut service, DOCTEST_URI, 9, 5).await;
+
+    assert_eq!(fence, code, "every line of the example is one block");
+    assert_eq!(code, brace, "every line of the example is one block");
+    // The interior indentation of the example is gone because
+    // `CommentShape::parse` trims every line before it copies it through. That
+    // is a `codegloss-core` defect of its own - it is live today for a fence
+    // whose opener carries a language tag - and fixing it would move
+    // `PIPELINE_VERSION`, so it is deliberately not part of this change.
+    assert_eq!(
+        fence,
+        concat!(
+            "```\n",
+            "let mut pos = 0;\n",
+            "while pos < data.len() {\n",
+            "let n = writer.write(&data[pos..]).await?;\n",
+            "pos += n;\n",
+            "}\n",
+            "Ok(())\n",
+            "```",
+        )
+    );
+    assert!(!fence.contains("[ja]"), "nothing in it was translated");
 }

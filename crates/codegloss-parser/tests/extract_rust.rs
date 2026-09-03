@@ -67,6 +67,26 @@ fn expected() -> Vec<Summary> {
             end_line: 25,
             text: "Doc block attached to a struct.",
         },
+        Summary {
+            style: CommentStyle::DocLine,
+            start_line: 28,
+            end_line: 28,
+            text: "Writes the whole buffer.",
+        },
+        Summary {
+            style: CommentStyle::DocLine,
+            start_line: 30,
+            end_line: 30,
+            text: "# Examples",
+        },
+        // The doctest of Issue #53: one block from the opening fence to the
+        // closing one, blank `///` lines and brace-only lines included.
+        Summary {
+            style: CommentStyle::DocLine,
+            start_line: 32,
+            end_line: 38,
+            text: "``` let mut pos = 0; while pos < data.len() { pos += 1; } Ok(()) ```",
+        },
     ]
 }
 
@@ -140,6 +160,27 @@ fn a_horizontal_rule_comment_is_dropped() {
     );
     // Line 11 holds nothing but the rule, so no block may start there.
     assert!(extract().iter().all(|block| block.start_line != 11));
+}
+
+/// Issue #53 through a real file: a doctest arrives whole, so
+/// `CommentShape` sees the fences and copies the example through instead of
+/// handing it to the engine as prose.
+#[test]
+fn the_fenced_example_reaches_the_shape_in_one_piece() {
+    let example = extract()
+        .into_iter()
+        .find(|block| block.start_line == 32)
+        .expect("the doctest is extracted");
+
+    assert_eq!(example.end_line, 38);
+    assert!(example.raw.starts_with("/// ```\n"));
+    assert!(example.raw.ends_with("\n/// ```"));
+    assert!(
+        codegloss_core::CommentShape::parse(&example.raw)
+            .units()
+            .is_empty(),
+        "a fenced example has nothing to translate: {example:?}"
+    );
 }
 
 #[test]

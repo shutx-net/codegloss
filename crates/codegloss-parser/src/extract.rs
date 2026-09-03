@@ -43,6 +43,13 @@ pub enum ExtractError {
 /// several `//` lines is translated as a whole rather than line by line.
 /// Comments that carry no words - an empty `//`, a `//////////` rule - are
 /// dropped, and dropping them also ends the run they interrupt.
+///
+/// The one exception is a Markdown fence. Inside one, a word-less comment is
+/// not decoration but a line of the example, so the run is carried through it
+/// and the whole fenced block - both fences included - reaches
+/// [`CommentShape`](codegloss_core::CommentShape) in one piece. Without that,
+/// a `///` doctest arrives with its fences dropped and its lines split across
+/// several blocks, and its code is translated as prose.
 pub fn extract_comment_blocks(
     source: &str,
     language: SupportedLanguage,
@@ -84,7 +91,9 @@ pub fn extract_comment_blocks(
     }
 
     comments.sort_by_key(|comment| comment.start_byte);
-    comments.retain(RawComment::is_translatable);
+    // IMPORTANT: what to drop is decided in `merge_runs` and not here. It
+    // depends on whether the run is inside a fenced example, and there is no
+    // run to ask until the comments are being folded together.
     Ok(merge_runs(comments, source))
 }
 
@@ -200,6 +209,21 @@ impl RawComment {
         matches!(self.style, CommentStyle::Line | CommentStyle::DocLine)
     }
 
+    /// Whether the comment is the opening or the closing fence of a Markdown
+    /// example.
+    ///
+    /// The judgement is `codegloss-core`'s, never a copy of it: the parser
+    /// decides where a block ends and `CommentShape` decides what is code
+    /// inside one, and two answers to "is this a fence" would put a boundary in
+    /// the middle of an example.
+    ///
+    /// Only a line comment can be one. A run is a run of line comments (see
+    /// [`Self::continues_into`]), and a block comment's body is its lines
+    /// already joined into a single line.
+    fn opens_or_closes_a_fence(&self) -> bool {
+        self.is_line_comment() && codegloss_core::opens_or_closes_a_fence(&self.body)
+    }
+
     /// Whether `next` continues the same paragraph as `self`.
     fn continues_into(&self, next: &Self) -> bool {
         self.is_line_comment()
@@ -250,35 +274,92 @@ fn join_block_lines(content: &str, syntax: CommentSyntax) -> String {
 ///
 /// Bodies are joined with a space rather than a newline: the result is fed to a
 /// machine translator, which wants one sentence, not a column of fragments.
+/// [`CommentBlock::raw`] keeps the lines as they were written, which is what
+/// the structure is rebuilt from afterwards.
+///
+/// This is also where a comment is dropped, because whether it may be depends
+/// on the run: a word-less comment is decoration outside a Markdown fence and a
+/// line of the example inside one.
 fn merge_runs(comments: Vec<RawComment>, source: &str) -> Vec<CommentBlock> {
     let mut blocks = Vec::new();
-    let mut open: Option<RawComment> = None;
+    let mut run: Vec<RawComment> = Vec::new();
+    // Whether the run being accumulated is inside a Markdown fence. It is a
+    // property of the run and not of the document, so it starts over on every
+    // new run: a fence opened in one paragraph must not reach into the next.
+    let mut fenced = false;
 
     for comment in comments {
-        match open.take() {
-            Some(mut previous) if previous.continues_into(&comment) => {
-                previous.body.push(' ');
-                previous.body.push_str(&comment.body);
-                previous.end_line = comment.end_line;
-                previous.end_byte = comment.end_byte;
-                open = Some(previous);
+        if !run
+            .last()
+            .is_some_and(|previous| previous.continues_into(&comment))
+        {
+            close_run(&mut run, &mut blocks, source);
+            fenced = false;
+        }
+
+        let fence_line = comment.opens_or_closes_a_fence();
+        if comment.is_translatable() || fence_line || fenced {
+            if fence_line {
+                fenced = !fenced;
             }
-            Some(previous) => {
-                blocks.push(previous.into_block(source));
-                open = Some(comment);
-            }
-            None => open = Some(comment),
+            run.push(comment);
+        } else {
+            // Decoration: an empty `//`, a `//////////` rule, a `// ====`
+            // banner. It is dropped, and dropping it ends the paragraph it
+            // interrupts - two paragraphs separated by a blank `///` are two
+            // comments and read as two.
+            close_run(&mut run, &mut blocks, source);
+            fenced = false;
         }
     }
+    close_run(&mut run, &mut blocks, source);
 
-    if let Some(previous) = open {
-        blocks.push(previous.into_block(source));
-    }
     blocks
+}
+
+/// Turns the accumulated run into one block, or into nothing.
+fn close_run(run: &mut Vec<RawComment>, blocks: &mut Vec<CommentBlock>, source: &str) {
+    // A run only ends on a word-less line when a fence was left open, and a
+    // block's range names the comment it is about rather than the decoration
+    // trailing it - `ranges_point_back_at_the_original_source` says the same
+    // thing about the newline.
+    while run
+        .last()
+        .is_some_and(|comment| !comment.is_translatable() && !comment.opens_or_closes_a_fence())
+    {
+        run.pop();
+    }
+
+    // A fence with nothing inside it says nothing in any language. Keeping it
+    // would queue a translation whose answer is the empty string.
+    if !run.iter().any(RawComment::is_translatable) {
+        run.clear();
+        return;
+    }
+
+    let mut comments = std::mem::take(run).into_iter();
+    let Some(mut block) = comments.next() else {
+        return;
+    };
+    for comment in comments {
+        // A blank line inside a fence has no body, and joining it in would only
+        // widen the gap between the two lines around it.
+        if !comment.body.is_empty() {
+            if !block.body.is_empty() {
+                block.body.push(' ');
+            }
+            block.body.push_str(&comment.body);
+        }
+        block.end_line = comment.end_line;
+        block.end_byte = comment.end_byte;
+    }
+    blocks.push(block.into_block(source));
 }
 
 #[cfg(test)]
 mod tests {
+    use codegloss_core::CommentShape;
+
     use super::*;
 
     fn blocks(source: &str) -> Vec<CommentBlock> {
@@ -405,6 +486,180 @@ mod tests {
             &source[blocks[0].start_byte..blocks[0].end_byte],
             "// 日本語のコメント。"
         );
+    }
+
+    /// Issue #53, as the reader meets it: a `///` doctest reaches
+    /// [`CommentShape`] whole, so its code is copied through instead of being
+    /// handed to the engine as prose.
+    ///
+    /// Before this rule the same snippet came out as four blocks with neither
+    /// fence in any of them, and the model answered `mut pos = 0 とする。` and
+    /// `OK()`.
+    #[test]
+    fn a_fenced_example_stays_in_one_block() {
+        let source = concat!(
+            "/// Writes the whole buffer.\n",
+            "///\n",
+            "/// # Examples\n",
+            "///\n",
+            "/// ```\n",
+            "/// let mut pos = 0;\n",
+            "/// while pos < data.len() {\n",
+            "///     pos += 1;\n",
+            "/// }\n",
+            "/// Ok(())\n",
+            "/// ```\n",
+            "pub fn write_all() {}\n",
+        );
+        let extracted = blocks(source);
+
+        assert_eq!(extracted.len(), 3, "{extracted:#?}");
+        let example = &extracted[2];
+        assert_eq!((example.start_line, example.end_line), (4, 10));
+        assert_eq!(
+            example.raw,
+            concat!(
+                "/// ```\n",
+                "/// let mut pos = 0;\n",
+                "/// while pos < data.len() {\n",
+                "///     pos += 1;\n",
+                "/// }\n",
+                "/// Ok(())\n",
+                "/// ```",
+            ),
+            "both fences and every line between them belong to the block"
+        );
+        assert!(
+            CommentShape::parse(&example.raw).units().is_empty(),
+            "a fenced example has nothing to translate"
+        );
+    }
+
+    /// The other half of the rule, and the reason it is about fences rather
+    /// than about word-less lines: a rule and a banner still end the run they
+    /// interrupt, and neither reaches a block.
+    #[test]
+    fn a_rule_or_a_banner_still_ends_the_paragraph() {
+        for source in [
+            "// One.\n//////////\n// Two.\n",
+            "// One.\n// ====\n// Two.\n",
+            "//! One.\n//! ----------\n//! Two.\n",
+        ] {
+            assert_eq!(
+                texts(source),
+                ["One.".to_owned(), "Two.".to_owned()],
+                "{source:?}"
+            );
+        }
+        for block in blocks("// One.\n//////////\n// Two.\n// ====\n// Three.\n") {
+            assert!(!block.text.contains("///"), "{block:?}");
+            assert!(!block.text.contains("===="), "{block:?}");
+        }
+    }
+
+    /// A blank `///` outside a fence still splits, which is what keeps a doc
+    /// comment one block per paragraph. Issue #47 measured what joining them
+    /// costs and decided against it; this change does not smuggle it in.
+    #[test]
+    fn a_blank_marker_line_outside_a_fence_still_ends_the_paragraph() {
+        assert_eq!(
+            texts("/// One.\n///\n/// Two.\nfn f() {}\n"),
+            ["One.".to_owned(), "Two.".to_owned()]
+        );
+        assert_eq!(
+            texts("//! One.\n//!\n//! Two.\n"),
+            ["One.".to_owned(), "Two.".to_owned()]
+        );
+    }
+
+    /// Inside a fence the same blank line is a line of the example, and the
+    /// shape is common: a doctest with a blank line in it.
+    #[test]
+    fn a_blank_marker_line_inside_a_fence_does_not_end_the_block() {
+        let source = "/// ```\n/// a();\n///\n/// b();\n/// ```\nfn f() {}\n";
+        let example = blocks(source);
+
+        assert_eq!(example.len(), 1, "{example:#?}");
+        assert_eq!(example[0].raw, "/// ```\n/// a();\n///\n/// b();\n/// ```");
+        assert!(CommentShape::parse(&example[0].raw).units().is_empty());
+    }
+
+    /// A block names the comment it is about, never the decoration around it.
+    ///
+    /// The trailing half fires on a fence left open at the end of a run; the
+    /// leading half cannot fire under this rule - a run opens on a translatable
+    /// comment or on a fence line, and both are content - but it is what
+    /// breaks first for whoever keeps blank lines next.
+    #[test]
+    fn a_block_never_begins_or_ends_on_a_word_less_line() {
+        let ends = blocks("/// ```\n/// a();\n///\nfn f() {}\n");
+        assert_eq!(ends.len(), 1, "{ends:#?}");
+        assert_eq!(ends[0].end_line, 1);
+        assert_eq!(ends[0].raw, "/// ```\n/// a();");
+
+        let begins = blocks("///\n/// One.\nfn f() {}\n");
+        assert_eq!(begins.len(), 1, "{begins:#?}");
+        assert_eq!(begins[0].start_line, 1);
+        assert_eq!(begins[0].raw, "/// One.");
+    }
+
+    /// Fence state belongs to the run, not to the document: everything that
+    /// ends a run ends the fence with it.
+    #[test]
+    fn a_fence_does_not_bridge_two_runs_or_two_markers() {
+        // A real blank source line. The blank `///` after it is decoration
+        // again, which is what says the fence did not reach across.
+        let split = blocks("/// ```\n/// a();\n\n/// b();\n///\n/// c();\nfn f() {}\n");
+        assert_eq!(split.len(), 3, "{split:#?}");
+        assert_eq!(split[0].raw, "/// ```\n/// a();");
+        assert_eq!(split[1].raw, "/// b();");
+        assert_eq!(split[2].raw, "/// c();");
+
+        // A change of marker.
+        let markers = blocks("/// ```\n/// a();\n//! b();\n//!\n//! c();\nfn f() {}\n");
+        assert_eq!(markers.len(), 3, "{markers:#?}");
+        assert_eq!(markers[1].raw, "//! b();");
+        assert_eq!(markers[2].raw, "//! c();");
+        assert_eq!(CommentShape::parse(&markers[1].raw).units(), ["b();"]);
+
+        // A change of indentation.
+        let source = concat!(
+            "fn f() {\n",
+            "    // ```\n",
+            "    // a();\n",
+            "        // b();\n",
+            "        //\n",
+            "        // c();\n",
+            "}\n",
+        );
+        let indented = blocks(source);
+        assert_eq!(indented.len(), 3, "{indented:#?}");
+        assert_eq!(indented[0].raw, "// ```\n    // a();");
+        assert_eq!(indented[1].raw, "// b();");
+        assert_eq!(indented[2].raw, "// c();");
+    }
+
+    /// The constraint AGENTS.md puts first: nothing here may panic, because
+    /// this feeds `GlossPlan::new` in the language server's worker and a panic
+    /// there takes translation down for the session.
+    #[test]
+    fn a_fence_survives_multibyte_text_and_crlf_without_panicking() {
+        for source in [
+            "/// ```\n/// 日本語 { }\n/// ```\nfn f() {}\n",
+            "/// ```\r\n/// 日本語 { }\r\n/// ```\r\nfn f() {}\r\n",
+        ] {
+            let fenced = blocks(source);
+            assert_eq!(fenced.len(), 1, "{source:?} gave {fenced:#?}");
+            assert_eq!(
+                &source[fenced[0].start_byte..fenced[0].end_byte],
+                fenced[0].raw,
+                "raw must be exactly the bytes the range names"
+            );
+            assert!(fenced[0].text.contains("日本語"));
+        }
+
+        // A fence with nothing inside it says nothing in any language.
+        assert!(blocks("/// ```\n/// ```\nfn f() {}\n").is_empty());
     }
 
     #[test]
