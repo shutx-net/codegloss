@@ -19,6 +19,11 @@ repository = "https://github.com/shutx-net/codegloss"
 # codegloss-parser の from_lsp_language_id はその値を受ける。
 # **ただし実機で当たることは未確認**——確認欄は docs/zed-display-notes.md 2.6。
 # 他の言語は別の拡張が提供するため、対応言語を増やす段階で実機確認してから足す。
+#
+# **この一覧を触ったら codegloss-parser の SupportedLanguage::ALL も触ること。**
+# 別ワークスペースなのでどちらのビルドも相手を見ず、片方だけ足すと両方向に静かに
+# 壊れる。CI の `check the supported-language lists`（.github/workflows/ci.yml）が
+# 小文字化した集合で突き合わせている（#63）。
 [language_servers.codegloss]
 name = "CodeGloss"
 languages = ["Rust", "Go"]

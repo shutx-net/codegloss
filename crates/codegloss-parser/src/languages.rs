@@ -120,6 +120,21 @@ const GO_SYNTAX: CommentSyntax = CommentSyntax {
 };
 
 impl SupportedLanguage {
+    /// Every language this build reads, as the `languageId` an editor sends.
+    ///
+    /// **CI reads this**, through `examples/languages.rs`: the same list exists
+    /// a second time in `editors/zed/extension.toml` as Zed's language names,
+    /// in a workspace neither build sees, and adding a language to one side
+    /// alone fails silently in both directions - the server parses a language
+    /// Zed never attaches it to, or Zed attaches it and
+    /// [`Self::from_lsp_language_id`] answers `None` and the document is
+    /// treated as having no comments. The `languages` step of `.github/
+    /// workflows/ci.yml` compares the two lower-cased.
+    ///
+    /// A variant missing from here is not quiet: the check above then reports
+    /// the language as one `extension.toml` has and this file does not.
+    pub const ALL: [Self; 2] = [Self::Rust, Self::Go];
+
     /// Maps the `languageId` a client sends with `textDocument/didOpen` onto a
     /// grammar. Zed reports Rust as `rust` and Go as `go` (its `LanguageName`
     /// lowercased).
@@ -191,6 +206,29 @@ mod tests {
         );
     }
 
+    /// `ALL` is what CI compares against `editors/zed/extension.toml`, so an
+    /// entry that no `didOpen` could ever produce would make the check pass
+    /// while the server stayed silent on that buffer.
+    #[test]
+    fn every_listed_language_is_one_a_client_can_ask_for() {
+        for language in SupportedLanguage::ALL {
+            assert_eq!(
+                SupportedLanguage::from_lsp_language_id(language.as_str()),
+                Some(language),
+                "{language:?} is listed in ALL under an id no client can send"
+            );
+        }
+        assert_eq!(
+            SupportedLanguage::ALL.len(),
+            SupportedLanguage::ALL
+                .iter()
+                .map(|language| language.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            "ALL lists the same language twice"
+        );
+    }
+
     #[test]
     fn unknown_language_ids_are_rejected() {
         assert_eq!(SupportedLanguage::from_lsp_language_id("plaintext"), None);
@@ -202,7 +240,7 @@ mod tests {
     /// rather than at the first `didOpen`.
     #[test]
     fn every_grammar_and_query_loads() {
-        for language in [SupportedLanguage::Rust, SupportedLanguage::Go] {
+        for language in SupportedLanguage::ALL {
             let grammar = language.grammar();
             let mut parser = tree_sitter::Parser::new();
             parser
