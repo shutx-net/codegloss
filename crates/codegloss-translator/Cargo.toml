@@ -66,8 +66,13 @@ name = "decoding"
 required-features = ["candle"]
 
 # マスク方針（何をエンジンから隠すか）を実コーパスで突き合わせる測定ハーネス。
-# 採点にはモデルが要るので #[ignore]、ただし「腕 A が出荷パイプラインと一致する」
-# 漂流防止だけはモデル無しで走る。数字は docs/model-runtime-notes.md §12。
+# 採点にはモデルが要るので採点本体は #[ignore]、ただし「腕 A が出荷パイプラインと
+# 一致する」漂流防止だけはモデル無しで走る。数字は docs/model-runtime-notes.md §12。
+#
+# IMPORTANT: このターゲットに required-features を付けないこと。付けると CI の
+# `cargo test --workspace`（既定 feature）がこのファイルを 1 行もビルドせず、
+# 上の漂流防止が「走る」と書いてあるだけで 1 度も走らなくなる。candle に触るのは
+# ファイルの中で #[cfg(feature = "candle")] を付けた側（support / Measurement /
+# 採点の 2 テスト）だけで、残りは codegloss-core の公開 API しか使わない。
 [[test]]
 name = "pipelines"
-required-features = ["candle"]
