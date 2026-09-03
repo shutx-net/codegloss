@@ -25,3 +25,16 @@ pub fn find_user(id: u64) -> Option<String> {
 
 /** Doc block attached to a struct. */
 pub struct User;
+
+/// Writes the whole buffer.
+///
+/// # Examples
+///
+/// ```
+/// let mut pos = 0;
+/// while pos < data.len() {
+///     pos += 1;
+/// }
+/// Ok(())
+/// ```
+pub fn write_all() {}

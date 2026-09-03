@@ -51,6 +51,22 @@ const FENCES: [&str; 2] = ["```", "~~~"];
 /// Tags whose first argument is an identifier by definition, never prose.
 const TAGS_WITH_A_NAME: [&str; 4] = ["@param", "@throws", "@exception", "@arg"];
 
+/// Whether a line opens or closes a Markdown fence.
+///
+/// The argument is one line with its comment markers already stripped and
+/// trimmed - what [`strip_markers`] returns here, and what a parsed comment's
+/// body is on the `codegloss-parser` side.
+///
+/// This is public because the parser has to know where a fenced example begins
+/// and ends in order to keep one in a single block, and it must not answer that
+/// question with a copy of [`FENCES`]: a parser and a [`CommentShape`] that
+/// disagreed about what a fence is would put a block boundary in the middle of
+/// one, which is the defect the parser's rule exists to prevent. The same
+/// reason [`SpanKind`](crate::SpanKind) is exported rather than reimplemented.
+pub fn opens_or_closes_a_fence(content: &str) -> bool {
+    FENCES.iter().any(|fence| content.starts_with(fence))
+}
+
 /// One line's worth of the rebuilt gloss.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Piece {
@@ -82,8 +98,9 @@ impl CommentShape {
         for (index, line) in raw.lines().enumerate() {
             let content = strip_markers(line, block, index == 0);
 
-            if fenced || FENCES.iter().any(|fence| content.starts_with(fence)) {
-                if FENCES.iter().any(|fence| content.starts_with(fence)) {
+            let fence_line = opens_or_closes_a_fence(content);
+            if fenced || fence_line {
+                if fence_line {
                     fenced = !fenced;
                 }
                 flush(&mut paragraph, &mut pieces);
@@ -596,6 +613,36 @@ mod tests {
             shape.source(),
             "Loads a user.\n\n```\nlet user = find_user(id);\n```"
         );
+    }
+
+    /// The core-side statement of what `codegloss-parser` now delivers: a
+    /// doctest with a blank line in it arrives in one piece, and every line of
+    /// it - the blank one included - is code.
+    #[test]
+    fn a_fenced_example_with_a_blank_line_in_it_is_still_verbatim() {
+        let shape = CommentShape::parse(concat!(
+            "/// ```\n",
+            "/// a = 1;\n",
+            "///\n",
+            "/// b = 2;\n",
+            "/// ```",
+        ));
+
+        assert!(shape.units().is_empty());
+        assert_eq!(shape.source(), "```\na = 1;\n\nb = 2;\n```");
+    }
+
+    /// The boundary the parser depends on. It decides where a block ends by
+    /// this answer, so widening it to a setext underline would start merging
+    /// the paragraphs a `-----` was written to separate.
+    #[test]
+    fn only_a_backtick_or_tilde_fence_opens_a_fence() {
+        for content in ["```", "```rust", "```text", "~~~", "~~~~~~~~~~"] {
+            assert!(opens_or_closes_a_fence(content), "{content:?}");
+        }
+        for content in ["", "//////////", "====", "-----", "# Heading", "``inline``"] {
+            assert!(!opens_or_closes_a_fence(content), "{content:?}");
+        }
     }
 
     #[test]
