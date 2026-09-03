@@ -72,6 +72,9 @@ fn the_javadoc_of_issue_1_comes_back_line_for_line() {
     );
 }
 
+/// The fence carries an indented line on purpose: it is the only fixture with
+/// one, and the indentation of a doctest is content that has to come back
+/// (Issue #55).
 #[test]
 fn a_rustdoc_block_keeps_its_heading_its_list_and_its_fence() {
     assert_eq!(
@@ -87,6 +90,9 @@ fn a_rustdoc_block_keeps_its_heading_its_list_and_its_fence() {
             "\n",
             "```\n",
             "let details = find_user(id).unwrap();\n",
+            "if let Some(user) = details {\n",
+            "    log(user);\n",
+            "}\n",
             "```",
         )
     );

@@ -175,11 +175,25 @@ fn the_fenced_example_reaches_the_shape_in_one_piece() {
     assert_eq!(example.end_line, 38);
     assert!(example.raw.starts_with("/// ```\n"));
     assert!(example.raw.ends_with("\n/// ```"));
+    let shape = codegloss_core::CommentShape::parse(&example.raw);
     assert!(
-        codegloss_core::CommentShape::parse(&example.raw)
-            .units()
-            .is_empty(),
+        shape.units().is_empty(),
         "a fenced example has nothing to translate: {example:?}"
+    );
+    // Not just "nothing to translate" but "nothing changed": the block reaches
+    // `CommentShape` whole and comes back out as the code that was written,
+    // `///     pos += 1;` and its four spaces included (Issue #55).
+    assert_eq!(
+        shape.source(),
+        concat!(
+            "```\n",
+            "let mut pos = 0;\n",
+            "while pos < data.len() {\n",
+            "    pos += 1;\n",
+            "}\n",
+            "Ok(())\n",
+            "```",
+        )
     );
 }
 
@@ -198,4 +212,25 @@ fn ranges_point_back_at_the_original_source() {
         );
         assert!(block.start_line <= block.end_line);
     }
+}
+
+/// Issue #56 on the parser's side of the shared rule: a tilde rule is
+/// decoration like any other, so it is dropped and the run ends there.
+///
+/// This is a `codegloss-parser` test whose answer is decided by a constant in
+/// `codegloss-core` - which is the point. `FENCES` lives in one place because
+/// the side that decides where a block ends and the side that reads what is
+/// inside one have to agree; a copy of it here would let this test pass while
+/// `CommentShape` still swallowed the paragraph.
+#[test]
+fn a_tilde_rule_breaks_a_run_like_any_other_decoration() {
+    let source = "// Banner:\n// ~~~~~~~~~~\n// After the rule.\nfn f() {}\n";
+    let blocks = extract_comment_blocks(source, SupportedLanguage::Rust).expect("it parses");
+
+    let texts: Vec<&str> = blocks.iter().map(|block| block.text.as_str()).collect();
+    assert_eq!(texts, ["Banner:", "After the rule."]);
+    assert!(
+        blocks.iter().all(|block| !block.raw.contains('~')),
+        "the rule belongs to no block: {blocks:?}"
+    );
 }
