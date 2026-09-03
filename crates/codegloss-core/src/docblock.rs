@@ -491,7 +491,7 @@ fn after_markers_as_written(line: &str, block: bool, first: bool) -> &str {
     if !block {
         // A line comment's marker ends at a fixed column, so what follows it is
         // the writer's alone and `after_markers` already keeps it. Measured
-        // over 858,710 comment lines the two never disagree here
+        // over 828,934 comment lines the two never disagree here
         // (`docs/model-runtime-notes.md` §16).
         return after_markers(line, block, first);
     }
@@ -644,7 +644,7 @@ fn common_indentation<'a>(lines: &[&'a str]) -> &'a str {
 /// A list is written indented and is still a list, so without this every
 /// bulleted paragraph in a Go comment would be copied through untranslated.
 /// Measured over `GOROOT` it is the difference between 1,208 lines wrongly
-/// copied and 4,067 (`docs/model-runtime-notes.md` §16).
+/// copied and 3,821 (`docs/model-runtime-notes.md` §16).
 fn opens_a_list(line: &str) -> bool {
     let line = line.trim();
     let Some(marker) = line.chars().next() else {
@@ -1437,7 +1437,7 @@ mod tests {
 
     /// A list is written indented and is still a list. Without the guard every
     /// bulleted paragraph in a Go comment is copied through untranslated -
-    /// measured, 4,067 lines instead of 1,208
+    /// measured, 3,821 lines instead of 1,208
     /// (`docs/model-runtime-notes.md` §16).
     #[test]
     fn a_list_is_not_an_example() {
@@ -1577,7 +1577,7 @@ mod tests {
 
     /// The regression anchor: in a Rust comment indentation means nothing, and
     /// every one of these would lose its gloss if the rule fired outside the
-    /// rules that ask for it. Measured, that is 235,382 blocks of Rust that do
+    /// rules that ask for it. Measured, that is 246,002 blocks of Rust that do
     /// not move (`docs/model-runtime-notes.md` §16).
     #[test]
     fn indentation_in_a_rust_comment_is_not_an_example() {

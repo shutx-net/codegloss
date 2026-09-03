@@ -12,12 +12,16 @@ repository = "https://github.com/shutx-net/codegloss"
 # 「language server しか提供しない拡張は -lsp を付けろ」という規約に合わせてある。
 # こちらを変えると利用者の settings.json が壊れる。
 #
-# languages の値は Zed 側の言語名と一致させる必要がある。Rust は Zed 本体に
-# 組み込まれているので確実に当たる。他の言語は別の拡張が提供するため、
-# 対応言語を増やす段階で実機確認してから足す。
+# languages の値は Zed 側の言語名と一致させる必要がある。Rust と Go はどちらも
+# Zed 本体に組み込まれていて、名前は zed main の
+# crates/grammars/src/{rust,go}/config.toml の name で確認した（"Rust" / "Go"）。
+# LSP に送られる languageId はそれを小文字にしたもの（LanguageName::lsp_id()）で、
+# codegloss-parser の from_lsp_language_id はその値を受ける。
+# **ただし実機で当たることは未確認**——確認欄は docs/zed-display-notes.md 2.6。
+# 他の言語は別の拡張が提供するため、対応言語を増やす段階で実機確認してから足す。
 [language_servers.codegloss]
 name = "CodeGloss"
-languages = ["Rust"]
+languages = ["Rust", "Go"]
 
 # Zed は capability に載っていない URL の `download_file` を拒む
 # （`capability_granter.grant_download_file`）。これが無いと拡張はサーバを
