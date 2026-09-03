@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use codegloss_core::GlossCache;
+use codegloss_core::{GlossCache, opens_or_closes_a_rendered_fence};
 use codegloss_translator::{PassthroughTranslator, Translator};
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::{
@@ -291,21 +291,45 @@ fn gloss_markup(gloss: &str, source: &str) -> String {
 ///
 /// Blank lines already separate paragraphs and need nothing, and a fenced code
 /// block is verbatim: adding spaces inside one would add them to the code.
+///
+/// The fence asked about here is the **renderer's**, which is why this calls
+/// [`opens_or_closes_a_rendered_fence`] and not
+/// [`codegloss_core::opens_or_closes_a_fence`]. The latter answers what
+/// CodeGloss copies through and is narrower than CommonMark on purpose (Issue
+/// #56); this runs after every gloss is finished, on text about to be handed
+/// to the editor's Markdown, and there the authority is CommonMark. It also
+/// takes the whole line, indentation and all: the other one is handed a line
+/// already trimmed and answers `false` for the fence of a doctest written two
+/// columns in, which would put hard breaks through 15 of the third-party
+/// corpus's doctests (`docs/model-runtime-notes.md` §15.6).
+///
+/// A fence is closed only by the character that opened it, which is CommonMark
+/// again: `syn`'s ASCII diagrams put `~~~~^ ~~~~^ ~~~~` inside a back-tick
+/// fence, and a plain toggle would end the fence on that line and start
+/// spacing the code (measured: 3 lines of 2 glosses, §15.6).
 fn with_hard_breaks(gloss: &str) -> String {
     let lines: Vec<&str> = gloss.lines().collect();
     let mut rendered = String::with_capacity(gloss.len());
-    let mut fenced = false;
+    let mut fence: Option<char> = None;
 
     for (index, line) in lines.iter().enumerate() {
         rendered.push_str(line);
-        if line.trim_start().starts_with("```") {
-            fenced = !fenced;
+        if opens_or_closes_a_rendered_fence(line) {
+            // Which of the two characters drew it. That it is a fence at all is
+            // the predicate's answer, never this line's.
+            let delimiter = line.trim_start().chars().next();
+            fence = match fence {
+                // The other character inside a fence is code, not its end.
+                Some(open) if Some(open) != delimiter => Some(open),
+                Some(_) => None,
+                None => delimiter,
+            };
         }
 
         let Some(next) = lines.get(index + 1) else {
             break;
         };
-        if !fenced && !line.is_empty() && !next.is_empty() {
+        if fence.is_none() && !line.is_empty() && !next.is_empty() {
             rendered.push_str("  ");
         }
         rendered.push('\n');
@@ -348,5 +372,69 @@ mod tests {
     fn a_fenced_example_is_left_alone() {
         let gloss = "例:\n\n```\nlet user = find_user(id);\nlet name = user.name;\n```";
         assert_eq!(with_hard_breaks(gloss), gloss);
+    }
+
+    /// The same fence written two columns in, which a gloss now carries as it
+    /// was typed (Issue #55): 15 of the third-party corpus's 2144 fence openers
+    /// are this shape (`docs/model-runtime-notes.md` §15.6).
+    ///
+    /// This is why the question is asked of
+    /// [`opens_or_closes_a_rendered_fence`], which trims the line, and not of
+    /// `codegloss_core::opens_or_closes_a_fence`, which is handed an already
+    /// trimmed one and answers `false` here.
+    #[test]
+    fn an_indented_fenced_example_is_left_alone() {
+        let gloss = "例:\n\n  ```\n  let user = find_user(id);\n  let name = user.name;\n  ```";
+        assert_eq!(with_hard_breaks(gloss), gloss);
+    }
+
+    /// A tilde fence is a fence to the renderer even though it is not one to
+    /// CodeGloss (Issue #56). What is being rendered is Markdown, and
+    /// CommonMark opens a fence on `~~~`.
+    #[test]
+    fn a_tilde_fenced_example_is_left_alone() {
+        let gloss = "例:\n\n~~~\nlet user = find_user(id);\nlet name = user.name;\n~~~";
+        assert_eq!(with_hard_breaks(gloss), gloss);
+    }
+
+    /// And a tilde line inside a back-tick fence is code, not the end of it -
+    /// CommonMark closes a fence only with the character that opened it.
+    ///
+    /// `syn`'s ASCII diagrams are exactly this shape, and they are the whole of
+    /// the difference: a plain toggle puts hard breaks on 3 lines of 2 glosses
+    /// of the syn corpus, and on nothing at all in the other 31360 (§15.6).
+    #[test]
+    fn a_tilde_line_does_not_close_a_backtick_fence() {
+        let gloss = "```text\n#[derive(Copy)]\n~~~~~~Path\n#[path = \"sys/windows.rs\"]\n```";
+        assert_eq!(with_hard_breaks(gloss), gloss);
+    }
+
+    /// This runs on the path of a hover, where a panic takes the request with
+    /// it, so it is sliced by characters and never by a byte offset (commit
+    /// 3ea8a36 is one of those panics).
+    #[test]
+    fn multibyte_and_crlf_input_come_through() {
+        // A multibyte character where a byte-wise reader would cut.
+        assert_eq!(
+            with_hard_breaks("§7.2 を見よ。\n続き。"),
+            "§7.2 を見よ。  \n続き。"
+        );
+        // Two back-ticks and then a character: byte 3 of this line is inside
+        // `§`, so a fence check written as `&line[..3] == "```"` panics on it.
+        assert_eq!(
+            with_hard_breaks("``§ を見よ。\n続き。"),
+            "``§ を見よ。  \n続き。"
+        );
+        // CRLF: `str::lines` drops the carriage return, which is the behaviour
+        // this pins - the point is that it does not panic.
+        assert_eq!(with_hard_breaks("段落。\r\n続き。"), "段落。  \n続き。");
+        // A fence whose delimiter is followed by multibyte text: the delimiter
+        // is read with `chars`, not by taking a byte.
+        assert_eq!(
+            with_hard_breaks("```日本語\nコード\n```"),
+            "```日本語\nコード\n```"
+        );
+        // A full-width tilde is not a fence, and reading it must not cut it up.
+        assert_eq!(with_hard_breaks("～～～\n本文。"), "～～～  \n本文。");
     }
 }
