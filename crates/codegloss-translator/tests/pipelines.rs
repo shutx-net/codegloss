@@ -43,9 +43,18 @@
 //! separate. The corpus that ships here is the 62 blocks §7.2 and §9.3 were
 //! measured on, frozen; where it came from, and how to build another, is §12.
 
+// The scoreboard needs a model; the drift guard does not. Everything carrying
+// `#[cfg(feature = "candle")]` below belongs to the scoring path, so that
+// `cargo test --workspace` - the command CI runs, without the feature - still
+// builds and runs `arm_a_reproduces_the_shipped_pipeline`. That test is the
+// only thing holding arm A and `GlossPlan` together; behind
+// `required-features` it never ran.
+#[cfg(feature = "candle")]
 mod support;
 
+#[cfg(feature = "candle")]
 use std::fmt::Write as _;
+#[cfg(feature = "candle")]
 use std::sync::OnceLock;
 
 use codegloss_core::{
@@ -61,6 +70,7 @@ const CORPUS: &str = include_str!("fixtures/comment-corpus.txt");
 const CORPUS_VARIABLE: &str = "CODEGLOSS_CORPUS";
 
 /// Environment variable naming the file to write the blinded A/B sheet to.
+#[cfg(feature = "candle")]
 const SHEET_VARIABLE: &str = "CODEGLOSS_SHEET";
 
 /// Terms §7.1 records the model getting wrong, with the general-language word
@@ -72,6 +82,7 @@ const SHEET_VARIABLE: &str = "CODEGLOSS_SHEET";
 /// post-processing dictionary that fixed terminology by replacing Japanese
 /// substrings would corrupt sentences that never contained the English word at
 /// all. `stray` is how often this corpus offers it the chance.
+#[cfg(feature = "candle")]
 const TERMS: [(&str, &str); 5] = [
     ("gloss", "光沢"),
     ("store", "店"),
@@ -112,6 +123,7 @@ impl Policy {
         self != Self::Nothing
     }
 
+    #[cfg(feature = "candle")]
     fn name(self) -> &'static str {
         match self {
             Self::Everything => "A hide everything",
@@ -122,6 +134,7 @@ impl Policy {
 }
 
 /// The three translated arms, in the order they are reported.
+#[cfg(feature = "candle")]
 const ARMS: [Policy; 3] = [
     Policy::Everything,
     Policy::Nothing,
@@ -129,6 +142,7 @@ const ARMS: [Policy; 3] = [
 ];
 
 /// Name of the derived arm.
+#[cfg(feature = "candle")]
 const VERIFIED: &str = "D verify, else A";
 
 /// One sentence of one unit of one block: the smallest thing an arm translates,
@@ -339,6 +353,7 @@ fn reveal(masked: &Masked, sentence: &str, policy: Policy) -> String {
 /// translation and the English, spelled out so that the scoreboard counts the
 /// decision instead of inferring it from the text - a gloss that happens to
 /// equal its English would otherwise be counted as a fallback.
+#[cfg(feature = "candle")]
 fn placeholders_survived(unit: &Unit, fragment: &Fragment, policy: Policy, answer: &str) -> bool {
     fragment
         .spans
@@ -348,6 +363,7 @@ fn placeholders_survived(unit: &Unit, fragment: &Fragment, policy: Policy, answe
 }
 
 /// Hiragana, katakana or a CJK ideograph.
+#[cfg(feature = "candle")]
 fn is_japanese(character: char) -> bool {
     matches!(character,
         '\u{3040}'..='\u{30ff}' | '\u{4e00}'..='\u{9fff}' | '\u{ff66}'..='\u{ff9d}')
@@ -358,14 +374,17 @@ fn is_japanese(character: char) -> bool {
 /// Two arms that differ only in where the engine put a space around a restored
 /// identifier have not made a different translation, and counting them as one
 /// would put a page of noise in front of whoever reads the A/B sheet.
+#[cfg(feature = "candle")]
 fn squeezed(text: &str) -> String {
     text.split_whitespace().collect()
 }
 
 /// A count per rule, in the order [`SpanKind::ALL`] lists them.
+#[cfg(feature = "candle")]
 #[derive(Default, Clone, Copy)]
 struct Counts([usize; SpanKind::ALL.len()]);
 
+#[cfg(feature = "candle")]
 impl Counts {
     fn add(&mut self, kind: SpanKind) {
         let slot = SpanKind::ALL
@@ -381,6 +400,7 @@ impl Counts {
 }
 
 /// How one arm did.
+#[cfg(feature = "candle")]
 #[derive(Default)]
 struct Score {
     japanese: usize,
@@ -402,6 +422,7 @@ struct Score {
 /// `policy` and `answers` are the ones the glosses were produced with, so that
 /// the fallback count means what it says; for the derived arm they are arm A's,
 /// which is the arm its fallbacks come from.
+#[cfg(feature = "candle")]
 fn score(
     corpus: &Corpus,
     policy: Policy,
@@ -443,6 +464,7 @@ fn score(
 }
 
 /// One translated arm.
+#[cfg(feature = "candle")]
 struct Run {
     policy: Policy,
     answers: Vec<String>,
@@ -454,6 +476,7 @@ struct Run {
 /// One process, one model, every arm - `docs/model-runtime-notes.md` §6.1. Two
 /// `#[ignore]`d tests in one binary run in parallel, and a translator per test
 /// would mean two sets of weights resident and every segment translated twice.
+#[cfg(feature = "candle")]
 struct Measurement {
     corpus: Corpus,
     runs: Vec<Run>,
@@ -464,6 +487,7 @@ struct Measurement {
     taken: usize,
 }
 
+#[cfg(feature = "candle")]
 fn measurement() -> &'static Measurement {
     static MEASUREMENT: OnceLock<Measurement> = OnceLock::new();
     MEASUREMENT.get_or_init(|| {
@@ -704,6 +728,7 @@ fn a_span_that_did_not_come_back_falls_its_own_fragment_back() {
 /// here - how much Japanese, how many fragments differ, which terms went wrong -
 /// is printed and not asserted, because none of it can say which gloss reads
 /// better. That question goes to a human, on the sheet this writes.
+#[cfg(feature = "candle")]
 #[test]
 #[ignore = "needs a model pack"]
 fn the_masking_policies_are_measured_against_each_other() {
@@ -798,6 +823,7 @@ fn the_masking_policies_are_measured_against_each_other() {
 /// is handed identical bytes by all three policies, so a difference in the
 /// answer would mean the engine is not deterministic, and then no difference
 /// this file reports could be attributed to anything.
+#[cfg(feature = "candle")]
 #[test]
 #[ignore = "needs a model pack"]
 fn fragments_with_nothing_to_protect_are_identical_in_every_arm() {
@@ -833,6 +859,7 @@ fn fragments_with_nothing_to_protect_are_identical_in_every_arm() {
 
 /// Prints, per arm, how often the model reached for a general-language word
 /// where the corpus meant a software one.
+#[cfg(feature = "candle")]
 fn term_probe(measured: &Measurement) {
     eprintln!(
         "\nterm probe: hit / at risk, +stray \
@@ -884,6 +911,7 @@ fn term_probe(measured: &Measurement) {
 /// differ by more than whitespace **and** neither of them lost anything: where
 /// one of them did, the automatic count has already decided, and asking a human
 /// would only invite them to trade a correct identifier for a nicer sentence.
+#[cfg(feature = "candle")]
 fn sheet(measured: &Measurement) -> usize {
     let corpus = &measured.corpus;
     let masked = &measured.runs[0];
@@ -937,6 +965,7 @@ fn sheet(measured: &Measurement) -> usize {
 /// Which of the two renderings is shown first: stable for a given fragment, so
 /// that a re-run produces the same sheet, and unrelated to which arm produced
 /// it, so that the reader cannot learn the pattern.
+#[cfg(feature = "candle")]
 fn coin(text: &str) -> bool {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.bytes() {
