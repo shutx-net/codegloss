@@ -57,10 +57,16 @@ const BLOCK_CLOSER: &str = "*/";
 /// opens a tilde fence, while six lines are caught by mistake, all in `syn`
 /// (`docs/model-runtime-notes.md` §15).
 const FENCES: [&str; 1] = ["```"];
+/// Markdown fences as CommonMark draws them: back-ticks or tildes.
+///
+/// Wider than [`FENCES`] on purpose, and read by
+/// [`opens_or_closes_a_rendered_fence`] alone. The two are not one set and a
+/// copy of it - they answer different questions, and that function says which.
+const RENDERED_FENCES: [&str; 2] = ["```", "~~~"];
 /// Tags whose first argument is an identifier by definition, never prose.
 const TAGS_WITH_A_NAME: [&str; 4] = ["@param", "@throws", "@exception", "@arg"];
 
-/// Whether a line opens or closes a Markdown fence.
+/// Whether a line opens or closes a fence **CodeGloss copies through**.
 ///
 /// The argument is one line with its comment markers already stripped and
 /// trimmed - what [`strip_markers`] returns here, and what a parsed comment's
@@ -74,8 +80,49 @@ const TAGS_WITH_A_NAME: [&str; 4] = ["@param", "@throws", "@exception", "@arg"];
 /// disagreed about what a fence is would put a block boundary in the middle of
 /// one, which is the defect the parser's rule exists to prevent. The same
 /// reason [`SpanKind`](crate::SpanKind) is exported rather than reimplemented.
+///
+/// Narrower than CommonMark, deliberately: a run of tildes opens a fence there
+/// and does not here (Issue #56, `docs/model-runtime-notes.md` §15). What a
+/// Markdown renderer will do with a finished gloss is therefore a different
+/// question, asked of [`opens_or_closes_a_rendered_fence`] - which is not a
+/// copy of this one gone stale, and takes its argument in the opposite shape.
 pub fn opens_or_closes_a_fence(content: &str) -> bool {
     FENCES.iter().any(|fence| content.starts_with(fence))
+}
+
+/// Whether a Markdown renderer will read this line as a fence delimiter.
+///
+/// The argument is a **whole line** of a finished gloss, and its leading
+/// whitespace is trimmed here - the opposite contract from
+/// [`opens_or_closes_a_fence`], which must be handed a line whose markers and
+/// indentation have already come off. The shapes differ because the callers
+/// do: this one runs over a gloss, where the indentation inside a fence is the
+/// code's own and is kept on purpose (Issue #55).
+///
+/// That difference is a hazard by itself, so it is stated rather than implied:
+/// `"  ```"` is a fence to this function and not to the other, and a caller
+/// that reached for the wrong one would lose the fence with nothing to show
+/// for it. In the third-party corpus 15 of 2144 fence openers are written at
+/// column 2 (`docs/model-runtime-notes.md` §15.6).
+///
+/// The answers differ too, and neither is the stale copy:
+///
+/// - [`opens_or_closes_a_fence`] says what **CodeGloss** copies through
+///   verbatim, and is narrower than CommonMark on purpose. In a comment a run
+///   of tildes is a rule far more often than a fence, and reading one as a
+///   fence swallows the prose after it (Issue #56, §15).
+/// - This one says what the **editor's Markdown** will make of the gloss once
+///   it is rendered. That is not CodeGloss's to narrow: the renderer follows
+///   CommonMark, where `~~~` opens a fence whatever a comment meant by it.
+///
+/// A line, not a document: CommonMark closes a fence only with the character
+/// that opened it, and one line cannot know which that was. The caller carries
+/// that - see `with_hard_breaks` in `codegloss-lsp`.
+pub fn opens_or_closes_a_rendered_fence(line: &str) -> bool {
+    let content = line.trim_start();
+    RENDERED_FENCES
+        .iter()
+        .any(|fence| content.starts_with(fence))
 }
 
 /// One line's worth of the rebuilt gloss.
@@ -818,6 +865,35 @@ mod tests {
         ] {
             assert!(!opens_or_closes_a_fence(content), "{content:?}");
         }
+    }
+
+    /// The two fence predicates pinned against each other, which is the only
+    /// place a reader can see at once that the second is not a copy of the
+    /// first gone stale.
+    ///
+    /// They differ twice over. The argument: `opens_or_closes_a_fence` is
+    /// handed a line already stripped and trimmed, and the rendered one is
+    /// handed the whole line and trims it itself, because a gloss keeps the
+    /// indentation inside a fence (Issue #55). And the answer: a run of tildes
+    /// is not a fence CodeGloss copies through (Issue #56) but is one
+    /// CommonMark opens, and what the editor's Markdown does with a gloss is
+    /// not ours to narrow.
+    #[test]
+    fn the_two_fence_predicates_answer_different_questions() {
+        // An indented fence: a whole line to one, and not the shape the other
+        // takes at all. Reaching for the wrong one here loses the fence.
+        assert!(!opens_or_closes_a_fence("  ```"));
+        assert!(opens_or_closes_a_rendered_fence("  ```"));
+
+        // A tilde fence: CommonMark's, not CodeGloss's.
+        assert!(!opens_or_closes_a_fence("~~~"));
+        assert!(opens_or_closes_a_rendered_fence("~~~"));
+
+        // Where they agree, which is every fence written at column 0.
+        assert!(opens_or_closes_a_fence("```"));
+        assert!(opens_or_closes_a_rendered_fence("```"));
+        assert!(!opens_or_closes_a_fence("Returns the user."));
+        assert!(!opens_or_closes_a_rendered_fence("Returns the user."));
     }
 
     /// A rule is not the opener of an example that never closes, so the prose
