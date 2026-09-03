@@ -210,10 +210,12 @@ impl Entries {
 
 #[cfg(test)]
 mod tests {
+    use crate::CommentRules;
+
     use super::*;
 
     fn key(text: &str) -> GlossKey {
-        GlossKey::new("passthrough-1", "en", "ja", text)
+        GlossKey::new(CommentRules::Fenced, "passthrough-1", "en", "ja", text)
     }
 
     #[test]
@@ -255,13 +257,19 @@ mod tests {
     fn a_different_model_version_does_not_hit() {
         let cache = GlossCache::default();
         cache.insert(
-            GlossKey::new("passthrough-1", "en", "ja", "text"),
+            GlossKey::new(CommentRules::Fenced, "passthrough-1", "en", "ja", "text"),
             Arc::from("old"),
         );
 
         assert!(
             cache
-                .get(&GlossKey::new("fugumt-en-ja@1", "en", "ja", "text"))
+                .get(&GlossKey::new(
+                    CommentRules::Fenced,
+                    "fugumt-en-ja@1",
+                    "en",
+                    "ja",
+                    "text"
+                ))
                 .is_none()
         );
     }

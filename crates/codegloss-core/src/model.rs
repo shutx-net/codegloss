@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::CommentRules;
+
 /// How a comment was written in the source file.
 ///
 /// The distinction matters for post-processing: doc comments carry structure
@@ -30,6 +32,13 @@ pub enum CommentStyle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommentBlock {
     pub style: CommentStyle,
+    /// The shape rules of the language this comment was read from.
+    ///
+    /// Stamped by the parser, which is the one place that knows the language,
+    /// and carried from here into [`CommentShape::parse`](crate::CommentShape)
+    /// and the cache key. The rules decide how the block comes apart, so they
+    /// travel with it rather than being assumed further down.
+    pub rules: CommentRules,
     /// The prose of the comment: markers (`//`, `///`, `/*`, `*/`, the leading
     /// `*` of a continuation line) stripped, lines joined with a single space.
     ///
@@ -132,16 +141,31 @@ pub struct GlossKey(pub [u8; 32]);
 /// - `5` - an English sentence end no longer swallows the space after it.
 /// - `6` - the indentation inside a fence is kept, and a tilde rule is not a
 ///   fence.
-pub const PIPELINE_VERSION: &str = "6";
+/// - `7` - a block carries the shape rules of its language, and they are part
+///   of the key.
+pub const PIPELINE_VERSION: &str = "7";
 
 impl GlossKey {
     /// Separator between the hashed fields. NUL cannot appear in a language tag
     /// or a model version, which is what keeps the encoding unambiguous.
     const SEPARATOR: &'static [u8] = b"\0";
 
-    pub fn new(model_version: &str, src_lang: &str, tgt_lang: &str, text: &str) -> Self {
+    pub fn new(
+        rules: CommentRules,
+        model_version: &str,
+        src_lang: &str,
+        tgt_lang: &str,
+        text: &str,
+    ) -> Self {
         let mut hasher = blake3::Hasher::new();
-        for field in [PIPELINE_VERSION, model_version, src_lang, tgt_lang, text] {
+        for field in [
+            PIPELINE_VERSION,
+            rules.tag(),
+            model_version,
+            src_lang,
+            tgt_lang,
+            text,
+        ] {
             hasher.update(field.as_bytes());
             hasher.update(Self::SEPARATOR);
         }
@@ -169,8 +193,15 @@ mod tests {
     #[test]
     fn the_key_encoding_is_stable() {
         assert_eq!(
-            GlossKey::new("fugumt-en-ja@1", "en", "ja", "Returns the user.").to_hex(),
-            "11eb0cb87f7522a1da6d74f43736ebf88bcd885c0b3b599c74158f12a1805167"
+            GlossKey::new(
+                CommentRules::Fenced,
+                "fugumt-en-ja@1",
+                "en",
+                "ja",
+                "Returns the user."
+            )
+            .to_hex(),
+            "ae2414b77fa4f402d49b848c47c452b28c69e05894a9ea5bc02fa8934804ce22"
         );
     }
 
@@ -186,32 +217,84 @@ mod tests {
 
     #[test]
     fn same_inputs_produce_the_same_key() {
-        let a = GlossKey::new("fugumt-en-ja@1", "en", "ja", "Return the cached user.");
-        let b = GlossKey::new("fugumt-en-ja@1", "en", "ja", "Return the cached user.");
+        let a = GlossKey::new(
+            CommentRules::Fenced,
+            "fugumt-en-ja@1",
+            "en",
+            "ja",
+            "Return the cached user.",
+        );
+        let b = GlossKey::new(
+            CommentRules::Fenced,
+            "fugumt-en-ja@1",
+            "en",
+            "ja",
+            "Return the cached user.",
+        );
         assert_eq!(a, b);
+    }
+
+    /// The same sentence read under two sets of rules is two glosses, because
+    /// the rules decide what of it is prose at all. `// Returns the user.` is
+    /// a comment in every language CodeGloss reads, so nothing else in the key
+    /// would tell those two apart.
+    #[test]
+    fn the_rules_are_part_of_every_key() {
+        assert_ne!(
+            GlossKey::new(
+                CommentRules::Fenced,
+                "m",
+                "en",
+                "ja",
+                "// Returns the user."
+            ),
+            GlossKey::new(
+                CommentRules::Indented,
+                "m",
+                "en",
+                "ja",
+                "// Returns the user."
+            )
+        );
     }
 
     #[test]
     fn every_field_changes_the_key() {
-        let base = GlossKey::new("m", "en", "ja", "text");
-        assert_ne!(base, GlossKey::new("m2", "en", "ja", "text"));
-        assert_ne!(base, GlossKey::new("m", "de", "ja", "text"));
-        assert_ne!(base, GlossKey::new("m", "en", "fr", "text"));
-        assert_ne!(base, GlossKey::new("m", "en", "ja", "other"));
+        let base = GlossKey::new(CommentRules::Fenced, "m", "en", "ja", "text");
+        assert_ne!(
+            base,
+            GlossKey::new(CommentRules::Indented, "m", "en", "ja", "text")
+        );
+        assert_ne!(
+            base,
+            GlossKey::new(CommentRules::Fenced, "m2", "en", "ja", "text")
+        );
+        assert_ne!(
+            base,
+            GlossKey::new(CommentRules::Fenced, "m", "de", "ja", "text")
+        );
+        assert_ne!(
+            base,
+            GlossKey::new(CommentRules::Fenced, "m", "en", "fr", "text")
+        );
+        assert_ne!(
+            base,
+            GlossKey::new(CommentRules::Fenced, "m", "en", "ja", "other")
+        );
     }
 
     #[test]
     fn field_boundaries_are_not_ambiguous() {
         // Without a separator these two would hash the same byte stream.
         assert_ne!(
-            GlossKey::new("ab", "c", "ja", "text"),
-            GlossKey::new("a", "bc", "ja", "text")
+            GlossKey::new(CommentRules::Fenced, "ab", "c", "ja", "text"),
+            GlossKey::new(CommentRules::Fenced, "a", "bc", "ja", "text")
         );
     }
 
     #[test]
     fn hex_is_64_lowercase_digits() {
-        let hex = GlossKey::new("m", "en", "ja", "text").to_hex();
+        let hex = GlossKey::new(CommentRules::Fenced, "m", "en", "ja", "text").to_hex();
         assert_eq!(hex.len(), 64);
         assert!(
             hex.chars()

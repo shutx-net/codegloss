@@ -192,7 +192,7 @@ impl LanguageServer for Backend {
 
         // Keyed on the comment as written, which is what the gloss was built
         // from; the flattened `text` is only what the popup quotes underneath.
-        let value = match self.glosses.lookup(&hit.block.raw) {
+        let value = match self.glosses.lookup(&hit.block.raw, hit.block.rules) {
             Some(gloss) => gloss_markup(&gloss, &hit.block.text),
             None => {
                 self.request_glosses(&uri);
@@ -232,7 +232,7 @@ impl LanguageServer for Backend {
             let mut lenses = Vec::with_capacity(blocks.len());
             let mut missing = false;
             for block in blocks {
-                match self.glosses.lookup(&block.raw) {
+                match self.glosses.lookup(&block.raw, block.rules) {
                     Some(gloss) => lenses.push(code_lens::glossed(block, &gloss)),
                     None => {
                         missing = true;

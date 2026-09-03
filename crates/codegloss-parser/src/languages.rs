@@ -3,6 +3,7 @@
 //! Adding a language means adding a variant, its grammar, its query and its
 //! comment syntax here; nothing in [`crate::extract`] is language-specific.
 
+use codegloss_core::CommentRules;
 use tree_sitter::Language;
 
 /// A language CodeGloss knows how to read comments out of.
@@ -32,6 +33,13 @@ pub(crate) struct CommentSyntax {
     /// Decoration that continuation lines of a block comment are conventionally
     /// indented with, e.g. the `*` of a Javadoc block.
     pub block_continuation: &'static str,
+    /// What the shape of a comment means in this language.
+    ///
+    /// This registry is the one place that knows which language is which, so it
+    /// is the one place that may answer this. `codegloss-core` owns the
+    /// vocabulary and never learns the list of languages, which is what keeps
+    /// adding a grammar a change to this file alone.
+    pub rules: CommentRules,
 }
 
 const C_LIKE_SYNTAX: CommentSyntax = CommentSyntax {
@@ -39,6 +47,7 @@ const C_LIKE_SYNTAX: CommentSyntax = CommentSyntax {
     block_start: "/*",
     block_end: "*/",
     block_continuation: "*",
+    rules: CommentRules::Fenced,
 };
 
 impl SupportedLanguage {

@@ -4,7 +4,7 @@
 //! expression: `//` inside a string literal such as `"https://example.com"`
 //! belongs to the string node and must not be picked up.
 
-use codegloss_core::{CommentBlock, CommentStyle};
+use codegloss_core::{CommentBlock, CommentRules, CommentStyle};
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::languages::{CommentSyntax, SupportedLanguage};
@@ -116,6 +116,10 @@ enum Marker {
 #[derive(Debug)]
 struct RawComment {
     style: CommentStyle,
+    /// Taken from the registry, carried into the block and from there into
+    /// `CommentShape::parse` and the cache key. The parser is the one place
+    /// that knows the language, so it is the one place that says this.
+    rules: CommentRules,
     marker: Marker,
     /// The comment text with its markers stripped.
     body: String,
@@ -178,6 +182,7 @@ impl RawComment {
             .map_or(0, |index| index + 1);
 
         Some(Self {
+            rules: syntax.rules,
             style: match (is_block, marker) {
                 (false, Marker::Plain) => CommentStyle::Line,
                 (false, _) => CommentStyle::DocLine,
@@ -239,6 +244,7 @@ impl RawComment {
     fn into_block(self, source: &str) -> CommentBlock {
         CommentBlock {
             style: self.style,
+            rules: self.rules,
             text: self.body,
             raw: source[self.start_byte..self.end_byte].to_owned(),
             start_line: self.start_line,

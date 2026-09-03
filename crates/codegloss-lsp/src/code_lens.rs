@@ -145,13 +145,14 @@ fn single_line(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use codegloss_core::CommentStyle;
+    use codegloss_core::{CommentRules, CommentStyle};
 
     use super::*;
 
     fn block(start_line: u32, text: &str) -> CommentBlock {
         CommentBlock {
             style: CommentStyle::Line,
+            rules: CommentRules::Fenced,
             text: text.to_owned(),
             raw: format!("// {text}"),
             start_line,
