@@ -8,4 +8,7 @@
 ///
 /// ```
 /// let details = find_user(id).unwrap();
+/// if let Some(user) = details {
+///     log(user);
+/// }
 /// ```

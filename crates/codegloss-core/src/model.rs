@@ -130,7 +130,9 @@ pub struct GlossKey(pub [u8; 32]);
 /// - `3` - a Javadoc inline tag is one protected span.
 /// - `4` - a relative clause after a comma is its own sentence.
 /// - `5` - an English sentence end no longer swallows the space after it.
-pub const PIPELINE_VERSION: &str = "5";
+/// - `6` - the indentation inside a fence is kept, and a tilde rule is not a
+///   fence.
+pub const PIPELINE_VERSION: &str = "6";
 
 impl GlossKey {
     /// Separator between the hashed fields. NUL cannot appear in a language tag
@@ -168,7 +170,7 @@ mod tests {
     fn the_key_encoding_is_stable() {
         assert_eq!(
             GlossKey::new("fugumt-en-ja@1", "en", "ja", "Returns the user.").to_hex(),
-            "0190a04bef87bcc9e895441c0ebab1791f2df38a9c91a7498fc30f828c7b149f"
+            "11eb0cb87f7522a1da6d74f43736ebf88bcd885c0b3b599c74158f12a1805167"
         );
     }
 

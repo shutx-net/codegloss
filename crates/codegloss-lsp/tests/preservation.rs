@@ -133,6 +133,21 @@ async fn gloss_at_in(
     line: u32,
     character: u32,
 ) -> String {
+    let value = markup_at_in(service, uri, line, character).await;
+    let (gloss, quoted) = value
+        .split_once("\n\n> ")
+        .expect("a finished gloss quotes its source");
+    assert!(!quoted.is_empty(), "the English is quoted underneath");
+    gloss.to_owned()
+}
+
+/// The Markdown a hover answers with, exactly as the editor receives it.
+async fn markup_at_in(
+    service: &mut LspService<Backend>,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> String {
     let response = call(
         service,
         Request::build("textDocument/hover")
@@ -146,15 +161,10 @@ async fn gloss_at_in(
     .await
     .expect("a hover request is answered");
 
-    let value = response["result"]["contents"]["value"]
+    response["result"]["contents"]["value"]
         .as_str()
         .expect("a hover carries markdown")
-        .to_owned();
-    let (gloss, quoted) = value
-        .split_once("\n\n> ")
-        .expect("a finished gloss quotes its source");
-    assert!(!quoted.is_empty(), "the English is quoted underneath");
-    gloss.to_owned()
+        .to_owned()
 }
 
 async fn lens_titles(service: &mut LspService<Backend>) -> Vec<(u64, String)> {
@@ -498,23 +508,50 @@ async fn a_doctest_answers_hover_on_every_one_of_its_lines() {
 
     assert_eq!(fence, code, "every line of the example is one block");
     assert_eq!(code, brace, "every line of the example is one block");
-    // The interior indentation of the example is gone because
-    // `CommentShape::parse` trims every line before it copies it through. That
-    // is a `codegloss-core` defect of its own - it is live today for a fence
-    // whose opener carries a language tag - and fixing it would move
-    // `PIPELINE_VERSION`, so it is deliberately not part of this change.
+    // The interior indentation is part of the example, not part of the comment
+    // syntax: `CommentShape::parse` takes the marker and the single space after
+    // it off a fenced line and copies the rest through (Issue #55).
     assert_eq!(
         fence,
         concat!(
             "```\n",
             "let mut pos = 0;\n",
             "while pos < data.len() {\n",
-            "let n = writer.write(&data[pos..]).await?;\n",
-            "pos += n;\n",
+            "    let n = writer.write(&data[pos..]).await?;\n",
+            "    pos += n;\n",
             "}\n",
             "Ok(())\n",
             "```",
         )
     );
     assert!(!fence.contains("[ja]"), "nothing in it was translated");
+}
+
+/// The whole hover payload, not just the gloss half of it: the indentation has
+/// to survive `gloss_markup` as well as `CommentShape`.
+///
+/// The two rules that could still lose it live there. `with_hard_breaks`
+/// appends CommonMark's hard line break to a line, and inside a fence two
+/// trailing spaces are two characters of code - so it leaves fenced lines
+/// alone, which is why none of these lines ends in whitespace.
+#[tokio::test(flavor = "current_thread")]
+async fn the_hover_markup_keeps_the_indentation() {
+    let (mut service, _engine) = glossed_doctest().await;
+
+    assert_eq!(
+        markup_at_in(&mut service, DOCTEST_URI, 7, 5).await,
+        concat!(
+            "```\n",
+            "let mut pos = 0;\n",
+            "while pos < data.len() {\n",
+            "    let n = writer.write(&data[pos..]).await?;\n",
+            "    pos += n;\n",
+            "}\n",
+            "Ok(())\n",
+            "```\n",
+            "\n",
+            "> ``` let mut pos = 0; while pos < data.len() { ",
+            "let n = writer.write(&data[pos..]).await?; pos += n; } Ok(()) ```",
+        )
+    );
 }

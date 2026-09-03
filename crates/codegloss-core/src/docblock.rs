@@ -55,7 +55,9 @@ const TAGS_WITH_A_NAME: [&str; 4] = ["@param", "@throws", "@exception", "@arg"];
 ///
 /// The argument is one line with its comment markers already stripped and
 /// trimmed - what [`strip_markers`] returns here, and what a parsed comment's
-/// body is on the `codegloss-parser` side.
+/// body is on the `codegloss-parser` side. Never the indented form
+/// [`after_markers`] returns: a fence written inside a list item would stop
+/// being a fence on one side of that and not the other.
 ///
 /// This is public because the parser has to know where a fenced example begins
 /// and ends in order to keep one in a single block, and it must not answer that
@@ -104,7 +106,11 @@ impl CommentShape {
                     fenced = !fenced;
                 }
                 flush(&mut paragraph, &mut pieces);
-                pieces.push(Piece::Verbatim(content.to_owned()));
+                // Copied through with its indentation: inside a fence the
+                // leading whitespace is the code, not the comment's syntax.
+                pieces.push(Piece::Verbatim(
+                    after_markers(line, block, index == 0).to_owned(),
+                ));
                 continue;
             }
 
@@ -340,7 +346,33 @@ fn flush(paragraph: &mut Option<String>, pieces: &mut Vec<Piece>) {
 
 /// Strips the comment syntax off one line: the opener, the closer, the leading
 /// `*` of a Javadoc continuation line, the `//` of a line comment.
+///
+/// The indentation goes with it. That is right for prose - a paragraph is
+/// glossed as one line whatever column its continuation lines were typed in -
+/// and it is what every reader of this function wants except the one that
+/// copies a line of code through, which calls [`after_markers`] instead.
 fn strip_markers(line: &str, block: bool, first: bool) -> &str {
+    after_markers(line, block, first).trim_start()
+}
+
+/// One line with its comment syntax gone but its own indentation kept.
+///
+/// The single space after a marker belongs to the marker: nobody writing
+/// `/// Loads a user.` means the sentence to start with a space. Everything
+/// past that space is what the writer typed, and inside a fence that is the
+/// shape of the code - the nesting of a doctest is carried by nothing else.
+/// So exactly one space is taken off, never a run of them, and never a tab:
+/// `///     y();` keeps four spaces, `/// y();` and `///y();` keep none.
+///
+/// Trailing whitespace is dropped at both ends of that rule. It is invisible
+/// in the file and would otherwise reach the gloss.
+///
+/// One shape this cannot help: a block comment whose continuation lines carry
+/// no `*` (`/*! ... */` written flush against column zero, as the `regex`
+/// crates write their module docs). There the leading whitespace of a line is
+/// the file's indentation and the writer's indentation at the same time, and
+/// one line on its own does not say which. Those lines keep coming out flush.
+fn after_markers(line: &str, block: bool, first: bool) -> &str {
     let mut content = line.trim();
 
     if block {
@@ -357,7 +389,7 @@ fn strip_markers(line: &str, block: bool, first: bool) -> &str {
         content = &content[marker.len()..];
     }
 
-    content.trim()
+    content.strip_prefix(' ').unwrap_or(content).trim_end()
 }
 
 /// The part of a line that is emitted verbatim in front of its translation:
@@ -630,6 +662,124 @@ mod tests {
 
         assert!(shape.units().is_empty());
         assert_eq!(shape.source(), "```\na = 1;\n\nb = 2;\n```");
+    }
+
+    /// Issue #55: the nesting of an example is the example. A doctest whose
+    /// body came back flush against the left margin is the code the reader is
+    /// looking at, rewritten.
+    #[test]
+    fn the_indentation_inside_a_fence_is_kept() {
+        let shape = CommentShape::parse(concat!(
+            "/// ```\n",
+            "/// if let Some(user) = find_user(id) {\n",
+            "///     println!(\"{user}\");\n",
+            "///     log(user);\n",
+            "/// }\n",
+            "/// ```",
+        ));
+
+        assert!(shape.units().is_empty());
+        assert_eq!(
+            shape.source(),
+            concat!(
+                "```\n",
+                "if let Some(user) = find_user(id) {\n",
+                "    println!(\"{user}\");\n",
+                "    log(user);\n",
+                "}\n",
+                "```",
+            )
+        );
+    }
+
+    /// Where the marker ends and the code begins: one space, no more and no
+    /// less. Nobody writing `/// let x = 1;` means the line to start with a
+    /// space, and nobody writing `///     y();` means it to start flush.
+    #[test]
+    fn the_space_after_a_marker_is_not_indentation() {
+        let shape = CommentShape::parse(concat!(
+            "/// ```\n",
+            "///     four();\n",
+            "/// one();\n",
+            "///none();\n",
+            "/// ```",
+        ));
+
+        assert_eq!(shape.source(), "```\n    four();\none();\nnone();\n```");
+    }
+
+    /// The same rule under a Javadoc star. Neither corpus behind
+    /// `docs/model-runtime-notes.md` §14 holds a starred block comment with a
+    /// fence in it, so this is the only place the shape is pinned at all.
+    #[test]
+    fn a_starred_block_comment_keeps_the_indentation_inside_its_fence() {
+        let spaced = CommentShape::parse("/**\n * ```\n *     y();\n * ```\n */");
+        assert_eq!(spaced.source(), "```\n    y();\n```");
+
+        // The space after the star is optional, and its absence is not
+        // indentation either: what the star sheds is the star.
+        let tight = CommentShape::parse("/**\n *```\n *     y();\n *```\n */");
+        assert_eq!(tight.source(), "```\n    y();\n```");
+    }
+
+    /// A tab is one character of indentation and cannot be counted as spaces.
+    /// `regex-syntax` writes its `hir` doctests this way.
+    #[test]
+    fn a_tab_inside_a_fence_is_content() {
+        let shape = CommentShape::parse(concat!(
+            "/// ```\n",
+            "///\tif x {\n",
+            "///\t\ty();\n",
+            "/// }\n",
+            "/// ```",
+        ));
+
+        assert_eq!(shape.source(), "```\n\tif x {\n\t\ty();\n}\n```");
+    }
+
+    /// Every byte of a fenced line is copied, so every byte of one has to be
+    /// found on a character boundary.
+    ///
+    /// `GlossPlan::new` runs inside the worker's async task, where one panic
+    /// takes the session's translations with it (commit 3ea8a36 was exactly
+    /// that, one module over). A rule that indexed past the marker by hand
+    /// would panic on the third line here.
+    #[test]
+    fn a_fence_line_survives_crlf_and_multibyte_input() {
+        assert_eq!(
+            CommentShape::parse("/// ```\r\n///     let x = 1;\r\n/// ```").source(),
+            "```\n    let x = 1;\n```"
+        );
+        assert_eq!(
+            CommentShape::parse("/// ```\n///     日本語\n/// ```").source(),
+            "```\n    日本語\n```"
+        );
+        assert_eq!(
+            CommentShape::parse("/// ```\n///\u{3000}全角\n/// ```").source(),
+            "```\n\u{3000}全角\n```"
+        );
+    }
+
+    /// The other side of the rule: outside a fence the indentation is not
+    /// content, and a paragraph is glossed as one line however its
+    /// continuation lines were laid out.
+    #[test]
+    fn prose_lines_are_still_trimmed() {
+        let shape = CommentShape::parse("///   Prose   \n///     wrapped onto two lines.");
+        assert_eq!(shape.units(), ["Prose wrapped onto two lines."]);
+        assert_eq!(shape.source(), "Prose wrapped onto two lines.");
+    }
+
+    /// The shape this rule cannot help, stated so that it is a decision rather
+    /// than a surprise: in a block comment whose continuation lines carry no
+    /// `*`, the leading whitespace is the file's indentation and the writer's
+    /// indentation at once. The `regex` crates write their module docs this
+    /// way (8 blocks of the third-party corpus in §14.3), and they keep coming
+    /// out flush - the same as before Issue #55, not worse.
+    #[test]
+    fn a_block_comment_without_stars_cannot_keep_its_indentation() {
+        let shape = CommentShape::parse("/*!\n```\nif x {\n    y();\n}\n```\n*/");
+        assert_eq!(shape.source(), "```\nif x {\ny();\n}\n```");
     }
 
     /// The boundary the parser depends on. It decides where a block ends by

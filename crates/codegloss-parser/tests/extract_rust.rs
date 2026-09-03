@@ -175,11 +175,25 @@ fn the_fenced_example_reaches_the_shape_in_one_piece() {
     assert_eq!(example.end_line, 38);
     assert!(example.raw.starts_with("/// ```\n"));
     assert!(example.raw.ends_with("\n/// ```"));
+    let shape = codegloss_core::CommentShape::parse(&example.raw);
     assert!(
-        codegloss_core::CommentShape::parse(&example.raw)
-            .units()
-            .is_empty(),
+        shape.units().is_empty(),
         "a fenced example has nothing to translate: {example:?}"
+    );
+    // Not just "nothing to translate" but "nothing changed": the block reaches
+    // `CommentShape` whole and comes back out as the code that was written,
+    // `///     pos += 1;` and its four spaces included (Issue #55).
+    assert_eq!(
+        shape.source(),
+        concat!(
+            "```\n",
+            "let mut pos = 0;\n",
+            "while pos < data.len() {\n",
+            "    pos += 1;\n",
+            "}\n",
+            "Ok(())\n",
+            "```",
+        )
     );
 }
 

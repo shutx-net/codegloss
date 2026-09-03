@@ -212,6 +212,23 @@ mod tests {
         assert_eq!(single_line("   "), "");
     }
 
+    /// The indentation a fenced example keeps (Issue #55) is a hover-only
+    /// change, and this is where that stops: a lens is one line high, so the
+    /// nesting of a doctest has nowhere to be drawn and folds away with every
+    /// other run of whitespace. Measured over the 31335 blocks of the three
+    /// corpora in `docs/model-runtime-notes.md` §14.6, not one title moved.
+    #[test]
+    fn indentation_does_not_reach_a_lens_title() {
+        let indented = "```\nif x {\n    y();\n}\n```";
+        let flush = "```\nif x {\ny();\n}\n```";
+
+        assert_eq!(
+            title_of(&glossed(&block(0, "Example."), indented)),
+            title_of(&glossed(&block(0, "Example."), flush))
+        );
+        assert_eq!(single_line(indented), "``` if x { y(); } ```");
+    }
+
     /// `" | "` is Zed's separator between two lenses on one line.
     #[test]
     fn a_vertical_bar_is_replaced_so_it_cannot_read_as_a_separator() {
