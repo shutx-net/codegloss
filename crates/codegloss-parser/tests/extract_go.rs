@@ -25,14 +25,9 @@ struct Summary {
 }
 
 fn expected() -> Vec<Summary> {
+    // The `//go:build linux` on line 0 is not here: it addresses the toolchain
+    // rather than a reader, and the parser drops it before a block is built.
     vec![
-        Summary {
-            style: CommentStyle::Line,
-            rules: CommentRules::Indented,
-            start_line: 0,
-            end_line: 0,
-            text: "go:build linux",
-        },
         Summary {
             style: CommentStyle::Line,
             rules: CommentRules::Indented,
@@ -327,6 +322,56 @@ fn an_example_indented_with_spaces_is_an_example_too() {
         ]
     );
     assert!(shape.source().contains("total := Sum(1, 2)"));
+}
+
+/// A build constraint is an instruction to the toolchain, not a sentence, and
+/// glossing one puts a meaningless lens on the first line of a great many Go
+/// files. Measured over `GOROOT`, 6,676 blocks - 3.3% of them all - are nothing
+/// but such lines (`docs/model-runtime-notes.md` §16).
+///
+/// The judgement belongs to the language, and this is what that buys: the same
+/// line in a Rust file is still a comment, by construction rather than by luck.
+#[test]
+fn a_toolchain_directive_is_not_prose() {
+    let source = concat!(
+        "//go:build linux\n",
+        "//go:generate go run mkasm.go\n\n",
+        "package p\n\n",
+        "// note: this is prose\n",
+        "func A() {}\n\n",
+        "//TODO: fix this\n",
+        "func B() {}\n",
+    );
+
+    let texts: Vec<String> = extract_comment_blocks(source, SupportedLanguage::Go)
+        .expect("the source parses")
+        .into_iter()
+        .map(|block| block.text)
+        .collect();
+
+    assert_eq!(
+        texts,
+        [
+            "note: this is prose".to_owned(),
+            "TODO: fix this".to_owned()
+        ]
+    );
+
+    // Rust has no directives, so the same file read as Rust keeps every line.
+    let as_rust: Vec<String> = extract_comment_blocks(source, SupportedLanguage::Rust)
+        .expect("the source parses")
+        .into_iter()
+        .map(|block| block.text)
+        .collect();
+
+    assert_eq!(
+        as_rust,
+        [
+            "go:build linux go:generate go run mkasm.go".to_owned(),
+            "note: this is prose".to_owned(),
+            "TODO: fix this".to_owned(),
+        ]
+    );
 }
 
 /// Go never writes a Markdown fence, but the machinery is not language-scoped

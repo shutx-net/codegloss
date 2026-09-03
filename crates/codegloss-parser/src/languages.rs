@@ -33,6 +33,8 @@ pub(crate) struct CommentSyntax {
     /// Decoration that continuation lines of a block comment are conventionally
     /// indented with, e.g. the `*` of a Javadoc block.
     pub block_continuation: &'static str,
+    /// Which line comments speak to the toolchain rather than to a reader.
+    pub directives: DirectiveSyntax,
     /// What the shape of a comment means in this language.
     ///
     /// This registry is the one place that knows which language is which, so it
@@ -42,12 +44,70 @@ pub(crate) struct CommentSyntax {
     pub rules: CommentRules,
 }
 
+/// The shape of a comment line that instructs a tool instead of addressing a
+/// reader.
+///
+/// A property of the language, so it belongs to the registry - and unlike a
+/// fence, nothing outside the parser ever needs to ask: the line is dropped
+/// before a block is built, so `codegloss-core` never sees one and no second
+/// copy of this judgement can grow anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectiveSyntax {
+    /// No comment of this language instructs a tool. Rust's attributes are
+    /// attributes, and `//go:build linux` in a Rust file is a sentence about
+    /// Go.
+    None,
+    /// Go's `//name:value`. `go/ast`'s `isDirective`, which is what `go/ast`
+    /// itself uses to keep these out of a doc comment's text.
+    Go,
+}
+
+impl DirectiveSyntax {
+    /// `body` is one comment line with its `//` taken off and **nothing else
+    /// done to it** - the space after the marker, if there was one, still
+    /// there. That space is what tells `// export the users table` from
+    /// `//export foo`, and it is load-bearing: with it gone, both of them read
+    /// as a directive and the sentence loses its gloss. It needs no test of its
+    /// own here because it fails every branch below on its own - the prefixes
+    /// do not match it and a space is not `[a-z0-9]` - which is also how
+    /// `go/ast` gets the same answer with the check in its caller.
+    pub(crate) fn matches(self, body: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::Go => {
+                if ["line ", "extern ", "export "]
+                    .iter()
+                    .any(|word| body.starts_with(word))
+                {
+                    return true;
+                }
+                let Some(colon) = body.find(':') else {
+                    return false;
+                };
+                // Lowercase and digits up to the colon, and one byte past it:
+                // `go/ast` reads that byte too, so `//go:` on its own and
+                // `//TODO:fix` are both prose. `get` rather than a slice - the
+                // byte after the colon can be the first of a multibyte
+                // character, and that is a no as well.
+                let Some(head) = body.get(..colon + 2) else {
+                    return false;
+                };
+                colon > 0
+                    && head.bytes().enumerate().all(|(index, byte)| {
+                        index == colon || byte.is_ascii_lowercase() || byte.is_ascii_digit()
+                    })
+            }
+        }
+    }
+}
+
 const C_LIKE_SYNTAX: CommentSyntax = CommentSyntax {
     line: "//",
     block_start: "/*",
     block_end: "*/",
     block_continuation: "*",
     rules: CommentRules::Fenced,
+    directives: DirectiveSyntax::None,
 };
 
 /// Go writes the same markers as C and reads them differently: a doc comment
@@ -55,6 +115,7 @@ const C_LIKE_SYNTAX: CommentSyntax = CommentSyntax {
 /// once in the whole of `GOROOT` (`docs/model-runtime-notes.md` §16).
 const GO_SYNTAX: CommentSyntax = CommentSyntax {
     rules: CommentRules::Indented,
+    directives: DirectiveSyntax::Go,
     ..C_LIKE_SYNTAX
 };
 
@@ -153,6 +214,45 @@ mod tests {
         assert_eq!(SupportedLanguage::from_lsp_language_id("golang"), None);
     }
 
+    /// `go/ast`'s `isDirective`, line for line. The interesting rows are the
+    /// last four: a space after the marker means prose, an uppercase word is
+    /// prose, a colon with nothing after it is prose, and Rust has no
+    /// directives at all - which is why scoping this to a language costs
+    /// nothing to prove.
+    #[test]
+    fn a_directive_speaks_to_the_toolchain_and_a_comment_does_not() {
+        for body in [
+            "go:build linux",
+            "go:generate go run mkasm.go",
+            "line 42",
+            "extern foo",
+            "export bar",
+            "cgo:noescape",
+        ] {
+            assert!(DirectiveSyntax::Go.matches(body), "in {body:?}");
+            assert!(!DirectiveSyntax::None.matches(body), "in {body:?}");
+        }
+
+        for body in [
+            " go:build linux",
+            " note: this is prose",
+            // The space is the whole of the difference here: without it these
+            // three are `line`, `extern` and `export` directives.
+            " line 42 of the file",
+            " extern functions are declared elsewhere",
+            " export the users table before upgrading",
+            "TODO: fix this",
+            "Go:build linux",
+            "go:",
+            ":build",
+            "no colon here",
+            "",
+            "go:あ",
+        ] {
+            assert!(!DirectiveSyntax::Go.matches(body), "in {body:?}");
+        }
+    }
+
     /// The registry is the one place that knows which language reads its
     /// comments which way. Wiring a grammar in without saying this is how a
     /// language gets its examples handed to the engine as prose (Issue #53,
@@ -166,6 +266,14 @@ mod tests {
         assert_eq!(
             SupportedLanguage::Go.comment_syntax().rules,
             CommentRules::Indented
+        );
+        assert_eq!(
+            SupportedLanguage::Rust.comment_syntax().directives,
+            DirectiveSyntax::None
+        );
+        assert_eq!(
+            SupportedLanguage::Go.comment_syntax().directives,
+            DirectiveSyntax::Go
         );
     }
 }

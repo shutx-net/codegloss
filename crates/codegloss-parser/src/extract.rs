@@ -133,6 +133,10 @@ struct RawComment {
     /// `false` for a comment that trails code, as in `let x = 1; // note`.
     /// Trailing comments never join a block.
     own_line: bool,
+    /// Whether the line speaks to the toolchain rather than to a reader
+    /// (`//go:build linux`). Dropped the way a rule or a banner is, and it ends
+    /// the run it interrupts for the same reason.
+    directive: bool,
 }
 
 impl RawComment {
@@ -199,15 +203,19 @@ impl RawComment {
             own_line: source[line_start..start_byte]
                 .chars()
                 .all(char::is_whitespace),
+            directive: !is_block && syntax.directives.matches(content),
         })
     }
 
     /// Whether the comment carries words worth translating.
     ///
     /// An empty `//`, a `//////////` rule and a `// ====` banner all reduce to
-    /// punctuation and are skipped.
+    /// punctuation and are skipped. So is a line addressed to the toolchain:
+    /// `//go:build linux` is not a sentence, and 3.3% of every comment block in
+    /// `GOROOT` is nothing but such lines
+    /// (`docs/model-runtime-notes.md` §16).
     fn is_translatable(&self) -> bool {
-        self.body.chars().any(char::is_alphanumeric)
+        !self.directive && self.body.chars().any(char::is_alphanumeric)
     }
 
     fn is_line_comment(&self) -> bool {
