@@ -247,6 +247,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "codegloss-core",
+ "codegloss-parser",
  "serde",
  "serde_json",
  "sha2",

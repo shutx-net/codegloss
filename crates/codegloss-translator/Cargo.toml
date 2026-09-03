@@ -22,6 +22,15 @@ sha2 = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
+# 測定ハーネスとコーパスを読む example のためだけの依存。**ライブラリ側は上の
+# とおり codegloss-core にしか依存しない**（dev-dependencies は下流へ伝播しない
+# ので codegloss-lsp が積むものは変わらない）。コーパスの形式（先頭の
+# `%%% rules:` 行）と「どの言語がどの規則を名乗るか」を答えられるのは
+# codegloss-parser のレジストリだけで、こちらに写しを作るのは AGENTS.md が
+# 禁じている。
+[dev-dependencies]
+codegloss-parser = { path = "../codegloss-parser" }
+
 # IMPORTANT: candle は既定に入れない。既定の `cargo build` / `cargo test` が
 # candle 無しで通ることを維持する（ビルドが数分伸びるのを CI に持ち込まない）。
 # 実モデルを使うときだけ `--features candle` を付ける。

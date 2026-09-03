@@ -37,11 +37,13 @@
 //!   --test pipelines -- --ignored --nocapture
 //! ```
 //!
-//! `CODEGLOSS_CORPUS=<file>` measures another corpus (`%%%` between blocks, as
-//! `codegloss-parser`'s `extract` example writes it) and `CODEGLOSS_SHEET=<file>`
-//! writes the blinded A/B sheet for the fragments no automatic metric can
-//! separate. The corpus that ships here is the 62 blocks §7.2 and §9.3 were
-//! measured on, frozen; where it came from, and how to build another, is §12.
+//! `CODEGLOSS_CORPUS=<file>` measures another corpus (a `%%% rules:` header and
+//! `%%%` between blocks, as `codegloss-parser`'s `extract` example writes it -
+//! [`codegloss_parser::corpus`]) and `CODEGLOSS_SHEET=<file>` writes the
+//! blinded A/B sheet for the fragments no automatic metric can separate. The
+//! corpus that ships here is the 62 blocks §7.2 and §9.3 were measured on,
+//! frozen; it has no header, which reads as [`CommentRules::Fenced`], which is
+//! what it is. Where it came from, and how to build another, is §12.
 
 // The scoreboard needs a model; the drift guard does not. Everything carrying
 // `#[cfg(feature = "candle")]` below belongs to the scoring path, so that
@@ -168,6 +170,11 @@ struct Unit {
 /// One comment block, prepared once and shared by every arm.
 struct Block {
     raw: String,
+    /// The rules the corpus was extracted under. Carried per block rather than
+    /// read again here: which set a comment obeys is a property of the language
+    /// it came out of, and this file has no way of knowing that - the corpus
+    /// says so, once, at the top.
+    rules: CommentRules,
     shape: CommentShape,
     units: Vec<Unit>,
 }
@@ -175,8 +182,8 @@ struct Block {
 impl Block {
     /// The same preparation [`GlossPlan::new`] does, kept out here so that a
     /// policy can be applied between the masking and the engine.
-    fn prepare(raw: &str) -> Self {
-        let shape = CommentShape::parse(raw, CommentRules::Fenced);
+    fn prepare(raw: &str, rules: CommentRules) -> Self {
+        let shape = CommentShape::parse(raw, rules);
         let units = shape
             .units()
             .into_iter()
@@ -196,6 +203,7 @@ impl Block {
 
         Self {
             raw: raw.to_owned(),
+            rules,
             shape,
             units,
         }
@@ -214,20 +222,34 @@ impl Corpus {
                 .unwrap_or_else(|error| panic!("{CORPUS_VARIABLE}={path}: {error}")),
             _ => CORPUS.to_owned(),
         };
+        Self::read(&text)
+    }
+
+    /// A corpus as it comes off disk, header and all.
+    ///
+    /// The header, not an assumption: a corpus extracted with `--lang go` marks
+    /// its examples by indenting them, and reading it as Rust hands the engine
+    /// code as prose (Issue #62). A file without one is Fenced, which is what
+    /// every corpus written before the header is.
+    fn read(text: &str) -> Self {
+        let (rules, blocks) = codegloss_parser::corpus::rules(text)
+            .unwrap_or_else(|error| panic!("{CORPUS_VARIABLE}: {error}"));
 
         Self {
-            blocks: text
+            blocks: blocks
                 .split("\n%%%\n")
                 .map(|block| block.trim_end_matches('\n'))
                 .filter(|block| !block.trim().is_empty())
-                .map(Block::prepare)
+                .map(|block| Block::prepare(block, rules))
                 .collect(),
         }
     }
 
+    /// One block written here in the test, which is Rust however the corpus on
+    /// disk was extracted.
     fn of(raw: &str) -> Self {
         Self {
-            blocks: vec![Block::prepare(raw)],
+            blocks: vec![Block::prepare(raw, CommentRules::Fenced)],
         }
     }
 
@@ -557,6 +579,56 @@ fn intact(unit: &Unit, fragment: &Fragment, gloss: &str) -> bool {
         .all(|index| gloss.contains(unit.masked.preserved()[*index].text()))
 }
 
+/// The frozen corpus carries no header, and that is what keeps it correct.
+///
+/// It is the 62 blocks §7.2 and §9.3 were measured on and it is deliberately
+/// not regenerated, so nothing in it says which rules it was read under. What
+/// scores it correctly is the fallback - it is Rust, and Rust is
+/// [`CommentRules::Fenced`]. Move the fallback, or give this file a header
+/// naming something else, and §12's scoreboard moves without an arm being
+/// touched.
+#[test]
+fn the_frozen_corpus_is_read_as_fenced() {
+    assert_eq!(
+        codegloss_parser::corpus::rules(CORPUS),
+        Ok((CommentRules::Fenced, CORPUS)),
+        "the frozen corpus is no longer headerless Fenced text"
+    );
+}
+
+/// The header decides how a block comes apart, and the two answers differ.
+///
+/// A tab-indented line is an example under [`CommentRules::Indented`] - copied
+/// through, never translated - and a sentence under [`CommentRules::Fenced`].
+/// A corpus extracted with `--lang go` is full of them, so a reader that
+/// ignores the header sends Go's examples to the engine as prose and §12 scores
+/// something the server does not do (Issue #62). Both arms are asserted: a
+/// reader pinned to either set passes half of this.
+#[test]
+fn the_corpus_header_decides_how_a_block_is_cut() {
+    let block = "//\tcmd.Run()";
+    let corpus = |rules| {
+        Corpus::read(&format!(
+            "{}{block}\n",
+            codegloss_parser::corpus::header(rules)
+        ))
+    };
+
+    assert_eq!(
+        corpus(CommentRules::Fenced)
+            .engine_inputs(Policy::Everything)
+            .len(),
+        1,
+        "under Fenced the indented line is prose and goes to the engine"
+    );
+    assert!(
+        corpus(CommentRules::Indented)
+            .engine_inputs(Policy::Everything)
+            .is_empty(),
+        "under Indented the indented line is an example and is copied, not translated"
+    );
+}
+
 /// Arm A is the shipped pipeline, byte for byte.
 ///
 /// The arms are assembled out here rather than inside [`GlossPlan`] so that
@@ -580,7 +652,7 @@ fn arm_a_reproduces_the_shipped_pipeline() {
 
     let mut offset = 0;
     for (block, gloss) in corpus.blocks.iter().zip(&glosses) {
-        let plan = GlossPlan::new(&block.raw, CommentRules::Fenced);
+        let plan = GlossPlan::new(&block.raw, block.rules);
         let shipped: Vec<String> = plan
             .segments()
             .iter()

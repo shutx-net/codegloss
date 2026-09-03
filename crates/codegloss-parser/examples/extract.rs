@@ -19,10 +19,16 @@
 //! the inputs to that guess. A corpus measured under the wrong grammar would be
 //! a number nobody could check either.
 //!
-//! Output is [`CommentBlock::raw`] - the comment exactly as it stands in the
-//! file, markers and all - with a `%%%` line between blocks. That is the format
-//! `examples/probe.rs` and `codegloss-translator/tests/pipelines.rs` read, so
-//! the output of this can be piped straight into either.
+//! Output is a `%%% rules:` header naming what the named language marks an
+//! example with, then [`CommentBlock::raw`] - the comment exactly as it stands
+//! in the file, markers and all - with a `%%%` line between blocks. That is the
+//! format `examples/probe.rs` and `codegloss-translator/tests/pipelines.rs`
+//! read, so the output of this can be piped straight into either.
+//!
+//! The header is what makes `--lang` reach the far end. Without it a Go corpus
+//! is scored under Rust's rules, its indented examples go to the engine as
+//! prose, and nothing says so (Issue #62). The format and its Fenced fallback
+//! are [`codegloss_parser::corpus`].
 //!
 //! Deliberately not included: directory walking, globbing and filtering. The
 //! shell already has all three, and a corpus is worth more when the command
@@ -33,7 +39,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use codegloss_parser::{SupportedLanguage, extract_comment_blocks};
+use codegloss_parser::{SupportedLanguage, corpus, extract_comment_blocks};
 
 const USAGE: &str = "usage: extract [--lang rust|go] <file>...";
 
@@ -60,6 +66,8 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::FAILURE;
     }
+
+    print!("{}", corpus::header(language.rules()));
 
     let mut blocks = 0usize;
     for path in &paths {

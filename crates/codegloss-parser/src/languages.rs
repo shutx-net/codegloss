@@ -134,6 +134,18 @@ impl SupportedLanguage {
         }
     }
 
+    /// What the shape of a comment means in this language.
+    ///
+    /// The registry is the one place that knows which language is which, so it
+    /// is the one place that may answer this - `codegloss-core` owns the
+    /// vocabulary and never learns the list of languages. Public because a
+    /// corpus is extracted under a language and scored under rules
+    /// (`corpus`, and `codegloss-translator`'s harnesses), and the alternative
+    /// to asking here is a second copy of the mapping over there.
+    pub fn rules(self) -> CommentRules {
+        self.comment_syntax().rules
+    }
+
     /// Stable name of the language, for logs and cache keys.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -259,14 +271,11 @@ mod tests {
     /// and Issue #30 for Go).
     #[test]
     fn the_registry_says_which_rules_a_language_has() {
-        assert_eq!(
-            SupportedLanguage::Rust.comment_syntax().rules,
-            CommentRules::Fenced
-        );
-        assert_eq!(
-            SupportedLanguage::Go.comment_syntax().rules,
-            CommentRules::Indented
-        );
+        // Through the public accessor: that is what a corpus is extracted and
+        // scored with, and pinning only the private field would let the two
+        // drift.
+        assert_eq!(SupportedLanguage::Rust.rules(), CommentRules::Fenced);
+        assert_eq!(SupportedLanguage::Go.rules(), CommentRules::Indented);
         assert_eq!(
             SupportedLanguage::Rust.comment_syntax().directives,
             DirectiveSyntax::None

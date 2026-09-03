@@ -40,6 +40,26 @@ impl CommentRules {
             Self::Indented => "indented",
         }
     }
+
+    /// Reads back what [`Self::tag`] wrote, or `None` for a tag no set claims.
+    ///
+    /// A cache directory is not the only thing that outlives the build that
+    /// wrote it: the measurement corpora of `docs/model-runtime-notes.md` §12
+    /// are files too, and a corpus that does not say which set it was read
+    /// under is scored under the wrong one. Reading is here beside writing so
+    /// that the spellings exist once - `codegloss-parser`'s `corpus` module
+    /// puts the tag on the file, and this is what takes it off again.
+    ///
+    /// `None` rather than a default: an unrecognised tag is a corpus written by
+    /// a newer build, and guessing at it would score it silently.
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|rules| rules.tag() == tag)
+    }
+
+    /// Every set. Private: nothing outside needs to enumerate the vocabulary,
+    /// and [`Self::from_tag`] needs one list rather than a second copy of the
+    /// spellings in a `match`.
+    const ALL: [Self; 2] = [Self::Fenced, Self::Indented];
 }
 
 #[cfg(test)]
@@ -53,5 +73,31 @@ mod tests {
         assert_eq!(CommentRules::Fenced.tag(), "fenced");
         assert_eq!(CommentRules::Indented.tag(), "indented");
         assert_ne!(CommentRules::Fenced.tag(), CommentRules::Indented.tag());
+    }
+
+    #[test]
+    fn every_tag_reads_back_as_the_set_that_wrote_it() {
+        for rules in CommentRules::ALL {
+            assert_eq!(
+                CommentRules::from_tag(rules.tag()),
+                Some(rules),
+                "{rules:?} does not survive its own tag"
+            );
+        }
+    }
+
+    /// A tag is matched as it is written. Anything else - a set this build does
+    /// not have, a spelling that only differs in case, an empty line - is not a
+    /// set, and saying so is what keeps a corpus from being scored under rules
+    /// it was not extracted under.
+    #[test]
+    fn an_unrecognised_tag_is_not_a_set() {
+        for tag in ["", " ", "Fenced", "FENCED", "indent", "python", "fenced "] {
+            assert_eq!(
+                CommentRules::from_tag(tag),
+                None,
+                "{tag:?} was accepted as a set"
+            );
+        }
     }
 }

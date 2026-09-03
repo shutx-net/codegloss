@@ -24,6 +24,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use codegloss_core::{CommentRules, GlossPlan, Segment};
+use codegloss_parser::SupportedLanguage;
 use codegloss_translator::{CandleTranslator, DEFAULT_BEAMS, Precision, Translator};
 
 /// The corpus `tests/quality.rs` checks against, so that the timings and the
@@ -137,6 +138,13 @@ fn main() -> ExitCode {
 
 /// Every unit of every comment of the corpus, as the LSP worker would hand
 /// them to the engine: masked, one paragraph or tag line each.
+///
+/// Each entry names its language, and the registry says what a comment's shape
+/// means there - the corpus holds Go as well as Rust, and Go marks an example
+/// by indenting it, so read as Rust those entries are cut into different units
+/// and the timings describe work the server does not do (Issue #62). A language
+/// the registry does not know falls back to the rules everything obeyed before
+/// Go.
 fn corpus() -> Vec<Segment> {
     CORPUS
         .lines()
@@ -147,7 +155,11 @@ fn corpus() -> Vec<Segment> {
             let raw = value["raw"]
                 .as_str()
                 .expect("every entry has a raw comment");
-            GlossPlan::new(raw, CommentRules::Fenced).segments()
+            let rules = value["language"]
+                .as_str()
+                .and_then(SupportedLanguage::from_lsp_language_id)
+                .map_or(CommentRules::Fenced, SupportedLanguage::rules);
+            GlossPlan::new(raw, rules).segments()
         })
         .collect()
 }
