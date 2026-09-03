@@ -10,9 +10,13 @@ use crate::CommentRules;
 
 /// How a comment was written in the source file.
 ///
-/// The distinction matters for post-processing: doc comments carry structure
-/// (`@param`, `@return`, Markdown) that has to survive translation, while a
-/// plain line comment does not.
+/// Stamped by the parser off the syntax tree, and read today only by the
+/// extraction tests that check it stamped the right thing. **Post-processing
+/// does not use it**: `docblock` reads the structure of a comment back off
+/// [`CommentBlock::raw`] instead, because the shape it has to rebuild - which
+/// lines are a paragraph, a tag line, a fence - is finer than these four names
+/// and is in the text either way. Kept because it is what those tests assert
+/// against, which is worth more than the field costs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CommentStyle {
     /// `// ...`
@@ -31,6 +35,7 @@ pub enum CommentStyle {
 /// across several `//` lines is translated as a whole.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommentBlock {
+    /// See [`CommentStyle`]: written here by the parser, read by its tests.
     pub style: CommentStyle,
     /// The shape rules of the language this comment was read from.
     ///
@@ -101,18 +106,6 @@ impl From<&str> for Segment {
     fn from(text: &str) -> Self {
         Self::new(text)
     }
-}
-
-/// A finished translation of one comment block.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Gloss {
-    /// Text that was fed to the translator, after pre-processing.
-    pub source: String,
-    /// Translated text, after post-processing.
-    pub translated: String,
-    /// Identifier of the model that produced `translated`. Part of the cache
-    /// key, so swapping models invalidates old entries instead of serving them.
-    pub model_version: String,
 }
 
 /// Cache key for a translation: `BLAKE3(model_version, src_lang, tgt_lang, text)`.

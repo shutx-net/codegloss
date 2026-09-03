@@ -1,7 +1,18 @@
 //! Registry of the languages CodeGloss can extract comments from.
 //!
 //! Adding a language means adding a variant, its grammar, its query and its
-//! comment syntax here; nothing in [`crate::extract`] is language-specific.
+//! comment syntax here, and nothing in [`crate::extract`] is language-specific.
+//! **This file is not the whole of it, though.** `codegloss-core`'s `docblock`
+//! has the comment markers written into it (`/**`, `///`, `*/`), so a language
+//! that marks a comment any other way needs a change there too: Python's `#`
+//! and its triple quotes would reach it as prose, and an indented example under
+//! a heading that never parsed as one. Issue #61 is about moving those markers
+//! out to where this file could carry them; until that is done, budget for
+//! both.
+//!
+//! The list also exists a second time outside this workspace, in
+//! `editors/zed/extension.toml`, and CI compares the two
+//! ([`SupportedLanguage::ALL`]).
 
 use codegloss_core::CommentRules;
 use tree_sitter::Language;
