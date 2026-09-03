@@ -213,3 +213,24 @@ fn ranges_point_back_at_the_original_source() {
         assert!(block.start_line <= block.end_line);
     }
 }
+
+/// Issue #56 on the parser's side of the shared rule: a tilde rule is
+/// decoration like any other, so it is dropped and the run ends there.
+///
+/// This is a `codegloss-parser` test whose answer is decided by a constant in
+/// `codegloss-core` - which is the point. `FENCES` lives in one place because
+/// the side that decides where a block ends and the side that reads what is
+/// inside one have to agree; a copy of it here would let this test pass while
+/// `CommentShape` still swallowed the paragraph.
+#[test]
+fn a_tilde_rule_breaks_a_run_like_any_other_decoration() {
+    let source = "// Banner:\n// ~~~~~~~~~~\n// After the rule.\nfn f() {}\n";
+    let blocks = extract_comment_blocks(source, SupportedLanguage::Rust).expect("it parses");
+
+    let texts: Vec<&str> = blocks.iter().map(|block| block.text.as_str()).collect();
+    assert_eq!(texts, ["Banner:", "After the rule."]);
+    assert!(
+        blocks.iter().all(|block| !block.raw.contains('~')),
+        "the rule belongs to no block: {blocks:?}"
+    );
+}

@@ -47,7 +47,16 @@ const LINE_MARKERS: [&str; 3] = ["///", "//!", "//"];
 /// Closer of a block comment.
 const BLOCK_CLOSER: &str = "*/";
 /// Markdown code fences. Everything between two of them is copied through.
-const FENCES: [&str; 2] = ["```", "~~~"];
+///
+/// Back-ticks only, which is narrower than CommonMark: a run of three or more
+/// tildes opens a fence there too. In a comment it also draws a rule, and the
+/// two cannot be told apart on one line - `~~~~~ Section ~~~~~` is a banner
+/// somebody typed, and reading it as a fence swallows every line after it into
+/// an example that never closes. The counts say which way to be wrong: over
+/// this machine's whole registry (266 crates, 7829 files) not one comment
+/// opens a tilde fence, while six lines are caught by mistake, all in `syn`
+/// (`docs/model-runtime-notes.md` §15).
+const FENCES: [&str; 1] = ["```"];
 /// Tags whose first argument is an identifier by definition, never prose.
 const TAGS_WITH_A_NAME: [&str; 4] = ["@param", "@throws", "@exception", "@arg"];
 
@@ -774,7 +783,7 @@ mod tests {
     /// than a surprise: in a block comment whose continuation lines carry no
     /// `*`, the leading whitespace is the file's indentation and the writer's
     /// indentation at once. The `regex` crates write their module docs this
-    /// way (8 blocks of the third-party corpus in §14.3), and they keep coming
+    /// way (8 blocks of the third-party corpus in §14.8), and they keep coming
     /// out flush - the same as before Issue #55, not worse.
     #[test]
     fn a_block_comment_without_stars_cannot_keep_its_indentation() {
@@ -785,14 +794,85 @@ mod tests {
     /// The boundary the parser depends on. It decides where a block ends by
     /// this answer, so widening it to a setext underline would start merging
     /// the paragraphs a `-----` was written to separate.
+    ///
+    /// A run of tildes is on the false side, which CommonMark is not (Issue
+    /// #56): in a comment it is a rule far more often than a fence, and the
+    /// line cannot say which. It sits here beside `-----` and `//////////`
+    /// because that is what it is.
     #[test]
-    fn only_a_backtick_or_tilde_fence_opens_a_fence() {
-        for content in ["```", "```rust", "```text", "~~~", "~~~~~~~~~~"] {
+    fn only_a_backtick_fence_opens_a_fence() {
+        for content in ["```", "```rust", "```text"] {
             assert!(opens_or_closes_a_fence(content), "{content:?}");
         }
-        for content in ["", "//////////", "====", "-----", "# Heading", "``inline``"] {
+        for content in [
+            "",
+            "//////////",
+            "====",
+            "-----",
+            "# Heading",
+            "``inline``",
+            "~~~",
+            "~~~~~~~~~~",
+            "~~~~~ Section ~~~~~",
+            "~~~~~~Path",
+        ] {
             assert!(!opens_or_closes_a_fence(content), "{content:?}");
         }
+    }
+
+    /// A rule is not the opener of an example that never closes, so the prose
+    /// after it is still prose: both of these used to produce no translation
+    /// unit at all and reach the reader in English (Issue #56).
+    ///
+    /// What a rule becomes instead is a word in the paragraph it interrupts -
+    /// the price of this change, and the reason the parser drops a word-less
+    /// one before `CommentShape` ever sees it
+    /// (`a_tilde_rule_breaks_a_run_like_any_other_decoration`). A decorated
+    /// one carries a word, so it stays, exactly as `// ==== Section ====`
+    /// always has.
+    #[test]
+    fn a_tilde_rule_does_not_swallow_the_prose_after_it() {
+        for (raw, unit) in [
+            (
+                "/// ~~~~~ Section ~~~~~\n/// Prose after a decorated banner.",
+                "~~~~~ Section ~~~~~ Prose after a decorated banner.",
+            ),
+            (
+                "/// ~~~~~~~~~~\n/// Prose after a bare tilde rule.",
+                "~~~~~~~~~~ Prose after a bare tilde rule.",
+            ),
+        ] {
+            assert_eq!(CommentShape::parse(raw).units(), [unit], "in {raw:?}");
+        }
+    }
+
+    /// The other half, and the one with a live case behind it: `syn` draws its
+    /// attribute diagram with tildes inside a ```` ```text ```` fence. Reading
+    /// those as a closing fence cuts the diagram in two and hands the second
+    /// half to the engine as prose - which is where the caret row loses a
+    /// caret and stops lining up with what it points at
+    /// (`docs/model-runtime-notes.md` §15.1).
+    #[test]
+    fn a_tilde_line_inside_a_fence_does_not_close_it() {
+        let shape = CommentShape::parse(concat!(
+            "/// ```text\n",
+            "/// #[derive(Copy, Clone)]\n",
+            "///   ~~~~~~Path\n",
+            "///   ^^^^^^^^^^^^^^^^^^^Meta::List\n",
+            "/// ```",
+        ));
+
+        assert!(shape.units().is_empty(), "{shape:?}");
+        assert_eq!(
+            shape.source(),
+            concat!(
+                "```text\n",
+                "#[derive(Copy, Clone)]\n",
+                "  ~~~~~~Path\n",
+                "  ^^^^^^^^^^^^^^^^^^^Meta::List\n",
+                "```",
+            )
+        );
     }
 
     #[test]
