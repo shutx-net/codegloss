@@ -8,13 +8,13 @@ use tree_sitter::Language;
 
 /// A language CodeGloss knows how to read comments out of.
 ///
-/// More variants (Java, JavaScript, TypeScript, Tsx, Python, Go) follow in a
-/// later phase; the grammar crates are already picked, only the wiring is
-/// missing.
+/// More variants (Java, JavaScript, TypeScript, Tsx, Python) follow in a later
+/// phase; the grammar crates are already picked, only the wiring is missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SupportedLanguage {
     Rust,
+    Go,
 }
 
 /// The comment markers of one language.
@@ -50,15 +50,25 @@ const C_LIKE_SYNTAX: CommentSyntax = CommentSyntax {
     rules: CommentRules::Fenced,
 };
 
+/// Go writes the same markers as C and reads them differently: a doc comment
+/// marks an example by indenting it, and a Markdown fence never appears - not
+/// once in the whole of `GOROOT` (`docs/model-runtime-notes.md` §16).
+const GO_SYNTAX: CommentSyntax = CommentSyntax {
+    rules: CommentRules::Indented,
+    ..C_LIKE_SYNTAX
+};
+
 impl SupportedLanguage {
     /// Maps the `languageId` a client sends with `textDocument/didOpen` onto a
-    /// grammar. Zed reports Rust as `rust`.
+    /// grammar. Zed reports Rust as `rust` and Go as `go` (its `LanguageName`
+    /// lowercased).
     ///
     /// Returns `None` for anything CodeGloss cannot parse yet, which the server
     /// treats as "this document has no comments" rather than as an error.
     pub fn from_lsp_language_id(language_id: &str) -> Option<Self> {
         match language_id {
             "rust" => Some(Self::Rust),
+            "go" => Some(Self::Go),
             _ => None,
         }
     }
@@ -67,6 +77,7 @@ impl SupportedLanguage {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Rust => "rust",
+            Self::Go => "go",
         }
     }
 
@@ -75,6 +86,7 @@ impl SupportedLanguage {
     pub(crate) fn grammar(self) -> Language {
         match self {
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Self::Go => tree_sitter_go::LANGUAGE.into(),
         }
     }
 
@@ -82,12 +94,14 @@ impl SupportedLanguage {
     pub(crate) fn comment_query(self) -> &'static str {
         match self {
             Self::Rust => include_str!("queries/rust.scm"),
+            Self::Go => include_str!("queries/go.scm"),
         }
     }
 
     pub(crate) fn comment_syntax(self) -> CommentSyntax {
         match self {
             Self::Rust => C_LIKE_SYNTAX,
+            Self::Go => GO_SYNTAX,
         }
     }
 }
@@ -114,14 +128,8 @@ mod tests {
     /// A grammar whose ABI the linked Tree-sitter cannot handle fails here
     /// rather than at the first `didOpen`.
     #[test]
-    // Removing this once a second language lands is not optional: an
-    // unfulfilled expectation is itself a warning, and CI denies warnings.
-    #[expect(
-        clippy::single_element_loop,
-        reason = "the list grows with every language added to the registry"
-    )]
     fn every_grammar_and_query_loads() {
-        for language in [SupportedLanguage::Rust] {
+        for language in [SupportedLanguage::Rust, SupportedLanguage::Go] {
             let grammar = language.grammar();
             let mut parser = tree_sitter::Parser::new();
             parser
@@ -130,5 +138,34 @@ mod tests {
             tree_sitter::Query::new(&grammar, language.comment_query())
                 .expect("the bundled query compiles against its own grammar");
         }
+    }
+
+    /// Zed sends `LanguageName::lsp_id()`, which is the language's name
+    /// lowercased - `Go` becomes `go`. Nothing here looks at a file extension:
+    /// the language is whatever the editor says the buffer is.
+    #[test]
+    fn go_is_recognised_by_its_lsp_language_id() {
+        assert_eq!(
+            SupportedLanguage::from_lsp_language_id("go"),
+            Some(SupportedLanguage::Go)
+        );
+        assert_eq!(SupportedLanguage::from_lsp_language_id("Go"), None);
+        assert_eq!(SupportedLanguage::from_lsp_language_id("golang"), None);
+    }
+
+    /// The registry is the one place that knows which language reads its
+    /// comments which way. Wiring a grammar in without saying this is how a
+    /// language gets its examples handed to the engine as prose (Issue #53,
+    /// and Issue #30 for Go).
+    #[test]
+    fn the_registry_says_which_rules_a_language_has() {
+        assert_eq!(
+            SupportedLanguage::Rust.comment_syntax().rules,
+            CommentRules::Fenced
+        );
+        assert_eq!(
+            SupportedLanguage::Go.comment_syntax().rules,
+            CommentRules::Indented
+        );
     }
 }

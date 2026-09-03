@@ -310,6 +310,28 @@ mod tests {
         );
     }
 
+    /// The `languageId` is the only thing that says what a buffer is, and it is
+    /// where a block's rules come from. A Go comment queued as if it were Rust
+    /// would be glossed with its examples handed to the engine as prose.
+    #[test]
+    fn a_go_document_is_queued_under_go_rules() {
+        let store = DocumentStore::new();
+        store.open(
+            uri(),
+            "go".to_owned(),
+            1,
+            "// Returns the user.\nfunc f() {}\n".to_owned(),
+        );
+
+        assert_eq!(
+            store.comment_sources(&uri()),
+            vec![CommentSource {
+                raw: "// Returns the user.".to_owned(),
+                rules: CommentRules::Indented,
+            }]
+        );
+    }
+
     #[test]
     fn comment_sources_of_an_unknown_document_is_empty() {
         assert!(DocumentStore::new().comment_sources(&uri()).is_empty());
