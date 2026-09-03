@@ -49,8 +49,8 @@ use std::fmt::Write as _;
 use std::sync::OnceLock;
 
 use codegloss_core::{
-    CommentShape, GlossPlan, Masked, Segment, SpanKind, engine_form, join_sentences, mask,
-    placeholder, split_sentences,
+    CommentRules, CommentShape, GlossPlan, Masked, Segment, SpanKind, engine_form, join_sentences,
+    mask, placeholder, split_sentences,
 };
 use codegloss_translator::{PassthroughTranslator, Translator};
 
@@ -162,7 +162,7 @@ impl Block {
     /// The same preparation [`GlossPlan::new`] does, kept out here so that a
     /// policy can be applied between the masking and the engine.
     fn prepare(raw: &str) -> Self {
-        let shape = CommentShape::parse(raw);
+        let shape = CommentShape::parse(raw, CommentRules::Fenced);
         let units = shape
             .units()
             .into_iter()
@@ -556,7 +556,7 @@ fn arm_a_reproduces_the_shipped_pipeline() {
 
     let mut offset = 0;
     for (block, gloss) in corpus.blocks.iter().zip(&glosses) {
-        let plan = GlossPlan::new(&block.raw);
+        let plan = GlossPlan::new(&block.raw, CommentRules::Fenced);
         let shipped: Vec<String> = plan
             .segments()
             .iter()

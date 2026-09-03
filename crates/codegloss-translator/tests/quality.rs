@@ -13,7 +13,7 @@
 
 mod support;
 
-use codegloss_core::{CommentShape, GlossPlan, Segment, mask};
+use codegloss_core::{CommentRules, CommentShape, GlossPlan, Segment, mask};
 use codegloss_translator::Translator;
 
 /// The three pinned blocks, included from `codegloss-core` itself rather
@@ -50,7 +50,7 @@ fn corpus() -> Vec<Fixture> {
 /// Every span the pre-processing hid from the engine, as it is written in the
 /// comment. Each of them has to be in the gloss, spelled the same way.
 fn protected(raw: &str) -> Vec<String> {
-    CommentShape::parse(raw)
+    CommentShape::parse(raw, CommentRules::Fenced)
         .units()
         .into_iter()
         .flat_map(|unit| {
@@ -66,7 +66,7 @@ fn protected(raw: &str) -> Vec<String> {
 /// The whole pipeline for one comment, exactly as `codegloss-lsp` runs it:
 /// mask, translate, unmask, rebuild.
 fn gloss(translator: &dyn Translator, raw: &str) -> String {
-    let plan = GlossPlan::new(raw);
+    let plan = GlossPlan::new(raw, CommentRules::Fenced);
     let translations = translator
         .translate(&plan.segments())
         .expect("the engine answers");
@@ -144,7 +144,7 @@ fn the_clause_after_a_comma_survives_the_split() {
     let raw = "/// Dropping it closes the socket and wakes every task blocked on accept, \
                which is why the shutdown is not graceful.";
 
-    let plan = GlossPlan::new(raw);
+    let plan = GlossPlan::new(raw, CommentRules::Fenced);
     let segments = plan.segments();
     assert_eq!(
         segments.len(),
@@ -158,7 +158,7 @@ fn the_clause_after_a_comma_survives_the_split() {
     );
 
     // What the pipeline sent before the split: the same unit, masked, whole.
-    let whole = mask(CommentShape::parse(raw).units()[0])
+    let whole = mask(CommentShape::parse(raw, CommentRules::Fenced).units()[0])
         .masked()
         .to_owned();
     let undivided = translator
@@ -188,7 +188,7 @@ fn the_p6_fixtures_keep_their_structure_and_their_protected_spans() {
         ("line_comments", LINE_COMMENTS),
     ] {
         let raw = raw.trim_end_matches('\n');
-        let plan = GlossPlan::new(raw);
+        let plan = GlossPlan::new(raw, CommentRules::Fenced);
         let gloss = gloss(&translator, raw);
         eprintln!("=== {name}\n{gloss}\n");
 

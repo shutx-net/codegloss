@@ -339,7 +339,7 @@ impl Worker {
         // URLs and doc tags replaced by placeholders.
         let plans: Vec<GlossPlan> = sources
             .iter()
-            .map(|source| GlossPlan::new(&source.raw))
+            .map(|source| GlossPlan::new(&source.raw, source.rules))
             .collect();
         let Batch { segments, slots } = Batch::of(&plans);
         tracing::debug!(
@@ -668,6 +668,7 @@ mod tests {
     fn a_batch_hands_the_engine_masked_units() {
         let plans = [GlossPlan::new(
             "/**\n * Returns `UserDetails`.\n *\n * @throws AuthError if it failed\n */",
+            CommentRules::Fenced,
         )];
         let batch = Batch::of(&plans);
 
@@ -682,8 +683,8 @@ mod tests {
     #[test]
     fn a_unit_two_comments_have_in_common_is_translated_once() {
         let plans = [
-            GlossPlan::new("/// @return the user"),
-            GlossPlan::new("    /// @return the user"),
+            GlossPlan::new("/// @return the user", CommentRules::Fenced),
+            GlossPlan::new("    /// @return the user", CommentRules::Fenced),
         ];
         let batch = Batch::of(&plans);
 

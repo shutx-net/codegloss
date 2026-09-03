@@ -11,7 +11,7 @@
 //! ([`CommentBlock::raw`](codegloss_core::CommentBlock::raw)), because that is
 //! what the pipeline hands to [`GlossPlan`].
 
-use codegloss_core::{CommentShape, GlossPlan, mask};
+use codegloss_core::{CommentRules, CommentShape, GlossPlan, mask};
 
 const JAVADOC: &str = include_str!("fixtures/javadoc.txt");
 const RUSTDOC: &str = include_str!("fixtures/rustdoc.txt");
@@ -44,14 +44,18 @@ fn passthrough(plan: &GlossPlan) -> Vec<String> {
 
 /// The gloss of a block, translated by an engine that changes nothing.
 fn round_trip(raw: &str) -> String {
-    let plan = GlossPlan::new(raw);
+    let plan = GlossPlan::new(raw, CommentRules::Fenced);
     plan.restore(&passthrough(&plan))
 }
 
 #[test]
 fn a_passthrough_gloss_is_the_source_prose_unchanged() {
     for raw in fixtures() {
-        assert_eq!(round_trip(raw), GlossPlan::new(raw).source(), "in {raw:?}");
+        assert_eq!(
+            round_trip(raw),
+            GlossPlan::new(raw, CommentRules::Fenced).source(),
+            "in {raw:?}"
+        );
     }
 }
 
@@ -145,7 +149,7 @@ fn every_pattern_of_issue_1_survives_untouched() {
 /// and what is prose does.
 #[test]
 fn the_engine_sees_placeholders_instead_of_code() {
-    let plan = GlossPlan::new(fixture(RUSTDOC));
+    let plan = GlossPlan::new(fixture(RUSTDOC), CommentRules::Fenced);
     let segments: Vec<String> = plan
         .segments()
         .iter()
@@ -177,7 +181,7 @@ fn the_engine_sees_placeholders_instead_of_code() {
 /// rather than its position.
 #[test]
 fn a_gloss_whose_placeholders_moved_is_still_restored() {
-    let plan = GlossPlan::new("/// Calls `load()` before find_user.");
+    let plan = GlossPlan::new("/// Calls `load()` before find_user.", CommentRules::Fenced);
     let translated = plan.restore(&["X1Q の前に X0Q を呼ぶ。".to_owned()]);
 
     assert_eq!(translated, "find_user の前に `load()` を呼ぶ。");
@@ -187,7 +191,10 @@ fn a_gloss_whose_placeholders_moved_is_still_restored() {
 /// The English is returned instead, for that unit alone.
 #[test]
 fn a_gloss_that_lost_a_placeholder_falls_back_to_the_english() {
-    let plan = GlossPlan::new("/// Returns `UserDetails` when authentication succeeds.");
+    let plan = GlossPlan::new(
+        "/// Returns `UserDetails` when authentication succeeds.",
+        CommentRules::Fenced,
+    );
 
     assert_eq!(
         plan.restore(&["認証に成功したときに返します。".to_owned()]),
@@ -210,7 +217,7 @@ fn a_gloss_that_lost_a_placeholder_falls_back_to_the_english() {
 #[test]
 fn the_fixtures_mask_into_exactly_these_segments() {
     let masked = |raw: &str| {
-        CommentShape::parse(raw)
+        CommentShape::parse(raw, CommentRules::Fenced)
             .units()
             .into_iter()
             .map(|unit| {
@@ -293,8 +300,11 @@ fn the_fixtures_mask_into_exactly_these_segments() {
 /// one - a single line, a fragment - still works.
 #[test]
 fn a_comment_with_nothing_to_translate_yields_no_segments() {
-    let plan = GlossPlan::new("//");
+    let plan = GlossPlan::new("//", CommentRules::Fenced);
     assert!(plan.is_empty());
     assert_eq!(plan.restore(&[]), "");
-    assert_eq!(CommentShape::parse("//").units(), Vec::<&str>::new());
+    assert_eq!(
+        CommentShape::parse("//", CommentRules::Fenced).units(),
+        Vec::<&str>::new()
+    );
 }

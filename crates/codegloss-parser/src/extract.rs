@@ -536,7 +536,9 @@ mod tests {
             "both fences and every line between them belong to the block"
         );
         assert!(
-            CommentShape::parse(&example.raw).units().is_empty(),
+            CommentShape::parse(&example.raw, CommentRules::Fenced)
+                .units()
+                .is_empty(),
             "a fenced example has nothing to translate"
         );
     }
@@ -587,7 +589,11 @@ mod tests {
 
         assert_eq!(example.len(), 1, "{example:#?}");
         assert_eq!(example[0].raw, "/// ```\n/// a();\n///\n/// b();\n/// ```");
-        assert!(CommentShape::parse(&example[0].raw).units().is_empty());
+        assert!(
+            CommentShape::parse(&example[0].raw, CommentRules::Fenced)
+                .units()
+                .is_empty()
+        );
     }
 
     /// A block names the comment it is about, never the decoration around it.
@@ -626,7 +632,10 @@ mod tests {
         assert_eq!(markers.len(), 3, "{markers:#?}");
         assert_eq!(markers[1].raw, "//! b();");
         assert_eq!(markers[2].raw, "//! c();");
-        assert_eq!(CommentShape::parse(&markers[1].raw).units(), ["b();"]);
+        assert_eq!(
+            CommentShape::parse(&markers[1].raw, CommentRules::Fenced).units(),
+            ["b();"]
+        );
 
         // A change of indentation.
         let source = concat!(
