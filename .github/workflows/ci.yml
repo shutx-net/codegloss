@@ -82,6 +82,77 @@ jobs:
           fi
           echo "OK: 対応言語は $(echo "$parser" | tr '\n' ' ')（parser と拡張の両方）"
 
+  # 上の check ジョブは既定 feature で回るので、`--features candle` の裏を
+  # 1 行も見ない。そこには candle.rs と marian.rs と model_pack.rs があり、
+  # コンパイルも lint も型検査もされていなかった。
+  #
+  # とくに marian.rs は candle の models::marian のフォークで、**上流の新版と
+  # diff を取れることがコピーを抱える条件**である（AGENTS.md）。3 つの変更
+  # （reorder_kv_cache / エンコーダとクロスアテンションのマスク /
+  # エンコーダ層の is_decoder: false）にはモデルパック不要のユニットテストが
+  # 付いているのに、`mod marian` 自体が #[cfg(feature = "candle")] の裏なので
+  # 一度も走っていなかった（#66）。
+  #
+  # check を重くするのではなく別ジョブにして並列に走らせる。check の時間は
+  # 変わらないままで、ワークフローの壁時計は一番遅いジョブが決める。増えるのは
+  # CI の分である。実測（4 コア、cold、3 回の中央値）: `cargo test --workspace
+  # --no-run` が既定 37.9 秒、candle 付きで 73.3 秒（1.93 倍）。#60 は同じ穴の
+  # 残り半分を 0.4 秒で塞げたが、こちらは candle クレートそのものが要るので、
+  # その値段では買えない。
+  #
+  # IMPORTANT: モデルパックは取りに行かないこと。重みはこのリポジトリに置かず
+  # （AGENTS.md）、120 MB の CC-BY-SA-4.0 を CI で落とす理由も無い。実モデルの
+  # 要るテストは #[ignore] のままで、ignored と表示されるのが正しい。
+  candle:
+    name: clippy / test (candle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # check ジョブと同じ。toolchain 入力は書かない（rust-toolchain.toml が
+      # 唯一の版の定義であり、ここに書くと二重管理になる）。
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # 仮想マニフェストに対する `--features candle` は、その名前の feature を
+      # 持つメンバ全部に効く。codegloss-translator（marian / candle）と
+      # codegloss-lsp（model_pack）の両方がここで入る。片方だけ名指しして
+      # codegloss-lsp/candle と書いても同じ集合になる（あちらの candle が
+      # codegloss-translator/candle を引くため）が、それは依存の向きに寄りかかる
+      # 書き方で、lsp が翻訳エンジンを直に持たなくなった日に黙って translator を
+      # 覆わなくなる。見たいのは「ワークスペースを candle 付きで回す」ことなので、
+      # 依存ではなく feature の名前で言う。
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --features candle -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --features candle
+
+      # 上の test が緑でも、marian のテストが 1 件も入っていなければ意味がない。
+      # #60 と #66 が見つけたのはどちらも「走ると書いてあるのに走っていない」
+      # テストで、required-features を足し直す・モジュールを別の cfg の裏へ移す
+      # といった変更で同じことがまた起きる。そのときテストは消えず、ただ数が
+      # 0 になるだけなので、ジョブは緑のままになる。名前が消えたらここで落とす。
+      - name: check the fork guards ran
+        shell: bash
+        run: |
+          set -euo pipefail
+          # コードの字面ではなくテストバイナリに訊く。grep では #[cfg] で
+          # 外された名前も数えてしまう。**選び方は上の test と 1 字も変えない**
+          # ——`-p codegloss-translator` に絞るとワークスペース全体とは feature の
+          # 統合結果が変わり、依存を積み直して実測 25 秒かかるうえ、数えるのが
+          # 「さっき走ったのとは別のビルド」になる。揃えれば 0.5 秒で、走った
+          # バイナリそのものに訊くことになる。
+          guards=$(cargo test -q --workspace --features candle -- --list \
+            | sed -n 's/^\(marian::tests::[A-Za-z0-9_]*\): test$/\1/p')
+          [ -n "$guards" ] || {
+            echo "NG: marian::tests が 1 件も入っていません。" >&2
+            echo "    フォークの 3 つの変更を守るテストが走っていないので、" >&2
+            echo "    上流と diff を取れることを確かめる手立てがありません（#66）。" >&2
+            exit 1
+          }
+          echo "OK: フォークを守るテストが $(echo "$guards" | wc -l) 件走りました"
+          echo "$guards"
+
   wasm:
     name: zed extension (wasm)
     runs-on: ubuntu-latest
