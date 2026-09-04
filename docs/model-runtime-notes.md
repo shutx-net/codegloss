@@ -1333,6 +1333,11 @@ CODEGLOSS_MODEL_PACK=~/codegloss-model \
 しては実際より長いほうに偏っている。
 
 コーパスは `%%%` 区切りのテキストなら何でもよく、`CODEGLOSS_CORPUS` で差し替わる。
+1 行目の `%%% rules: fenced|indented` が、そのコーパスをどの規則で読むかを言う
+（`codegloss-parser` の `corpus` モジュール）。**この行が無いファイルは `fenced`**
+なので、凍結コーパスは無変更のまま正しく読める。`--lang go` で作ったコーパスには
+`indented` が入り、字下げされた用例はエンジンに渡らない（Issue #62。この行が
+無かった頃は、Go のコーパスが Rust の規則で採点されていた）。
 
 ```sh
 cargo run -p codegloss-parser --example extract -- path/to/src/*.rs > /tmp/corpus.txt
@@ -1485,7 +1490,10 @@ Issue。
 - **`looks_like_code` が拾いすぎていないか。**「そもそも保全しない」という第 3 の
   梃子は誰も測っていない（狭めると `PIPELINE_VERSION` が動く）。
 - **Rust 以外。**裸の識別子の密度はバッククォート文化の有無で変わるはずだが、
-  parser が Rust しか読めないので測れない。言語が増えたら測り直しになる。
+  この表は Rust のコーパスの上でしか取っていない。#59 で parser が Go を読むように
+  なり、#62 でコーパス形式が規則を運ぶようになったので**測れるようにはなった**——
+  `--lang go` で作ったコーパスを `CODEGLOSS_CORPUS` に渡せばよい。**まだ測って
+  いない。**
 - **用語プローブの語彙表の置き場所。**同じ表から作った辞書を同じ表で採点すると
   循環する。半分を保留するのか、辞書の採点は人間の A/B だけにするのか。
 - **コーパス 1 の偏り。**自リポジトリのコメントなので CodeGloss 自身の語

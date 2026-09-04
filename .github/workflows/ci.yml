@@ -43,6 +43,45 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+      # 「どの言語に対応しているか」は 2 箇所にある。crates/codegloss-parser の
+      # レジストリ（LSP の languageId）と editors/zed/extension.toml の languages
+      # （Zed の言語名）で、**別ワークスペースなのでどちらのビルドも相手を見ない**。
+      # 片方だけ足すと両方向に静かに壊れる: パーサだけ足すと Zed がそのバッファに
+      # codegloss を付けないので何も出ず、extension.toml だけ足すと
+      # from_lsp_language_id が None を返して「コメントが無い文書」として黙る。
+      # どちらもエラーにならないので、ここで突き合わせる（#63）。
+      - name: check the supported-language lists
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail() { echo "NG: $1" >&2; exit 1; }
+
+          # レジストリはコンパイラに吐かせる。languages.rs を grep すると
+          # 「コードの字面」と比べることになり、バイナリの挙動とは別物になる。
+          parser=$(cargo run -q -p codegloss-parser --example languages \
+            | tr 'A-Z' 'a-z' | sed '/^$/d' | sort)
+
+          # languages = ["Rust", "Go"] の中身だけを切って 1 行 1 語にする。
+          # 名前は一致しない（"go" と "Go"）ので、小文字化した集合で比べる。
+          extension=$(sed -n 's/^languages *= *\[\(.*\)\]$/\1/p' editors/zed/extension.toml \
+            | head -1 | tr ',' '\n' | tr -d ' "' | tr 'A-Z' 'a-z' | sed '/^$/d' | sort)
+
+          [ -n "$parser" ] || fail "codegloss-parser が対応言語を 1 つも出しませんでした"
+          [ -n "$extension" ] ||
+            fail "editors/zed/extension.toml の languages を読み取れませんでした"
+
+          if [ "$parser" != "$extension" ]; then
+            # 両方向とも出してから落とす。片方だけ見せると、足す先を間違える。
+            only_parser=$(comm -23 <(echo "$parser") <(echo "$extension") | tr '\n' ' ')
+            only_extension=$(comm -13 <(echo "$parser") <(echo "$extension") | tr '\n' ' ')
+            [ -z "$only_parser" ] || echo \
+              "codegloss-parser にしかない: ${only_parser}— Zed が付けないので何も出ません" >&2
+            [ -z "$only_extension" ] || echo \
+              "extension.toml にしかない: ${only_extension}— サーバが黙ります" >&2
+            fail "対応言語の一覧がずれています"
+          fi
+          echo "OK: 対応言語は $(echo "$parser" | tr '\n' ' ')（parser と拡張の両方）"
+
   wasm:
     name: zed extension (wasm)
     runs-on: ubuntu-latest

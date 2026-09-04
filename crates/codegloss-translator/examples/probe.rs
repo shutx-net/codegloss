@@ -12,14 +12,17 @@
 //!   --features candle --release --example probe
 //! ```
 //!
-//! With comments piped in on standard input, blocks separated by a `%%%`
-//! line, it probes those instead of the built-in list.
+//! With comments piped in on standard input, blocks separated by a `%%%` line,
+//! it probes those instead of the built-in list - under the rules the corpus
+//! names in its `%%% rules:` header ([`codegloss_parser::corpus`]), or under
+//! [`CommentRules::Fenced`] when it names none.
 
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use codegloss_core::{CommentRules, GlossPlan, Segment};
+use codegloss_parser::corpus;
 use codegloss_translator::{CandleTranslator, DEFAULT_BEAMS, Precision, Translator};
 
 /// Comments chosen to stress the cases a reader complains about: fragments,
@@ -98,18 +101,29 @@ fn main() -> ExitCode {
         eprintln!("standard input could not be read: {error}");
         return ExitCode::FAILURE;
     }
-    let probes: Vec<&str> = if piped.trim().is_empty() {
-        PROBES.to_vec()
+    // The built-in probes are Rust doc comments written here; a piped corpus
+    // says at the top which rules it was extracted under, and reading a Go one
+    // as Rust would show the engine indented examples as prose - the thing this
+    // tool exists to make visible, hidden by the tool (Issue #62).
+    let (rules, probes) = if piped.trim().is_empty() {
+        (CommentRules::Fenced, PROBES.to_vec())
     } else {
-        piped.split("\n%%%\n").map(str::trim_end).collect()
+        match corpus::rules(&piped) {
+            Ok((rules, blocks)) => (rules, blocks.split("\n%%%\n").map(str::trim_end).collect()),
+            Err(error) => {
+                eprintln!("standard input: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
     };
+    eprintln!("{} probes, read as {}", probes.len(), rules.tag());
 
     for raw in probes {
         println!("================================================================");
         println!("{raw}");
         println!("----------------------------------------------------------------");
 
-        let plan = GlossPlan::new(raw, CommentRules::Fenced);
+        let plan = GlossPlan::new(raw, rules);
         let sources = plan.sources();
         let segments = plan.segments();
         let masked: Vec<&str> = segments.iter().map(Segment::text).collect();

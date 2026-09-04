@@ -14,6 +14,7 @@
 mod support;
 
 use codegloss_core::{CommentRules, CommentShape, GlossPlan, Segment, mask};
+use codegloss_parser::SupportedLanguage;
 use codegloss_translator::Translator;
 
 /// The three pinned blocks, included from `codegloss-core` itself rather
@@ -26,6 +27,15 @@ const LINE_COMMENTS: &str = include_str!("../../codegloss-core/tests/fixtures/li
 /// A comment of the corpus.
 struct Fixture {
     language: String,
+    /// What the shape of this comment means in the language it came from.
+    ///
+    /// The corpus carries Go as well as Rust, and Go marks an example by
+    /// indenting it. Read as Rust, those examples reach the engine as prose and
+    /// nothing says so (Issue #62). The registry is what answers this - a
+    /// second copy of the mapping in this file is what AGENTS.md forbids - and
+    /// a language it does not know falls back to the rules everything obeyed
+    /// before Go.
+    rules: CommentRules,
     raw: String,
 }
 
@@ -36,8 +46,11 @@ fn corpus() -> Vec<Fixture> {
         .map(|line| {
             let value: serde_json::Value =
                 serde_json::from_str(line).expect("every line of the corpus is JSON");
+            let language = value["language"].as_str().unwrap_or("?").to_owned();
             Fixture {
-                language: value["language"].as_str().unwrap_or("?").to_owned(),
+                rules: SupportedLanguage::from_lsp_language_id(&language)
+                    .map_or(CommentRules::Fenced, SupportedLanguage::rules),
+                language,
                 raw: value["raw"]
                     .as_str()
                     .expect("every entry has a raw comment")
@@ -49,8 +62,8 @@ fn corpus() -> Vec<Fixture> {
 
 /// Every span the pre-processing hid from the engine, as it is written in the
 /// comment. Each of them has to be in the gloss, spelled the same way.
-fn protected(raw: &str) -> Vec<String> {
-    CommentShape::parse(raw, CommentRules::Fenced)
+fn protected(raw: &str, rules: CommentRules) -> Vec<String> {
+    CommentShape::parse(raw, rules)
         .units()
         .into_iter()
         .flat_map(|unit| {
@@ -65,8 +78,8 @@ fn protected(raw: &str) -> Vec<String> {
 
 /// The whole pipeline for one comment, exactly as `codegloss-lsp` runs it:
 /// mask, translate, unmask, rebuild.
-fn gloss(translator: &dyn Translator, raw: &str) -> String {
-    let plan = GlossPlan::new(raw, CommentRules::Fenced);
+fn gloss(translator: &dyn Translator, raw: &str, rules: CommentRules) -> String {
+    let plan = GlossPlan::new(raw, rules);
     let translations = translator
         .translate(&plan.segments())
         .expect("the engine answers");
@@ -113,7 +126,7 @@ fn is_japanese(character: char) -> bool {
 fn the_identifier_of_issue_1_survives_the_real_model() {
     let translator = support::translator();
     let raw = "/// Returns `UserDetails` when authentication succeeds.";
-    let gloss = gloss(&translator, raw);
+    let gloss = gloss(&translator, raw, CommentRules::Fenced);
 
     eprintln!("{raw}\n  -> {gloss}");
     assert!(
@@ -165,7 +178,7 @@ fn the_clause_after_a_comma_survives_the_split() {
         .translate(&[Segment::new(whole)])
         .expect("the engine answers")
         .remove(0);
-    let split = gloss(&translator, raw);
+    let split = gloss(&translator, raw, CommentRules::Fenced);
 
     eprintln!("undivided -> {undivided}\nsplit     -> {split}");
     assert!(
@@ -189,7 +202,7 @@ fn the_p6_fixtures_keep_their_structure_and_their_protected_spans() {
     ] {
         let raw = raw.trim_end_matches('\n');
         let plan = GlossPlan::new(raw, CommentRules::Fenced);
-        let gloss = gloss(&translator, raw);
+        let gloss = gloss(&translator, raw, CommentRules::Fenced);
         eprintln!("=== {name}\n{gloss}\n");
 
         // The source line count is the structure the pipeline promises to rebuild.
@@ -201,7 +214,7 @@ fn the_p6_fixtures_keep_their_structure_and_their_protected_spans() {
             ));
         }
 
-        for span in protected(raw) {
+        for span in protected(raw, CommentRules::Fenced) {
             if !gloss.contains(&span) {
                 failures.push(format!("{name}: {span:?} is not in the gloss"));
             }
@@ -221,11 +234,11 @@ fn the_corpus_keeps_every_protected_span() {
     let mut glossed = 0usize;
 
     for fixture in corpus() {
-        let gloss = gloss(&translator, &fixture.raw);
+        let gloss = gloss(&translator, &fixture.raw, fixture.rules);
         glossed += 1;
         eprintln!("[{}] {}\n  -> {}\n", fixture.language, fixture.raw, gloss);
 
-        for span in protected(&fixture.raw) {
+        for span in protected(&fixture.raw, fixture.rules) {
             if !gloss.contains(&span) {
                 failures.push(format!(
                     "[{}] {span:?} is not in {gloss:?}",
