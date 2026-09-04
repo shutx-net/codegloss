@@ -1,7 +1,7 @@
 id = "codegloss-lsp"
 name = "CodeGloss"
 description = "Shows Japanese translations of English code comments in the editor"
-version = "0.0.2"
+version = "0.0.3"
 schema_version = 1
 authors = ["shutx <169037737+shutx-net@users.noreply.github.com>"]
 repository = "https://github.com/shutx-net/codegloss"
