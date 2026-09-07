@@ -1,0 +1,142 @@
+{
+  "name": "codegloss",
+  "displayName": "CodeGloss",
+  "description": "Shows Japanese translations of English code comments in the editor",
+  "version": "0.0.3",
+  "publisher": "shutx-net",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shutx-net/codegloss.git",
+    "directory": "editors/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/shutx-net/codegloss/issues"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "comments",
+    "translation",
+    "japanese",
+    "code lens"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:rust",
+    "onLanguage:go",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "CodeGloss",
+      "properties": {
+        "codegloss.server.path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "scope": "machine-overridable",
+          "markdownDescription": "Absolute path to a `codegloss-lsp` binary to run instead of the one shipped with this extension. Point this at a local build while working on the server."
+        },
+        "codegloss.server.arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine-overridable",
+          "markdownDescription": "Extra arguments appended to the server's command line, after the ones built from the settings below."
+        },
+        "codegloss.model.pack": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "scope": "machine-overridable",
+          "markdownDescription": "Directory holding the translation model pack (`--model-pack`). Leave unset and the server downloads one on first start."
+        },
+        "codegloss.model.precision": {
+          "type": "string",
+          "enum": [
+            "f32",
+            "f16"
+          ],
+          "default": "f32",
+          "scope": "machine-overridable",
+          "markdownDescription": "How the weights are held in memory (`--precision`). `f16` halves the memory the model takes."
+        },
+        "codegloss.model.beams": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4,
+          "scope": "machine-overridable",
+          "markdownDescription": "Beam search width (`--beams`). `1` is greedy decoding: faster, and worse."
+        },
+        "codegloss.model.download": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Let the server fetch the model pack by itself when it has none. Turning this off (`--no-download`) leaves comments untranslated until a pack is installed by hand."
+        },
+        "codegloss.cache.directory": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "scope": "machine-overridable",
+          "markdownDescription": "Directory finished translations are written to (`--cache-dir`), so that a restart does not translate them again."
+        },
+        "codegloss.cache.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Keep finished translations on disk. Turning this off (`--no-cache`) makes every session start from nothing."
+        },
+        "codegloss.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Log the traffic between VS Code and the language server to the CodeGloss output channel."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "codegloss.restartServer",
+        "title": "Restart Language Server",
+        "category": "CodeGloss"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc --noEmit && node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --project tsconfig.test.json && node --test 'out/**/*.test.js'",
+    "package": "npm run compile && vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.91.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
+  }
+}

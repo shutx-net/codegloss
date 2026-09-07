@@ -43,44 +43,76 @@ jobs:
       - name: test
         run: cargo test --workspace
 
-      # 「どの言語に対応しているか」は 2 箇所にある。crates/codegloss-parser の
-      # レジストリ（LSP の languageId）と editors/zed/extension.toml の languages
-      # （Zed の言語名）で、**別ワークスペースなのでどちらのビルドも相手を見ない**。
-      # 片方だけ足すと両方向に静かに壊れる: パーサだけ足すと Zed がそのバッファに
-      # codegloss を付けないので何も出ず、extension.toml だけ足すと
-      # from_lsp_language_id が None を返して「コメントが無い文書」として黙る。
-      # どちらもエラーにならないので、ここで突き合わせる（#63）。
+      # 「どの言語に対応しているか」は 3 箇所にある。crates/codegloss-parser の
+      # レジストリ、editors/zed/extension.toml の languages（Zed の言語名）、
+      # editors/vscode/package.json の activationEvents（VS Code の languageId）。
+      # **どれも別ワークスペースで、どのビルドも他を見ない**。片方だけ足すと
+      # 両方向に静かに壊れる: パーサだけ足すと editor がそのバッファに codegloss を
+      # 付けないので何も出ず、editor 側だけ足すと from_lsp_language_id が None を
+      # 返して「コメントが無い文書」として黙る。どちらもエラーにならない（#63）。
+      #
+      # 2 つの突き合わせをする。**3 つの一覧は同じ一覧ではない**からで、
+      # Zed はこのレジストリと同じ綴りを使うが、VS Code は 2 つを別の名前で呼ぶ
+      # （typescriptreact / javascriptreact）。
+      #
+      # 1. 言語名: レジストリ ＝ Zed の languages
+      # 2. id: レジストリの全 id ＝ Zed の名前 ∪ VS Code の onLanguage
+      #
+      # 2 が「和集合と等しい」なのが要点である。部分集合で見ると、レジストリに
+      # id を足してどちらの editor にも書かなかった場合を見逃す——サーバだけが
+      # 知っていて誰も送らない名前ができ、対応したつもりのまま何も出ない。
       - name: check the supported-language lists
         shell: bash
         run: |
           set -euo pipefail
           fail() { echo "NG: $1" >&2; exit 1; }
 
+          # 両方向とも出してから落とす。片方だけ見せると、足す先を間違える。
+          compare() {
+            local what=$1 left=$2 right=$3 left_name=$4 right_name=$5
+            [ "$left" = "$right" ] && return 0
+            only_left=$(comm -23 <(echo "$left") <(echo "$right") | tr '\n' ' ')
+            only_right=$(comm -13 <(echo "$left") <(echo "$right") | tr '\n' ' ')
+            [ -z "$only_left" ] || echo "${left_name}にしかない: ${only_left}" >&2
+            [ -z "$only_right" ] || echo "${right_name}にしかない: ${only_right}" >&2
+            fail "${what}がずれています"
+          }
+
           # レジストリはコンパイラに吐かせる。languages.rs を grep すると
           # 「コードの字面」と比べることになり、バイナリの挙動とは別物になる。
-          parser=$(cargo run -q -p codegloss-parser --example languages \
-            | tr 'A-Z' 'a-z' | sed '/^$/d' | sort)
+          # 出力は「言語名<TAB>id」の対。
+          pairs=$(cargo run -q -p codegloss-parser --example languages)
+          [ -n "$pairs" ] || fail "codegloss-parser が対応言語を 1 つも出しませんでした"
+          names=$(echo "$pairs" | cut -f1 | tr 'A-Z' 'a-z' | sort -u)
+          ids=$(echo "$pairs" | cut -f2 | tr 'A-Z' 'a-z' | sort -u)
 
           # languages = ["Rust", "Go"] の中身だけを切って 1 行 1 語にする。
           # 名前は一致しない（"go" と "Go"）ので、小文字化した集合で比べる。
-          extension=$(sed -n 's/^languages *= *\[\(.*\)\]$/\1/p' editors/zed/extension.toml \
-            | head -1 | tr ',' '\n' | tr -d ' "' | tr 'A-Z' 'a-z' | sed '/^$/d' | sort)
-
-          [ -n "$parser" ] || fail "codegloss-parser が対応言語を 1 つも出しませんでした"
-          [ -n "$extension" ] ||
+          zed=$(sed -n 's/^languages *= *\[\(.*\)\]$/\1/p' editors/zed/extension.toml \
+            | head -1 | tr ',' '\n' | tr -d ' "' | tr 'A-Z' 'a-z' | sed '/^$/d' | sort -u)
+          [ -n "$zed" ] ||
             fail "editors/zed/extension.toml の languages を読み取れませんでした"
 
-          if [ "$parser" != "$extension" ]; then
-            # 両方向とも出してから落とす。片方だけ見せると、足す先を間違える。
-            only_parser=$(comm -23 <(echo "$parser") <(echo "$extension") | tr '\n' ' ')
-            only_extension=$(comm -13 <(echo "$parser") <(echo "$extension") | tr '\n' ' ')
-            [ -z "$only_parser" ] || echo \
-              "codegloss-parser にしかない: ${only_parser}— Zed が付けないので何も出ません" >&2
-            [ -z "$only_extension" ] || echo \
-              "extension.toml にしかない: ${only_extension}— サーバが黙ります" >&2
-            fail "対応言語の一覧がずれています"
-          fi
-          echo "OK: 対応言語は $(echo "$parser" | tr '\n' ' ')（parser と拡張の両方）"
+          # VS Code 側は package.json の activationEvents。拡張の
+          # documentSelector はこれから導出されるので（src/server.ts）、
+          # ここを見れば拡張がどの言語に付くかが分かる。
+          vscode=$(jq -r '.activationEvents[]
+            | select(startswith("onLanguage:")) | ltrimstr("onLanguage:")' \
+            editors/vscode/package.json | tr 'A-Z' 'a-z' | sed '/^$/d' | sort -u)
+          [ -n "$vscode" ] ||
+            fail "editors/vscode/package.json の onLanguage を読み取れませんでした"
+
+          compare "対応言語の一覧" "$names" "$zed" \
+            "codegloss-parser（Zed が付けないので何も出ません）" \
+            "extension.toml（サーバが黙ります）"
+
+          claimed=$(printf '%s\n%s\n' "$zed" "$vscode" | sed '/^$/d' | sort -u)
+          compare "languageId の一覧" "$ids" "$claimed" \
+            "レジストリ（どの editor も送らない id です）" \
+            "editor 側（サーバが黙ります）"
+
+          echo "OK: 対応言語は $(echo "$names" | tr '\n' ' ')"
+          echo "OK: languageId は $(echo "$ids" | tr '\n' ' ')（Zed と VS Code の両方で claim 済み）"
 
   # 上の check ジョブは既定 feature で回るので、`--features candle` の裏を
   # 1 行も見ない。そこには candle.rs と marian.rs と model_pack.rs があり、
@@ -233,3 +265,49 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
         run: cargo build --target wasm32-wasip2 --release
+
+  # editors/vscode は Cargo ワークスペースの外にあり、TypeScript なので上の
+  # どのジョブも見ない。型検査・テスト・パッケージまでここで見る。
+  #
+  # package まで走らせるのは、VSIX が作れなくなる壊れ方が .vscodeignore と
+  # package.json 側にあり、コンパイルでは出ないからである。ここで作るのは
+  # target 無しの VSIX（サーバのバイナリを同梱しない形）で、リリースで配る
+  # 5 つとはファイルの中身が違う。**サーバは取りに行かないこと**——CI で
+  # リリースアセットを落とす理由は無く、同梱の有無はここの関心ではない。
+  vscode:
+    name: vscode extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      # ci であって install ではない。package-lock.json のとおりに入れ、
+      # 合っていなければ落ちる。
+      - name: install
+        working-directory: editors/vscode
+        run: npm ci
+
+      - name: typecheck
+        working-directory: editors/vscode
+        run: npm run typecheck
+
+      - name: test
+        working-directory: editors/vscode
+        run: npm test
+
+      - name: package
+        working-directory: editors/vscode
+        run: npm run package
+
+      - name: check artifact
+        working-directory: editors/vscode
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p 'require("./package.json").version')
+          test -f "codegloss-$version.vsix"

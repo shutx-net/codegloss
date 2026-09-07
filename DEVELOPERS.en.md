@@ -87,6 +87,7 @@ There is no rustup in the Nix environment, so the check is
 | `wasm32-wasip2` target | the Zed extension compiles to WebAssembly |
 | A C compiler (from stdenv, under Nix) | the tree-sitter grammar crates compile C |
 | `pkg-config` / `openssl` | needed when a networking crate pulls in native-tls |
+| Node.js (22 or newer) | the VS Code extension is TypeScript, and this builds the VSIX. Not needed to work on the server |
 | Python (`protobuf` / `sentencepiece` / `tokenizers`) | used by `tools/convert-fugumt` to build a model pack. Not needed to run translation |
 
 Under Nix that Python is declared with `python3.withPackages`. **Do not use
@@ -107,6 +108,7 @@ Cargo.toml          the root workspace (members = ["crates/*"])
      ├─ codegloss-translator  trait Translator and its implementations (Passthrough / candle)
      └─ codegloss-lsp         the language server (the native binary that is shipped)
 editors/zed         the Zed extension. A workspace of its own (excluded from the root)
+editors/vscode      the VS Code extension. TypeScript, outside the Cargo workspace
 tools/convert-fugumt  the Python script that builds a model pack (not shipped)
 ```
 
@@ -330,6 +332,61 @@ cd editors/zed && cargo build --target wasm32-wasip2 --release
 When something does not work, look at `zed: open log`. The server's log level is
 set with `CODEGLOSS_LOG` (for example `CODEGLOSS_LOG=debug`). Logs go to stderr
 only; stdout carries the LSP's JSON-RPC.
+
+## Trying the VS Code extension
+
+1. Build the server first. Like the Zed extension, this one only starts it: no
+   translation happens in the extension.
+
+   ```sh
+   cargo build -p codegloss-lsp
+   ```
+
+2. Get the extension ready.
+
+   ```sh
+   cd editors/vscode
+   npm install
+   npm run compile     # typecheck, then bundle into dist/extension.js with esbuild
+   npm test            # the server search and the argument building
+   ```
+
+3. Point it at your build. **A published VSIX carries a server binary inside it,
+   and the extension prefers that one over anything on `PATH`.** Without this
+   setting your local changes look like they did nothing.
+
+   ```json
+   {
+     "codegloss.server.path": "/absolute/path/to/codegloss/target/debug/codegloss-lsp"
+   }
+   ```
+
+   The `codegloss` prefix is the language server id, not the extension id on the
+   Marketplace (`name` in `package.json`).
+
+4. Open `editors/vscode` in VS Code and press F5 (Run Extension) to start an
+   extension development host. Unlike Zed, the build is done by your own npm, so
+   no Rust is involved.
+
+5. Open a `.rs`, `.go`, `.ts` or `.tsx` file. **Code lenses are on by default in
+   VS Code** (`editor.codeLens`), so a new line above a comment means it works.
+   Hover works with no configuration either.
+
+   Changing a setting restarts the server on its own. To restart it by hand, run
+   **CodeGloss: Restart Language Server** from the command palette.
+
+To build a VSIX locally, run the following. **It will not contain a server**:
+bundling one is the release workflow's job, which unpacks a release asset into
+`editors/vscode/server/` and then packages with `--target`.
+
+```sh
+cd editors/vscode && npm run package
+# -> editors/vscode/codegloss-<version>.vsix
+```
+
+When something does not work, look at the **CodeGloss** output panel. To see the
+LSP traffic as well, set `codegloss.trace.server` to `verbose`. The server's own
+log level is set with `CODEGLOSS_LOG`, exactly as under Zed.
 
 ## Configuring the display modes
 

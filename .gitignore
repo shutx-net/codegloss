@@ -25,3 +25,13 @@ __pycache__/
 pytorch_model.bin
 tokenizer-source.json
 tokenizer-target.json
+# VS Code 拡張。dist は esbuild の束、out はテスト用の tsc の出力、
+# LICENSE はルートからの複製（build.mjs が置く）、server/ はリリースアセットを
+# 展開したサーバのバイナリで、これは VSIX を作るときだけそこにある。
+# .vsix そのものもリリースの成果物なのでコミットしない。
+/editors/vscode/node_modules
+/editors/vscode/dist
+/editors/vscode/out
+/editors/vscode/LICENSE
+/editors/vscode/server
+/editors/vscode/*.vsix
