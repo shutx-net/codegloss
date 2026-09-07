@@ -1,3 +1,36 @@
+// This file carries a copy of `candle_transformers::models::marian` from candle
+// 0.11.0 <https://github.com/huggingface/candle>, changed in the three ways the
+// module documentation below describes. candle is licensed MIT OR Apache-2.0;
+// CodeGloss takes the MIT option, whose notice MIT asks to be included in every
+// copy of a substantial portion. Upstream's LICENSE-MIT
+// <https://github.com/huggingface/candle/blob/0.11.0/LICENSE-MIT> carries no
+// copyright line, so there is none to carry over here; what follows is that
+// file, verbatim.
+//
+// Permission is hereby granted, free of charge, to any
+// person obtaining a copy of this software and associated
+// documentation files (the "Software"), to deal in the
+// Software without restriction, including without
+// limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of
+// the Software, and to permit persons to whom the Software
+// is furnished to do so, subject to the following
+// conditions:
+//
+// The above copyright notice and this permission notice
+// shall be included in all copies or substantial portions
+// of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+// ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+// TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+// PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+// SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+// CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+// OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+// IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
 //! Marian NMT, forked from candle so that the decoder can be driven properly.
 //!
 //! A copy of `candle_transformers::models::marian` (candle 0.11.0, MIT OR
