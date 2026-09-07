@@ -210,7 +210,11 @@ const ECMASCRIPT_SYNTAX: CommentSyntax = CommentSyntax {
 };
 
 impl SupportedLanguage {
-    /// Every language this build reads, as the `languageId` an editor sends.
+    /// Every language this build reads.
+    ///
+    /// A language, not a `languageId`: one language answers to several ids,
+    /// which is what [`Self::lsp_language_ids`] carries. The two coincide for
+    /// Zed, and that is what makes the comparison below possible at all.
     ///
     /// **CI reads this**, through `examples/languages.rs`: the same list exists
     /// a second time in `editors/zed/extension.toml` as Zed's language names,
@@ -231,21 +235,45 @@ impl SupportedLanguage {
         Self::Tsx,
     ];
 
+    /// Every `languageId` a client may send for this language.
+    ///
+    /// One language, several spellings. An editor names its own languages and
+    /// the names do not agree: Zed sends its `LanguageName` lowercased, so TSX
+    /// arrives as `tsx`, while VS Code calls that same language
+    /// `typescriptreact` - and splits `.jsx` out into a `javascriptreact` of
+    /// its own where Zed folds it into JavaScript (`.jsx` is one of
+    /// JavaScript's `path_suffixes` there). The grammar is JavaScript's either
+    /// way, because `tree-sitter-javascript` parses JSX.
+    ///
+    /// Read off zed main's `crates/grammars/src/*/config.toml` (through
+    /// `LanguageName::lsp_id`) and `microsoft/vscode`'s
+    /// `extensions/*/package.json`. Nothing here is a guess at a name: an id
+    /// belongs in this table once some client is known to send it.
+    ///
+    /// [`Self::from_lsp_language_id`] reads this and nothing else, so an id
+    /// added here is recognised in the same commit - there is no second list to
+    /// keep in step. [`Self::as_str`] is always among a language's ids, which
+    /// is what lets CI compare [`Self::ALL`] against Zed's `languages` without
+    /// knowing anything about VS Code's names.
+    pub fn lsp_language_ids(self) -> &'static [&'static str] {
+        match self {
+            Self::Rust => &["rust"],
+            Self::Go => &["go"],
+            Self::JavaScript => &["javascript", "javascriptreact"],
+            Self::TypeScript => &["typescript"],
+            Self::Tsx => &["tsx", "typescriptreact"],
+        }
+    }
+
     /// Maps the `languageId` a client sends with `textDocument/didOpen` onto a
-    /// grammar. Zed reports Rust as `rust` and Go as `go` (its `LanguageName`
-    /// lowercased).
+    /// grammar, over [`Self::lsp_language_ids`].
     ///
     /// Returns `None` for anything CodeGloss cannot parse yet, which the server
     /// treats as "this document has no comments" rather than as an error.
     pub fn from_lsp_language_id(language_id: &str) -> Option<Self> {
-        match language_id {
-            "rust" => Some(Self::Rust),
-            "go" => Some(Self::Go),
-            "javascript" => Some(Self::JavaScript),
-            "typescript" => Some(Self::TypeScript),
-            "tsx" => Some(Self::Tsx),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|language| language.lsp_language_ids().contains(&language_id))
     }
 
     /// What the shape of a comment means in this language.
@@ -314,29 +342,6 @@ mod tests {
         assert_eq!(
             SupportedLanguage::from_lsp_language_id("rust"),
             Some(SupportedLanguage::Rust)
-        );
-    }
-
-    /// `ALL` is what CI compares against `editors/zed/extension.toml`, so an
-    /// entry that no `didOpen` could ever produce would make the check pass
-    /// while the server stayed silent on that buffer.
-    #[test]
-    fn every_listed_language_is_one_a_client_can_ask_for() {
-        for language in SupportedLanguage::ALL {
-            assert_eq!(
-                SupportedLanguage::from_lsp_language_id(language.as_str()),
-                Some(language),
-                "{language:?} is listed in ALL under an id no client can send"
-            );
-        }
-        assert_eq!(
-            SupportedLanguage::ALL.len(),
-            SupportedLanguage::ALL
-                .iter()
-                .map(|language| language.as_str())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            "ALL lists the same language twice"
         );
     }
 
@@ -440,23 +445,73 @@ mod tests {
     /// `name` in `crates/grammars/src/{javascript,typescript,tsx}/config.toml`:
     /// `"JavaScript"`, `"TypeScript"`, `"TSX"`. All three are built into Zed,
     /// so no other extension has to be installed for them to arrive.
+    ///
+    /// VS Code names two of them differently, and that is the whole reason
+    /// [`SupportedLanguage::lsp_language_ids`] is a list rather than one name:
+    /// `.tsx` is `typescriptreact` there, and `.jsx` is a `javascriptreact` of
+    /// its own instead of one of JavaScript's suffixes. Read off
+    /// `microsoft/vscode`'s `extensions/javascript/package.json` and
+    /// `extensions/typescript-basics/package.json`.
     #[test]
     fn the_ecmascript_family_is_recognised_by_its_lsp_language_ids() {
         for (id, language) in [
             ("javascript", SupportedLanguage::JavaScript),
+            ("javascriptreact", SupportedLanguage::JavaScript),
             ("typescript", SupportedLanguage::TypeScript),
             ("tsx", SupportedLanguage::Tsx),
+            ("typescriptreact", SupportedLanguage::Tsx),
         ] {
-            assert_eq!(SupportedLanguage::from_lsp_language_id(id), Some(language));
+            assert_eq!(
+                SupportedLanguage::from_lsp_language_id(id),
+                Some(language),
+                "in {id:?}"
+            );
         }
-        // Zed sends the lower-cased name and nothing else. `jsx` is not a
-        // language of its own there - `.jsx` is one of JavaScript's suffixes.
-        for id in ["JavaScript", "TSX", "js", "ts", "jsx", "typescriptreact"] {
+        // An id is a name some client is known to send, not a guess at one.
+        // The first two are Zed's display names rather than its `lsp_id`, the
+        // next three are file suffixes, and the last is nobody's spelling.
+        for id in ["JavaScript", "TSX", "js", "ts", "jsx", "TypeScriptReact"] {
             assert_eq!(
                 SupportedLanguage::from_lsp_language_id(id),
                 None,
                 "in {id:?}"
             );
+        }
+    }
+
+    /// The table is the only list of ids there is, so the two properties that
+    /// make it usable have to hold inside it rather than at each call site.
+    ///
+    /// An id names exactly one language: two languages claiming one id would
+    /// be resolved by the order of `ALL`, which is not a rule anyone reading
+    /// either list would guess. Two languages sharing an `as_str` fail here for
+    /// the same reason, since that name is always among a language's ids.
+    ///
+    /// And a language answers to its own [`SupportedLanguage::as_str`]. `ALL`
+    /// is what CI compares against `editors/zed/extension.toml`, so an entry
+    /// under a name no `didOpen` could produce would leave that check passing
+    /// while the server stayed silent on the buffer - and it is also what lets
+    /// the comparison stay in Zed's names while knowing nothing about VS
+    /// Code's.
+    #[test]
+    fn every_language_id_names_exactly_one_language() {
+        let mut claimed: Vec<&str> = Vec::new();
+        for language in SupportedLanguage::ALL {
+            let ids = language.lsp_language_ids();
+            assert!(
+                ids.contains(&language.as_str()),
+                "{language:?} does not answer to its own name {:?}",
+                language.as_str()
+            );
+            for id in ids {
+                assert_eq!(
+                    SupportedLanguage::from_lsp_language_id(id),
+                    Some(language),
+                    "in {id:?}"
+                );
+                assert!(!claimed.contains(id), "{id:?} is claimed twice");
+                claimed.push(id);
+            }
         }
     }
 
