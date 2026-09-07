@@ -24,7 +24,7 @@ changes, and copying the code gives you the original.
 
 ## Status
 
-Early. The Zed extension and the language server are in place, **Rust, Go,
+Early. **The Zed and VS Code extensions** and the language server are in place, **Rust, Go,
 JavaScript, TypeScript and TSX** comments are extracted with Tree-sitter, and
 they come back as hovers and as code lenses (a line of their own above the
 comment). **Translation works for real** (candle + FuguMT, about 0.15 s per
@@ -51,10 +51,15 @@ How a comment is read depends on the language it was written in.
 Install the extension. There is no Rust toolchain to set up, nothing to build by
 hand, and no Python.
 
-- **The server** (`codegloss-lsp`) is fetched by the extension, from **the
-  release matching the extension's own version**, so an old extension is never
-  paired with a newer server. A `codegloss-lsp` on `PATH` wins over the download,
-  so building your own stays possible.
+- **The server** (`codegloss-lsp`) is supplied by the extension. How differs by
+  editor, but either way it is **the server matching the extension's own
+  version**: an old extension is never paired with a newer server.
+  - **Zed** fetches the release matching its version. A `codegloss-lsp` on
+    `PATH` wins over that download.
+  - **VS Code** carries the server inside the VSIX, and VS Code picks the VSIX
+    built for your OS and CPU. Nothing is fetched.
+  - Either can be pointed at your own build (`lsp.codegloss.binary.path` under
+    Zed, `codegloss.server.path` under VS Code).
 - **The translation model** (120 MB) is fetched by the server in the background
   after it starts. It answers normally while that happens, showing the comments
   in English, and switches to Japanese once the model arrives. Fetched once,
@@ -92,15 +97,17 @@ source on GitHub, are in view later.
 
 CodeGloss has three display modes in mind.
 
-| Mode | How it looks | Zed setting needed | Status |
-|---|---|---|---|
-| Hover | the translation appears when the cursor is over a comment (with the original quoted below) | none | done |
-| Code lens | the translation appears on a line of its own above the comment | `"code_lens": "on"` | done |
-| Inlay hint | the translation appears inline on the comment's own line | `"inlay_hints": { "enabled": true }` | not yet |
+| Mode | How it looks | Needed under Zed | Needed under VS Code | Status |
+|---|---|---|---|---|
+| Hover | the translation appears when the cursor is over a comment (with the original quoted below) | none | none | done |
+| Code lens | the translation appears on a line of its own above the comment | `"code_lens": "on"` | none (on by default) | done |
+| Inlay hint | the translation appears inline on the comment's own line | `"inlay_hints": { "enabled": true }` | none (on by default) | not yet |
 
-Zed defaults to `"code_lens": "off"` and `"inlay_hints": { "enabled": false }`.
-**Installing the extension alone shows neither the code lenses nor the inlay
-hints.**
+**The editors differ sharply here.** Zed defaults to `"code_lens": "off"` and
+`"inlay_hints": { "enabled": false }`, so **installing the extension alone shows
+neither the code lenses nor the inlay hints**. VS Code has both
+`editor.codeLens` and `editor.inlayHints.enabled` on by default, so installing
+it is enough.
 
 How to write the settings is in
 [DEVELOPERS.en.md, "Configuring the display modes"](DEVELOPERS.en.md#configuring-the-display-modes).

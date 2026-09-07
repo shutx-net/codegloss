@@ -1,0 +1,12 @@
+# Everything the VSIX does not need. The bundle in dist/ is the whole of the
+# extension's code, and `server/` is the binary a platform-specific build puts
+# there - neither may be excluded.
+.vscode/**
+out/**
+node_modules/**
+src/**
+test/**
+build.mjs
+tsconfig*.json
+**/*.map
+**/.gitignore

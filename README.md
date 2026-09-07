@@ -20,7 +20,7 @@ public User findUser(String id) {
 
 ## 状況
 
-開発初期です。Zed 拡張と LSP サーバの骨組みができ、**Rust・Go・JavaScript・
+開発初期です。**Zed 拡張と VS Code 拡張**、および LSP サーバの骨組みができ、**Rust・Go・JavaScript・
 TypeScript・TSX** のコメントを Tree-sitter で抜き出して、ホバーと Code Lens
 （コメント行の上に出る独立した行）に返すところまで動きます。**翻訳も実際に
 動きます**（candle + FuguMT。CPU で 1 文あたり 0.15 秒ほど。ファイルを開いたときの
@@ -43,10 +43,15 @@ TypeScript・TSX** のコメントを Tree-sitter で抜き出して、ホバー
 拡張を入れるだけです。Rust のツールチェインも、手動のビルドも、Python も
 要りません。
 
-- **サーバ**（`codegloss-lsp`）は拡張が取ってきます。取ってくるのは**拡張と
-  同じ版のリリース**なので、拡張が古いままサーバだけ新しくなることはありません。
-  `PATH` に `codegloss-lsp` があればそちらが優先されるので、自分でビルドした
-  ものを使う手は塞がりません。
+- **サーバ**（`codegloss-lsp`）は拡張が用意します。用意のしかたはエディタで
+  違いますが、どちらも**拡張と同じ版のサーバ**になります。拡張が古いまま
+  サーバだけ新しくなることはありません。
+  - **Zed** は拡張と同じ版のリリースを取ってきます。`PATH` に `codegloss-lsp`
+    があればそちらが優先されます。
+  - **VS Code** は VSIX の中にサーバが入っています（自分の OS と CPU に合う
+    VSIX を VS Code が選びます）。取ってくるものはありません。
+  - どちらも設定で自分のビルドを指せます（Zed は `lsp.codegloss.binary.path`、
+    VS Code は `codegloss.server.path`）。
 - **翻訳モデル**（120 MB）はサーバが起動後に裏で取ってきます。ダウンロード中も
   サーバは普通に応答し、コメントは英語のまま出ます。届いた時点で訳文へ
   切り替わります。1 回取れば以後は使い回されます。
@@ -60,7 +65,8 @@ language server は「忙しい」ではなく「壊れている」ように見�
 優先されます。作り方は
 [tools/convert-fugumt/README.md](tools/convert-fugumt/README.md)）。
 
-引数は settings.json の `lsp.codegloss.binary.arguments` に書きます。書き方は
+引数は Zed なら settings.json の `lsp.codegloss.binary.arguments`、VS Code なら
+`codegloss.model.pack` などの個別の設定に書きます。書き方は
 [DEVELOPERS.md の「翻訳モデルを入れて動かす」](DEVELOPERS.md#翻訳モデルを入れて動かす)に。
 
 訳の速さより正しさを優先して、既定ではビームサーチ（幅 4）を使います。貪欲デコードは文を途中で打ち切ることがあり、**訳文は日本語として自然なままなので読者が気づけません**。貪欲法（`--beams 1`）に対する上乗せは 1.07 倍しかないので、速さのために質を落とす理由はほぼありません。実測値は下記のドキュメントに。
@@ -71,20 +77,22 @@ language server は「忙しい」ではなく「壊れている」ように見�
 - 技術選定の根拠: [docs/tech-stack-evaluation.md](docs/tech-stack-evaluation.md)
 - 翻訳の実測値（速度・メモリ・訳文の例）: [docs/model-runtime-notes.md](docs/model-runtime-notes.md)
 
-最初のターゲットは Zed 拡張です。将来的には他のエディタや、GitHub 上でソースを読むためのブラウザ拡張も見据えています。
+Zed と VS Code に対応しています。将来的には他のエディタや、GitHub 上でソースを読むためのブラウザ拡張も見据えています。
 
 ## 表示方法と設定
 
 CodeGloss は 3 通りの表示方法を想定しています。
 
-| 表示方法 | 見え方 | 必要な Zed の設定 | 状況 |
-|---|---|---|---|
-| ホバー | コメントにカーソルを合わせると訳文が出る（下に原文を引用） | 不要 | 実装済み |
-| Code Lens | コメント行の上に、独立した行として訳文が出る | `"code_lens": "on"` | 実装済み |
-| Inlay Hint | コメント行の行内に訳文が出る | `"inlay_hints": { "enabled": true }` | 未実装 |
+| 表示方法 | 見え方 | Zed で要る設定 | VS Code で要る設定 | 状況 |
+|---|---|---|---|---|
+| ホバー | コメントにカーソルを合わせると訳文が出る（下に原文を引用） | 不要 | 不要 | 実装済み |
+| Code Lens | コメント行の上に、独立した行として訳文が出る | `"code_lens": "on"` | 不要（既定で on） | 実装済み |
+| Inlay Hint | コメント行の行内に訳文が出る | `"inlay_hints": { "enabled": true }` | 不要（既定で on） | 未実装 |
 
-Zed の既定値は `"code_lens": "off"` と `"inlay_hints": { "enabled": false }`
-です。**拡張をインストールしただけでは Code Lens と Inlay Hint は表示されません。**
+**ここはエディタで大きく違います。**Zed の既定値は `"code_lens": "off"` と
+`"inlay_hints": { "enabled": false }` なので、**拡張をインストールしただけでは
+Code Lens と Inlay Hint は表示されません。**VS Code は `editor.codeLens` も
+`editor.inlayHints.enabled` も既定で on なので、入れればそのまま出ます。
 
 設定の書き方は [DEVELOPERS.md の「表示方法の設定」](DEVELOPERS.md#表示方法の設定)
 にまとめてあります。**どのファイルに書くかで効いたり効かなかったりする**ので、

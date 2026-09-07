@@ -51,12 +51,18 @@ jobs:
           # extension.toml の version はどのテーブルよりも前にある。
           extension=$(sed -n '1,/^\[/p' editors/zed/extension.toml \
             | sed -n 's/^version *= *"\(.*\)"$/\1/p' | head -1)
+          # VS Code 拡張はサーバのバイナリを VSIX に同梱するので、ここがずれると
+          # 拡張と中のサーバが別の版になる。Zed 側がタグでバイナリを取りに行く
+          # のと同じ拘束で、こちらは「取りに行く先」ではなく「入っているもの」。
+          vscode=$(node -p 'require("./editors/vscode/package.json").version')
 
           [ -n "$workspace" ] || fail "Cargo.toml から版を読み取れませんでした"
           [ "$crate" = "$workspace" ] ||
             fail "editors/zed/Cargo.toml は $crate、ワークスペースは $workspace"
           [ "$extension" = "$workspace" ] ||
             fail "editors/zed/extension.toml は $extension、ワークスペースは $workspace"
+          [ "$vscode" = "$workspace" ] ||
+            fail "editors/vscode/package.json は $vscode、ワークスペースは $workspace"
 
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             tag="$GITHUB_REF_NAME"
@@ -68,9 +74,9 @@ jobs:
             case "${tag#v}" in *.*.*.* | .* | *. | *..*) bad ;; esac
             [ "${tag#v}" = "$workspace" ] ||
               fail "タグ $tag に対して、宣言されている版は $workspace です"
-            echo "OK: 版は $workspace（タグ・ワークスペース・拡張のすべて）"
+            echo "OK: 版は $workspace（タグ・ワークスペース・拡張 2 つのすべて）"
           else
-            echo "OK: 版は $workspace（ワークスペースと拡張）"
+            echo "OK: 版は $workspace（ワークスペースと拡張 2 つ）"
           fi
 
   build:
@@ -162,9 +168,103 @@ jobs:
             dist/*.zip
           if-no-files-found: error
 
+  # VS Code 拡張はプラットフォームごとに VSIX を作り、サーバのバイナリを
+  # その中に同梱する。VS Code 1.61 以降が自分の OS と CPU に合うものを選ぶ。
+  #
+  # 起動時にリリースから落とす形（Zed 拡張がやっていること）にしなかったのは、
+  # そうすると **ビルド行列の target 名とアセット名の対応表が TypeScript にも
+  # う 1 枚できる**からである。同梱なら、その表はこのジョブの中の 1 箇所で済む。
+  # 落とす処理も要らず、オフラインで動き、拡張とサーバの版が構造的にずれない。
+  #
+  # **ビルド行列に構成を足したら、下の targets にも足すこと。**足し忘れると
+  # そのプラットフォームには target 無しの VSIX が当たり、拡張はサーバを
+  # 見つけられずにその旨を出して終わる（起動はする）。
+  vsix:
+    name: vscode extension packages
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: servers
+          merge-multiple: true
+
+      - name: install
+        working-directory: editors/vscode
+        run: npm ci
+
+      # 束ねるのは 1 回でよい。VSIX ごとに違うのは同梱するバイナリだけで、
+      # dist/extension.js は 5 つとも同じものである。
+      - name: compile
+        working-directory: editors/vscode
+        run: npm run compile
+
+      - name: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p 'require("./editors/vscode/package.json").version')
+          mkdir -p vsix
+
+          # 左が上のビルド行列の target、右が vsce の --target。
+          targets="
+          x86_64-unknown-linux-gnu  linux-x64
+          aarch64-unknown-linux-gnu linux-arm64
+          x86_64-apple-darwin       darwin-x64
+          aarch64-apple-darwin      darwin-arm64
+          x86_64-pc-windows-msvc    win32-x64
+          "
+
+          while read -r rust vsce; do
+            [ -n "$rust" ] || continue
+
+            # 前の周回のバイナリを残さない。残すと、展開に失敗した構成に
+            # 別のプラットフォームのサーバが入った VSIX ができてしまう。
+            rm -rf editors/vscode/server
+            mkdir -p editors/vscode/server
+
+            stem="codegloss-lsp-$rust"
+            if [ -f "servers/$stem.tar.gz" ]; then
+              # 書庫の中は $stem/ の 1 階層下。--strip-components でそれを外す。
+              tar -xzf "servers/$stem.tar.gz" -C editors/vscode/server \
+                --strip-components=1 "$stem/codegloss-lsp"
+            elif [ -f "servers/$stem.zip" ]; then
+              unzip -j -o "servers/$stem.zip" "$stem/codegloss-lsp.exe" \
+                -d editors/vscode/server
+            else
+              echo "NG: $stem の書庫がありません" >&2
+              exit 1
+            fi
+
+            # tar は実行ビットを保つが、zip から出したものは保たない。VSIX の
+            # 中で実行ビットが落ちていると、利用者の環境で spawn が EACCES で
+            # 落ちる——作った側からは見えない壊れ方なので、ここで揃える。
+            chmod +x editors/vscode/server/*
+
+            (cd editors/vscode && npx vsce package --no-dependencies \
+              --target "$vsce" --out "../../vsix/codegloss-$version-$vsce.vsix")
+          done <<< "$targets"
+
+          rm -rf editors/vscode/server
+          ls -l vsix
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: codegloss-vsix
+          path: vsix/*.vsix
+          if-no-files-found: error
+
   release:
     name: collect, and release on a tag
-    needs: build
+    needs: [build, vsix]
     runs-on: ubuntu-latest
     # ここは常に走る。集める・数える・照合するまでを、タグを打つ前に
     # 一度でも通しておきたいから。実際に公開する step だけがタグ限定。
@@ -185,7 +285,7 @@ jobs:
           # SHA256SUMS 自身を数えないよう、書庫だけを名指しする。nullglob が
           # 無いと、当たらなかったパターンがそのまま引数になって落ちる。
           shopt -s nullglob
-          sha256sum -- *.tar.gz *.zip > SHA256SUMS
+          sha256sum -- *.tar.gz *.zip *.vsix > SHA256SUMS
           test -s SHA256SUMS
           cat SHA256SUMS
 

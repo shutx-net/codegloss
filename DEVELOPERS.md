@@ -70,6 +70,7 @@ scripts/verify-toolchain.sh
 | `wasm32-wasip2` ターゲット | Zed 拡張は WebAssembly にコンパイルされる |
 | C コンパイラ（Nix では stdenv 由来） | tree-sitter のグラマークレートが C をコンパイルする |
 | `pkg-config` / `openssl` | ネットワーク系クレートが native-tls を引いたときに必要 |
+| Node.js（22 以上） | VS Code 拡張は TypeScript で、VSIX を作るのに使う。サーバの開発には要らない |
 | Python（`protobuf` / `sentencepiece` / `tokenizers`） | `tools/convert-fugumt` がモデルパックを作るのに使う。翻訳の実行には要らない |
 
 Nix ではこの Python は `python3.withPackages` で宣言してある。**`pip install` は使わない**（Nix の Python は書き込めない）。Dev Container 側は PEP 668 によりシステムの Python への `pip install` が拒まれるので、`python3 -m venv` で切る。手順は `tools/convert-fugumt/README.md` にある。
@@ -86,6 +87,7 @@ Cargo.toml          ルートワークスペース（members = ["crates/*"]）
      ├─ codegloss-translator  trait Translator と実装（Passthrough / candle）
      └─ codegloss-lsp         LSP サーバ（配布するネイティブバイナリ）
 editors/zed         Zed 拡張。独立したワークスペース（ルートからは exclude）
+editors/vscode      VS Code 拡張。TypeScript（Cargo ワークスペースの外）
 tools/convert-fugumt  モデルパックを作る Python スクリプト（配布物には入らない）
 ```
 
@@ -290,6 +292,60 @@ cd editors/zed && cargo build --target wasm32-wasip2 --release
 うまく動かないときは `zed: open log` を見る。サーバ側のログの粒度は環境変数
 `CODEGLOSS_LOG`（例 `CODEGLOSS_LOG=debug`）で変えられる。ログは stderr にしか
 出さない（stdout は LSP の JSON-RPC が占有している）。
+
+## VS Code 拡張の動作確認
+
+1. サーバを先にビルドする。Zed 拡張と同じく、こちらもサーバを起動するだけで
+   翻訳処理は持たない。
+
+   ```sh
+   cargo build -p codegloss-lsp
+   ```
+
+2. 拡張を用意する。
+
+   ```sh
+   cd editors/vscode
+   npm install
+   npm run compile     # 型検査 → esbuild で dist/extension.js に束ねる
+   npm test            # サーバの探索と引数の組み立て
+   ```
+
+3. 手元のサーバを指す。**配布する VSIX にはサーバのバイナリが同梱されていて、
+   拡張はそちらを PATH より先に見る。**設定を書かないと、直したはずのコードが
+   動かないように見える。
+
+   ```json
+   {
+     "codegloss.server.path": "/absolute/path/to/codegloss/target/debug/codegloss-lsp"
+   }
+   ```
+
+   キーの接頭辞 `codegloss` は language server id であって、Marketplace での
+   拡張 id（`package.json` の `name`）ではない。
+
+4. VS Code で `editors/vscode` を開き、F5（Run Extension）で拡張開発ホストを
+   起動する。Zed と違ってビルドは手元の npm がやるので、Rust は要らない。
+
+5. `.rs` / `.go` / `.ts` / `.tsx` のファイルを開く。**Code Lens は VS Code では
+   既定で on** なので（`editor.codeLens`）、コメントの 1 つ上に行が増えれば
+   疎通できている。ホバーも設定なしで動く。
+
+   設定を変えるとサーバは自動で再起動する。手で再起動したいときは
+   コマンドパレットの **CodeGloss: Restart Language Server**。
+
+VSIX を手元で作るなら次を実行する。**サーバは同梱されない**（同梱するのは
+リリースワークフローで、リリースアセットを展開して `editors/vscode/server/` に
+置いてから `--target` 付きで作る）。
+
+```sh
+cd editors/vscode && npm run package
+# → editors/vscode/codegloss-<version>.vsix
+```
+
+うまく動かないときは出力パネルの **CodeGloss** を見る。LSP のやりとりまで見たい
+ときは `codegloss.trace.server` を `verbose` にする。サーバ側のログの粒度は
+Zed のときと同じく `CODEGLOSS_LOG` で変えられる。
 
 ## 表示方法の設定
 
