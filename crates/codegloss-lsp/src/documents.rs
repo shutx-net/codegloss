@@ -289,6 +289,32 @@ mod tests {
         );
     }
 
+    /// VS Code spells TSX `typescriptreact`, and the id reaches the registry
+    /// exactly as the client wrote it: nothing here lower-cases it, trims it or
+    /// looks at the file name. While the registry knew only Zed's `tsx` this
+    /// buffer came back with no blocks at all - which is the silent failure a
+    /// user sees as a `.tsx` file simply showing nothing.
+    #[test]
+    fn a_tsx_document_is_read_under_the_id_vs_code_sends() {
+        let store = DocumentStore::new();
+        let uri = Uri::from_str("file:///tmp/hello.tsx").expect("valid file uri");
+        store.open(
+            uri.clone(),
+            "typescriptreact".to_owned(),
+            1,
+            concat!(
+                "/** Greets a user. */\n",
+                "export const Hello = ({ name }: { name: string }) => <p>{name}</p>;\n",
+            )
+            .to_owned(),
+        );
+
+        let document = store.snapshot(&uri).expect("document is open");
+        assert_eq!(document.blocks.len(), 1);
+        assert_eq!(document.blocks[0].rules, CommentRules::Fenced);
+        assert_eq!(document.blocks[0].text, "Greets a user.");
+    }
+
     #[test]
     fn an_unsupported_language_yields_no_blocks() {
         let store = DocumentStore::new();
