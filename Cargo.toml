@@ -50,4 +50,6 @@ tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 # 新しいグラマーを足すときは src/parser.c の LANGUAGE_VERSION を確認する。
 tree-sitter = "0.26"
 tree-sitter-go = "0.25"
+tree-sitter-javascript = "0.25"
 tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"

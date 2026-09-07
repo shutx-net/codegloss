@@ -172,7 +172,23 @@ impl RawComment {
         } else {
             end_byte
         };
-        let content = source.get(content_start..content_end)?;
+        let mut content = source.get(content_start..content_end)?;
+        // A grammar that marks its doc comments hands the marker over as a
+        // node, and `content_start` is then past the whole of it. One that does
+        // not - JavaScript's and Go's single `(comment)` - leaves it in the
+        // text, where `/**` reads as the block opener with a decoration star
+        // stuck to it and the star ends up at the head of the body. It is the
+        // head of every JSDoc block, and `CommentBlock::text` is what a code
+        // lens shows and what a hover falls back to.
+        //
+        // The doc opener needs no name of its own: it is the block opener with
+        // one continuation marker on it, and the registry already says what
+        // both of those are.
+        if doc_marker.is_none() && is_block {
+            content = content
+                .strip_prefix(syntax.block_continuation)
+                .unwrap_or(content);
+        }
 
         let body = if is_block {
             join_block_lines(content, syntax)
@@ -696,5 +712,164 @@ mod tests {
         assert_eq!(texts("/* dangling\n"), ["dangling".to_owned()]);
         assert!(texts("/*").is_empty());
         assert!(texts("/*/").is_empty());
+    }
+
+    fn texts_of(source: &str, language: SupportedLanguage) -> Vec<String> {
+        extract_comment_blocks(source, language)
+            .expect("source parses")
+            .into_iter()
+            .map(|block| block.text)
+            .collect()
+    }
+
+    /// A JSDoc block is one block, and `raw` is the bytes of the file so that
+    /// `CommentShape` can read the star-decorated lines back.
+    #[test]
+    fn a_jsdoc_block_arrives_whole() {
+        let source = concat!(
+            "/**\n",
+            " * Loads a user.\n",
+            " *\n",
+            " * @param {string} id The user id.\n",
+            " */\n",
+            "export function load(id) {}\n",
+        );
+        let jsdoc = extract_comment_blocks(source, SupportedLanguage::JavaScript)
+            .expect("javascript source parses");
+        assert_eq!(jsdoc.len(), 1);
+        assert_eq!(
+            &source[jsdoc[0].start_byte..jsdoc[0].end_byte],
+            jsdoc[0].raw
+        );
+        assert_eq!(
+            CommentShape::parse(&jsdoc[0].raw, jsdoc[0].rules).units(),
+            ["Loads a user.", "The user id."]
+        );
+        // The star of the `/**` is decoration, not the first word. This is what
+        // a code lens shows and what a hover falls back to, and JavaScript's
+        // grammar does not hand the doc marker over as a node the way Rust's
+        // does.
+        assert_eq!(
+            jsdoc[0].text,
+            "Loads a user. @param {string} id The user id."
+        );
+    }
+
+    /// The reason this uses Tree-sitter instead of a regular expression: the
+    /// `//` in a URL belongs to the string, and a template literal can hold a
+    /// whole comment without one being there.
+    #[test]
+    fn a_marker_inside_a_javascript_string_is_not_a_comment() {
+        assert!(
+            texts_of(
+                "const url = \"https://example.com\";\n",
+                SupportedLanguage::JavaScript
+            )
+            .is_empty()
+        );
+        assert!(
+            texts_of(
+                "const s = `/* not a comment */`;\n",
+                SupportedLanguage::JavaScript
+            )
+            .is_empty()
+        );
+    }
+
+    /// TypeScript's own syntax parses, and its comments come out of it. The
+    /// grammar is a different one from JavaScript's, so this is not the row
+    /// above with a different name.
+    #[test]
+    fn typescript_syntax_parses_and_yields_its_comments() {
+        let source = concat!(
+            "// Narrows the argument.\n",
+            "export function widen<T extends object>(value: T): T | null {\n",
+            "  return value as T | null; // keep the cast\n",
+            "}\n",
+        );
+        assert_eq!(
+            texts_of(source, SupportedLanguage::TypeScript),
+            [
+                "Narrows the argument.".to_owned(),
+                "keep the cast".to_owned()
+            ]
+        );
+    }
+
+    /// TSX is a grammar of its own because `<T>` is an element there and a cast
+    /// in TypeScript. A comment inside the markup has to survive that.
+    #[test]
+    fn tsx_markup_parses_and_yields_its_comments() {
+        let source = concat!(
+            "// The greeting.\n",
+            "export const Hello = () => (\n",
+            "  <div>\n",
+            "    {/* Shown to signed-in users. */}\n",
+            "    <span>hi</span>\n",
+            "  </div>\n",
+            ");\n",
+        );
+        assert_eq!(
+            texts_of(source, SupportedLanguage::Tsx),
+            [
+                "The greeting.".to_owned(),
+                "Shown to signed-in users.".to_owned(),
+            ]
+        );
+    }
+
+    /// A tool pragma is not addressed to a reader, so it is dropped - and
+    /// dropping it ends the paragraph it interrupts, the way a rule or an empty
+    /// comment does. The prose beside it keeps its gloss: measured over 5,913
+    /// published files the rule removes 485 blocks and no prose at all
+    /// (`docs/model-runtime-notes.md` §17).
+    #[test]
+    fn an_ecmascript_pragma_is_dropped_and_ends_the_run() {
+        let source = concat!(
+            "// Would love a way to avoid disabling this rule, but we need\n",
+            "// an alias here.\n",
+            "// eslint-disable-next-line @typescript-eslint/no-this-alias\n",
+            "const self = this;\n",
+        );
+        assert_eq!(
+            texts_of(source, SupportedLanguage::TypeScript),
+            [
+                "Would love a way to avoid disabling this rule, but we need an alias here."
+                    .to_owned()
+            ]
+        );
+
+        // Only the languages that name the pragma drop it. In a Rust file the
+        // same line is a sentence about TypeScript, so it neither goes away nor
+        // ends the paragraph - the three lines stay one block.
+        assert_eq!(
+            texts(&source.replace("const self = this;", "let this_ = ();")),
+            [concat!(
+                "Would love a way to avoid disabling this rule, but we need an alias here. ",
+                "eslint-disable-next-line @typescript-eslint/no-this-alias",
+            )
+            .to_owned()]
+        );
+    }
+
+    /// A block of `///` in a JavaScript file is three slashes and no more:
+    /// there is no doc-comment marker in the grammar, so the run merges by
+    /// column and adjacency the way any other does.
+    #[test]
+    fn a_triple_slash_directive_is_dropped_but_a_triple_slash_comment_is_not() {
+        assert!(
+            texts_of(
+                "/// <reference types=\"node\" />\nexport {};\n",
+                SupportedLanguage::TypeScript
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            texts_of(
+                "/// Loads a user.\nexport {};\n",
+                SupportedLanguage::TypeScript
+            ),
+            ["/ Loads a user.".to_owned()]
+        );
     }
 }

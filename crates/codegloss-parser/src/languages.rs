@@ -19,13 +19,20 @@ use tree_sitter::Language;
 
 /// A language CodeGloss knows how to read comments out of.
 ///
-/// More variants (Java, JavaScript, TypeScript, Tsx, Python) follow in a later
-/// phase; the grammar crates are already picked, only the wiring is missing.
+/// More variants (Java, Python) follow in a later phase; the grammar crates are
+/// already picked, only the wiring is missing. Python needs Issue #61 first -
+/// its `#` and its triple quotes are markers `codegloss-core` does not have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SupportedLanguage {
     Rust,
     Go,
+    JavaScript,
+    TypeScript,
+    /// TypeScript with JSX. A language of its own in Zed and a grammar of its
+    /// own in Tree-sitter, because `<T>x` is a cast in one and an element in
+    /// the other.
+    Tsx,
 }
 
 /// The comment markers of one language.
@@ -71,6 +78,18 @@ pub(crate) enum DirectiveSyntax {
     /// Go's `//name:value`. `go/ast`'s `isDirective`, which is what `go/ast`
     /// itself uses to keep these out of a doc comment's text.
     Go,
+    /// JavaScript's and TypeScript's tool pragmas: `// @ts-ignore`,
+    /// `// eslint-disable-next-line no-console`,
+    /// `/// <reference types="node" />`.
+    ///
+    /// Go has one rule and one authority for this; JavaScript has neither. Every
+    /// tool invented its own spelling, so this is a list rather than a rule, and
+    /// the price of a list is that it goes stale. It is kept short on purpose:
+    /// every entry is a form its own tool documents, and a form that reads as a
+    /// sentence is left off however common it is. `// global config is loaded
+    /// here` is ESLint's `global` directive and an English sentence at the same
+    /// time, and the sentence is the one a reader of this tool wants.
+    EcmaScript,
 }
 
 impl DirectiveSyntax {
@@ -85,6 +104,29 @@ impl DirectiveSyntax {
     pub(crate) fn matches(self, body: &str) -> bool {
         match self {
             Self::None => false,
+            // Not Go's rule, and the difference starts at the space. Go reads
+            // the byte right after the marker, so `// export ...` is prose and
+            // `//export` is a directive. Nothing in JavaScript makes that
+            // distinction - TypeScript's own scanner allows any run of
+            // whitespace after the marker, and ESLint trims the comment before
+            // it looks - so here the space is taken off instead of read.
+            //
+            // The leading slashes go with it: a triple-slash directive reaches
+            // this as `/ <reference ... />`, because the marker that came off
+            // was `//`. `///` means nothing else in JavaScript.
+            Self::EcmaScript => {
+                let body = body.trim().trim_start_matches('/').trim_start();
+                ECMASCRIPT_PRAGMAS
+                    .iter()
+                    .any(|pragma| body.starts_with(pragma))
+                    // A triple-slash directive: `<reference path="..." />`,
+                    // `<amd-module name="..." />`. Matched by its shape rather
+                    // than by its tag, the way TypeScript's own
+                    // `tripleSlashXMLCommentStartRegEx` matches it - the tags
+                    // are TypeScript's to add to, and a comment that both opens
+                    // with `<` and closes with `/>` is not a sentence.
+                    || (body.starts_with('<') && body.ends_with("/>"))
+            }
             Self::Go => {
                 if ["line ", "extern ", "export "]
                     .iter()
@@ -112,6 +154,35 @@ impl DirectiveSyntax {
     }
 }
 
+/// The tool pragmas [`DirectiveSyntax::EcmaScript`] drops, each with the tool
+/// that documents it.
+///
+/// Prefixes, so that the rules and the reason a tool is given after the pragma
+/// come off with it: `eslint-disable-next-line no-console -- the CLI prints
+/// here` is one directive, and the part after `--` is addressed to a reviewer
+/// of the rule and not to a reader of the code.
+const ECMASCRIPT_PRAGMAS: [&str; 7] = [
+    // TypeScript. The four are the whole set the compiler knows: `@ts-check`,
+    // `@ts-nocheck`, `@ts-ignore`, `@ts-expect-error`.
+    "@ts-",
+    // ESLint: `eslint-disable`, `eslint-disable-line`,
+    // `eslint-disable-next-line`, `eslint-enable`, `eslint-env`. The hyphen is
+    // part of the prefix - bare `eslint` configures rules inline and is only
+    // read from a block comment, while `// eslint is configured in .eslintrc`
+    // is a sentence. Its `global`, `globals` and `exported` are left off for
+    // the same reason: they are English words first.
+    "eslint-",
+    "prettier-ignore",
+    "biome-ignore",
+    // Coverage tools. `istanbul ignore next`, `c8 ignore start`,
+    // `v8 ignore next`. The bare tool name is not enough on its own - `c8` and
+    // `v8` are words about a runtime as often as they are pragmas - so the
+    // verb is part of the prefix.
+    "istanbul ignore",
+    "c8 ignore",
+    "v8 ignore",
+];
+
 const C_LIKE_SYNTAX: CommentSyntax = CommentSyntax {
     line: "//",
     block_start: "/*",
@@ -130,6 +201,14 @@ const GO_SYNTAX: CommentSyntax = CommentSyntax {
     ..C_LIKE_SYNTAX
 };
 
+/// JavaScript, TypeScript and TSX. The markers are C's, and JSDoc writes an
+/// example with a Markdown fence the way Rustdoc does - indentation on its own
+/// says nothing, so these are [`CommentRules::Fenced`].
+const ECMASCRIPT_SYNTAX: CommentSyntax = CommentSyntax {
+    directives: DirectiveSyntax::EcmaScript,
+    ..C_LIKE_SYNTAX
+};
+
 impl SupportedLanguage {
     /// Every language this build reads, as the `languageId` an editor sends.
     ///
@@ -144,7 +223,13 @@ impl SupportedLanguage {
     ///
     /// A variant missing from here is not quiet: the check above then reports
     /// the language as one `extension.toml` has and this file does not.
-    pub const ALL: [Self; 2] = [Self::Rust, Self::Go];
+    pub const ALL: [Self; 5] = [
+        Self::Rust,
+        Self::Go,
+        Self::JavaScript,
+        Self::TypeScript,
+        Self::Tsx,
+    ];
 
     /// Maps the `languageId` a client sends with `textDocument/didOpen` onto a
     /// grammar. Zed reports Rust as `rust` and Go as `go` (its `LanguageName`
@@ -156,6 +241,9 @@ impl SupportedLanguage {
         match language_id {
             "rust" => Some(Self::Rust),
             "go" => Some(Self::Go),
+            "javascript" => Some(Self::JavaScript),
+            "typescript" => Some(Self::TypeScript),
+            "tsx" => Some(Self::Tsx),
             _ => None,
         }
     }
@@ -177,6 +265,9 @@ impl SupportedLanguage {
         match self {
             Self::Rust => "rust",
             Self::Go => "go",
+            Self::JavaScript => "javascript",
+            Self::TypeScript => "typescript",
+            Self::Tsx => "tsx",
         }
     }
 
@@ -186,6 +277,9 @@ impl SupportedLanguage {
         match self {
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
             Self::Go => tree_sitter_go::LANGUAGE.into(),
+            Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
         }
     }
 
@@ -194,6 +288,11 @@ impl SupportedLanguage {
         match self {
             Self::Rust => include_str!("queries/rust.scm"),
             Self::Go => include_str!("queries/go.scm"),
+            // One query for the three: the TypeScript and TSX grammars are
+            // generated from JavaScript's, so the node is the same node.
+            Self::JavaScript | Self::TypeScript | Self::Tsx => {
+                include_str!("queries/ecmascript.scm")
+            }
         }
     }
 
@@ -201,6 +300,7 @@ impl SupportedLanguage {
         match self {
             Self::Rust => C_LIKE_SYNTAX,
             Self::Go => GO_SYNTAX,
+            Self::JavaScript | Self::TypeScript | Self::Tsx => ECMASCRIPT_SYNTAX,
         }
     }
 }
@@ -333,5 +433,100 @@ mod tests {
             SupportedLanguage::Go.comment_syntax().directives,
             DirectiveSyntax::Go
         );
+    }
+
+    /// Zed reports each of the three by its `LanguageName` lowercased, which is
+    /// what `crates/language_core/src/language_name.rs::lsp_id` does to the
+    /// `name` in `crates/grammars/src/{javascript,typescript,tsx}/config.toml`:
+    /// `"JavaScript"`, `"TypeScript"`, `"TSX"`. All three are built into Zed,
+    /// so no other extension has to be installed for them to arrive.
+    #[test]
+    fn the_ecmascript_family_is_recognised_by_its_lsp_language_ids() {
+        for (id, language) in [
+            ("javascript", SupportedLanguage::JavaScript),
+            ("typescript", SupportedLanguage::TypeScript),
+            ("tsx", SupportedLanguage::Tsx),
+        ] {
+            assert_eq!(SupportedLanguage::from_lsp_language_id(id), Some(language));
+        }
+        // Zed sends the lower-cased name and nothing else. `jsx` is not a
+        // language of its own there - `.jsx` is one of JavaScript's suffixes.
+        for id in ["JavaScript", "TSX", "js", "ts", "jsx", "typescriptreact"] {
+            assert_eq!(
+                SupportedLanguage::from_lsp_language_id(id),
+                None,
+                "in {id:?}"
+            );
+        }
+    }
+
+    /// JSDoc marks an example with a Markdown fence, or with `@example` - never
+    /// with indentation, which is Go's alone. Reading these as `Indented` would
+    /// copy every wrapped line of prose through untranslated.
+    #[test]
+    fn the_ecmascript_family_reads_its_comments_as_fenced() {
+        for language in [
+            SupportedLanguage::JavaScript,
+            SupportedLanguage::TypeScript,
+            SupportedLanguage::Tsx,
+        ] {
+            assert_eq!(language.rules(), CommentRules::Fenced, "in {language:?}");
+            assert_eq!(
+                language.comment_syntax().directives,
+                DirectiveSyntax::EcmaScript,
+                "in {language:?}"
+            );
+        }
+    }
+
+    /// The tool pragmas, and the sentences they are one keystroke away from.
+    ///
+    /// The last group is the point: this is a list and not a rule, so the way
+    /// it fails is by swallowing prose, and the rows below are the prose it
+    /// would swallow if the prefixes were any shorter.
+    #[test]
+    fn an_ecmascript_pragma_speaks_to_a_tool_and_a_comment_does_not() {
+        for body in [
+            " @ts-ignore",
+            "@ts-expect-error",
+            " @ts-expect-error the call is checked at runtime",
+            " @ts-nocheck",
+            " eslint-disable-next-line no-console",
+            " eslint-disable-line ban/ban",
+            " eslint-enable",
+            " prettier-ignore",
+            " biome-ignore lint:",
+            " istanbul ignore next",
+            " c8 ignore start",
+            " v8 ignore next",
+            // A triple-slash directive reaches this with its third slash still
+            // on, because the marker that came off was `//`.
+            "/ <reference types=\"node\" />",
+            "/ <reference no-default-lib=\"true\"/>",
+            // And inside commented-out code, where the pragma is nested behind
+            // a second marker.
+            "   // @ts-expect-error",
+        ] {
+            assert!(DirectiveSyntax::EcmaScript.matches(body), "in {body:?}");
+            // Scoped to the languages that name it: the same line in a Rust
+            // file is a sentence about JavaScript.
+            assert!(!DirectiveSyntax::None.matches(body), "in {body:?}");
+        }
+
+        for body in [
+            " eslint is configured in .eslintrc",
+            " eslintrc lives at the repository root",
+            " c8 is the coverage tool we use",
+            " v8 optimises this shape",
+            " istanbul is no longer maintained",
+            " Compare with <T> and the cast it implies",
+            " prettier ignores this file",
+            " TODO: drop the @ts-ignore below",
+            "",
+            " ",
+            "/",
+        ] {
+            assert!(!DirectiveSyntax::EcmaScript.matches(body), "in {body:?}");
+        }
     }
 }

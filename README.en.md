@@ -24,13 +24,23 @@ changes, and copying the code gives you the original.
 
 ## Status
 
-Early. The Zed extension and the language server are in place, **Rust and Go**
-comments are extracted with Tree-sitter, and they come back as hovers and as code
-lenses (a line of their own above the comment). In a Go doc comment an indented
-run of lines is an example, so it is copied through rather than translated, and
-so are toolchain directives such as `//go:build`. **Translation works for real** (candle +
-FuguMT, about 0.15 s per sentence on a CPU, when a batch of them is translated
-at once as it is when a file is opened).
+Early. The Zed extension and the language server are in place, **Rust, Go,
+JavaScript, TypeScript and TSX** comments are extracted with Tree-sitter, and
+they come back as hovers and as code lenses (a line of their own above the
+comment). **Translation works for real** (candle + FuguMT, about 0.15 s per
+sentence on a CPU, when a batch of them is translated at once as it is when a
+file is opened).
+
+How a comment is read depends on the language it was written in.
+
+- In a **Go** doc comment an indented run of lines is an example, so it is copied
+  through rather than translated. So are toolchain directives such as
+  `//go:build`.
+- In **JavaScript and TypeScript**, what follows a JSDoc tag depends on the tag.
+  The `{string}` and the `id` of `@param {string} id the user id` are a type and
+  an argument's name, so only the description is translated. The body of an
+  `@example` is code and is copied through whole. So are tool pragmas such as
+  `// @ts-ignore` and `// eslint-disable-next-line`.
 
 ### What you need to use it
 
