@@ -139,7 +139,9 @@ pub struct GlossKey(pub [u8; 32]);
 /// - `8` - a doc tag says what follows it: JSDoc's type annotation, name and
 ///   hyphen go into the line's lead, an `@example` body is code, and a tag
 ///   whose argument is a name is copied through whole.
-pub const PIPELINE_VERSION: &str = "8";
+/// - `9` - a line of an example that is nothing but a comment is glossed under
+///   its own marker, and a run of them is one unit.
+pub const PIPELINE_VERSION: &str = "9";
 
 impl GlossKey {
     /// Separator between the hashed fields. NUL cannot appear in a language tag
@@ -197,7 +199,7 @@ mod tests {
                 "Returns the user."
             )
             .to_hex(),
-            "584851349456e7fb7ecca360c06e5856b6ca8d7b79825a7b54d68b51389a6862"
+            "dac2e397b5e4b1861f54e978c9f3df62f2a9b2f268d21c6fc39a45cd49eb5dd7"
         );
     }
 
