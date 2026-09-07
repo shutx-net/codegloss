@@ -41,6 +41,10 @@ How a comment is read depends on the language it was written in.
   an argument's name, so only the description is translated. The body of an
   `@example` is code and is copied through whole. So are tool pragmas such as
   `// @ts-ignore` and `// eslint-disable-next-line`.
+- **A line of an example that is nothing but a comment is translated.** The
+  `// explanation` inside a doctest or an `@example` was written by the same
+  author for the same reader as the paragraph above it. Output markers
+  (`//=>`, `// => 3`) are left as they are.
 
 ### What you need to use it
 

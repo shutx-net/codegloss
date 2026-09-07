@@ -52,6 +52,9 @@ const BLOCK_OPENERS: [&str; 3] = ["/**", "/*!", "/*"];
 const LINE_MARKERS: [&str; 3] = ["///", "//!", "//"];
 /// Closer of a block comment.
 const BLOCK_CLOSER: &str = "*/";
+/// What a comment line inside an example writes in front of the value the line
+/// above it produced. See [`example_comment`] for why there is exactly one.
+const OUTPUT_MARKERS: [&str; 1] = ["=>"];
 /// Markdown code fences. Everything between two of them is copied through.
 ///
 /// Back-ticks only, which is narrower than CommonMark: a run of three or more
@@ -236,6 +239,18 @@ pub fn opens_or_closes_a_rendered_fence(line: &str) -> bool {
         .any(|fence| content.starts_with(fence))
 }
 
+/// The prose being accumulated, and what is emitted in front of it.
+///
+/// A paragraph of a doc comment carries no lead. A run of comment lines inside
+/// an example carries the indentation and the marker they were written with, so
+/// that the gloss of `    // seed the cache` is `    // キャッシュを温める` and
+/// still reads as a comment of the code around it.
+#[derive(Debug)]
+struct Paragraph {
+    lead: String,
+    text: String,
+}
+
 /// One line's worth of the rebuilt gloss.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Piece {
@@ -270,7 +285,7 @@ impl CommentShape {
             CommentRules::Indented => indented_examples(raw, block),
         };
         let mut pieces = Vec::new();
-        let mut paragraph: Option<String> = None;
+        let mut paragraph: Option<Paragraph> = None;
         let mut fenced = false;
         let mut example = false;
 
@@ -289,13 +304,14 @@ impl CommentShape {
                 if leading_tag(content).is_some() {
                     example = false;
                 } else {
-                    flush(&mut paragraph, &mut pieces);
                     // With its indentation, for the reason a fenced line keeps
                     // its own: inside an example the leading whitespace is the
                     // code.
-                    pieces.push(Piece::Verbatim(
-                        after_markers(line, block, index == 0).to_owned(),
-                    ));
+                    copy_example_line(
+                        after_markers(line, block, index == 0),
+                        &mut paragraph,
+                        &mut pieces,
+                    );
                     continue;
                 }
             }
@@ -305,20 +321,22 @@ impl CommentShape {
                 if fence_line {
                     fenced = !fenced;
                 }
-                flush(&mut paragraph, &mut pieces);
                 // Copied through with its indentation: inside a fence the
                 // leading whitespace is the code, not the comment's syntax.
-                pieces.push(Piece::Verbatim(
-                    after_markers(line, block, index == 0).to_owned(),
-                ));
+                // The delimiter lines fall through to the same call: a fence is
+                // not a comment, so nothing there is glossed.
+                copy_example_line(
+                    after_markers(line, block, index == 0),
+                    &mut paragraph,
+                    &mut pieces,
+                );
                 continue;
             }
 
             if let Some(example) = examples.get(index).and_then(Option::as_ref) {
-                flush(&mut paragraph, &mut pieces);
                 // With its indentation: that is the shape of the example, and
                 // under these rules it is the only thing that said so.
-                pieces.push(Piece::Verbatim(example.clone()));
+                copy_example_line(example, &mut paragraph, &mut pieces);
                 continue;
             }
 
@@ -346,11 +364,17 @@ impl CommentShape {
             // Plain prose. It joins the lines above it: those were written as
             // one paragraph and read as one sentence.
             match &mut paragraph {
-                Some(open) => {
-                    open.push(' ');
-                    open.push_str(content);
+                Some(open) if open.lead.is_empty() => {
+                    open.text.push(' ');
+                    open.text.push_str(content);
                 }
-                None => paragraph = Some(content.to_owned()),
+                _ => {
+                    flush(&mut paragraph, &mut pieces);
+                    paragraph = Some(Paragraph {
+                        lead: String::new(),
+                        text: content.to_owned(),
+                    });
+                }
             }
         }
         flush(&mut paragraph, &mut pieces);
@@ -545,13 +569,110 @@ impl GlossPlan {
 }
 
 /// Closes the paragraph being accumulated, if any.
-fn flush(paragraph: &mut Option<String>, pieces: &mut Vec<Piece>) {
-    if let Some(text) = paragraph.take() {
-        pieces.push(Piece::Unit {
-            lead: String::new(),
-            text,
-        });
+fn flush(paragraph: &mut Option<Paragraph>, pieces: &mut Vec<Piece>) {
+    if let Some(Paragraph { lead, text }) = paragraph.take() {
+        pieces.push(Piece::Unit { lead, text });
     }
+}
+
+/// Copies one line of an example through, or - when the line is nothing but a
+/// comment - glosses the prose in it.
+///
+/// `written` is the line with the enclosing comment's markers off and its own
+/// indentation kept, which is what all three kinds of example hand over: a
+/// fenced body, an `@example` body, and a Go span of indented lines.
+///
+/// The prose inside an example is prose. `// keys must be sorted to test them`
+/// is written by the same author, for the same reader, as the paragraph above
+/// the example - the only thing that put it out of reach was that it happened
+/// to sit between two lines of code. Measured over four corpora it is 13,157
+/// lines (`docs/model-runtime-notes.md` §18).
+///
+/// A run of them is one unit, not one per line. Half of the run lines in Rust
+/// are the continuation of a sentence that wrapped, and a fragment handed to a
+/// sentence-level model comes back as a fragment. So the gloss of a comment
+/// that took three lines is one line: it is a gloss of the comment, not a copy
+/// of its line breaks.
+fn copy_example_line(written: &str, paragraph: &mut Option<Paragraph>, pieces: &mut Vec<Piece>) {
+    let Some((lead, text)) = example_comment(written) else {
+        flush(paragraph, pieces);
+        pieces.push(Piece::Verbatim(written.to_owned()));
+        return;
+    };
+
+    match paragraph {
+        // The same lead, so the same comment: a writer who wrapped a sentence
+        // wrote the marker again at the same column. A different column starts
+        // a different comment.
+        Some(open) if open.lead == lead => {
+            open.text.push(' ');
+            open.text.push_str(text);
+        }
+        _ => {
+            flush(paragraph, pieces);
+            *paragraph = Some(Paragraph {
+                lead: lead.to_owned(),
+                text: text.to_owned(),
+            });
+        }
+    }
+}
+
+/// What a comment line inside an example is copied through as, and what is
+/// glossed: `("    // ", "seed the cache")`.
+///
+/// `None` for every other line, which is then copied through whole - a line of
+/// code, a fence delimiter, a blank.
+///
+/// The marker is one of [`LINE_MARKERS`], which is the enclosing comment's
+/// vocabulary rather than the example's. That is right as far as it goes: an
+/// example inside a `//` comment is written in the language whose comments open
+/// with `//`. It is also as far as it can go - a Python example inside a `#`
+/// comment needs Issue #61 before anything here can see it - and the same
+/// limit already applies to every other marker this module knows.
+///
+/// Three things are not prose. The counts are of the lines each one is the
+/// first to reject, over the four corpora of `docs/model-runtime-notes.md` §18
+/// - 2,671 of 13,157 in all:
+///
+/// - **No space after the marker.** `//=> Fri Aug 22 2014` is an output marker
+///   and `//////` is a rule. 1,452 lines. It costs the prose written as
+///   `//Call parse with the input`, which is the smaller half of what it buys.
+/// - **An arrow.** `// => false` is the same output marker with the space
+///   moved, and the convention is JSDoc's, lodash's and date-fns's. 844 lines,
+///   5 of them outside `.js`. Only `=>`: no corpus writes `->`, `==>` or
+///   `\u{21d2}` here, and a rule with no evidence behind it is a rule that will
+///   one day eat a sentence.
+/// - **No two letters in a row.** `// ...`, `// ]`, `// 1` carry nothing to
+///   translate. 375 lines.
+///
+/// One family gets through: a value that spans lines under a `=>`, whose middle
+/// lines carry a month name and so read as prose. 115 lines, all of them in one
+/// package's arrays of dates. Counting brackets across an example to catch them
+/// would cost more than it saves - a prose line with an unbalanced `(` would
+/// then swallow the prose beneath it - so they are left, and named here.
+fn example_comment(written: &str) -> Option<(&str, &str)> {
+    let indentation = written.len() - written.trim_start().len();
+    let marker = LINE_MARKERS
+        .iter()
+        .find(|marker| written[indentation..].starts_with(**marker))?;
+    let lead = indentation + marker.len() + ' '.len_utf8();
+    let text = written
+        .get(..lead)?
+        .ends_with(' ')
+        .then(|| written[lead..].trim())?;
+
+    if OUTPUT_MARKERS.iter().any(|arrow| text.starts_with(arrow)) {
+        return None;
+    }
+    if !text
+        .as_bytes()
+        .windows(2)
+        .any(|pair| pair.iter().all(u8::is_ascii_alphabetic))
+    {
+        return None;
+    }
+    Some((&written[..lead], text))
 }
 
 /// Strips the comment syntax off one line: the opener, the closer, the leading
@@ -1918,6 +2039,11 @@ mod tests {
     /// The body of an `@example` is code and runs to the next tag. Nothing on
     /// those lines says so - they carry no fence and no indentation - which is
     /// why the tag has to say it for them.
+    ///
+    /// The one line of it that is glossed is the one that is nothing but a
+    /// comment: prose written by the same author for the same reader, which
+    /// only happened to sit between two lines of code. The `//=>` beneath it is
+    /// an output marker and stays as it is.
     #[test]
     fn an_example_body_is_code_until_the_next_tag() {
         let raw = concat!(
@@ -1933,7 +2059,7 @@ mod tests {
             " */",
         );
         let shape = CommentShape::parse(raw, CommentRules::Fenced);
-        assert_eq!(shape.units(), ["Loads a user.", "The id."]);
+        assert_eq!(shape.units(), ["Loads a user.", "Load Alice.", "The id."]);
         assert_eq!(
             shape.source(),
             concat!(
@@ -2050,6 +2176,164 @@ mod tests {
             )
             .units(),
             ["Only the first call blocks."]
+        );
+    }
+
+    /// A doctest is code, and the comments a writer put inside it are prose.
+    /// Before this they were copied through with the code around them; the
+    /// only thing that had put them out of reach was where they sat.
+    #[test]
+    fn a_comment_inside_a_fenced_example_is_glossed() {
+        let raw = concat!(
+            "/// Loads a user.\n",
+            "///\n",
+            "/// ```\n",
+            "/// // Build the client first.\n",
+            "/// let client = Client::new();\n",
+            "/// ```",
+        );
+        let shape = CommentShape::parse(raw, CommentRules::Fenced);
+        assert_eq!(shape.units(), ["Loads a user.", "Build the client first."]);
+        // The marker and the indentation are the lead, so the gloss still
+        // reads as a comment of the code around it.
+        assert_eq!(
+            shape.rebuild(&[
+                "ユーザーを読み込む。".to_owned(),
+                "先にクライアントを作る。".to_owned(),
+            ]),
+            concat!(
+                "ユーザーを読み込む。\n",
+                "\n",
+                "```\n",
+                "// 先にクライアントを作る。\n",
+                "let client = Client::new();\n",
+                "```",
+            )
+        );
+    }
+
+    /// A comment that wrapped onto three lines is one comment. Handing a
+    /// sentence-level model a third of a sentence gets a third of a sentence
+    /// back, so the run is one unit - and therefore one line, because a gloss
+    /// is a gloss of the comment and not a copy of where it happened to wrap.
+    /// Half of the run lines measured in Rust are continuations
+    /// (`docs/model-runtime-notes.md` §18).
+    #[test]
+    fn a_wrapped_comment_inside_an_example_is_one_unit() {
+        let raw = concat!(
+            "/// ```\n",
+            "/// // The `Keys` iterator produces keys in arbitrary order, so the\n",
+            "/// // keys must be sorted before they are compared.\n",
+            "/// let mut keys: Vec<_> = map.keys().collect();\n",
+            "/// ```",
+        );
+        let shape = CommentShape::parse(raw, CommentRules::Fenced);
+        assert_eq!(
+            shape.units(),
+            [concat!(
+                "The `Keys` iterator produces keys in arbitrary order, ",
+                "so the keys must be sorted before they are compared.",
+            )]
+        );
+        assert_eq!(
+            shape.rebuild(&["キーは任意の順で返る。".to_owned()]),
+            "```\n// キーは任意の順で返る。\nlet mut keys: Vec<_> = map.keys().collect();\n```"
+        );
+    }
+
+    /// Two comments written at different columns are two comments. The lead is
+    /// what says so, and it is the lead the gloss is emitted under, so merging
+    /// across it would put the second one at the first one's indentation.
+    #[test]
+    fn comments_at_different_columns_do_not_merge() {
+        assert_eq!(
+            CommentShape::parse(
+                "/// ```\n/// // Outer.\n///     // Inner.\n/// ```",
+                CommentRules::Fenced
+            )
+            .units(),
+            ["Outer.", "Inner."]
+        );
+    }
+
+    /// What is not prose, each row a family measured over the four corpora of
+    /// `docs/model-runtime-notes.md` §18. None of them reaches the engine, and
+    /// none of them stops being shown.
+    #[test]
+    fn an_output_marker_inside_an_example_is_not_prose() {
+        for line in [
+            // An output marker, both spellings.
+            "//=> Fri Aug 22 2014 00:00:00",
+            "// => false",
+            "// => ['a', 'b', 'c']",
+            // No space after the marker: a rule, or a marker run.
+            "////////////////",
+            "//comment",
+            // Nothing with two letters in a row to translate.
+            "// ...",
+            "// ]",
+            "// (0, 13)",
+            // Not a comment at all.
+            "let x = 1; // trailing",
+        ] {
+            let raw = format!("/// ```\n/// {line}\n/// ```");
+            assert!(
+                CommentShape::parse(&raw, CommentRules::Fenced)
+                    .units()
+                    .is_empty(),
+                "in {line:?}"
+            );
+        }
+    }
+
+    /// The same rule under the other shape: Go marks an example by indenting
+    /// it, and a comment inside one is the same prose it is inside a fence.
+    /// One question, one answer - which is why #70 covered both.
+    #[test]
+    fn a_comment_inside_an_indented_example_is_glossed() {
+        let raw = concat!(
+            "// Format the sparse map.\n",
+            "//\n",
+            "//\tsp := formatSparse(x)\n",
+            "//\t// Update the size fields in the header block.\n",
+            "//\thdr.Size = n",
+        );
+        let shape = CommentShape::parse(raw, CommentRules::Indented);
+        assert_eq!(
+            shape.units(),
+            [
+                "Format the sparse map.",
+                "Update the size fields in the header block."
+            ]
+        );
+        // The tab the example is written with is part of the lead, so the
+        // gloss stays inside the example.
+        assert_eq!(
+            shape.rebuild(&[
+                "疎マップを整形する。".to_owned(),
+                "ヘッダブロックのサイズ欄を更新する。".to_owned(),
+            ]),
+            concat!(
+                "疎マップを整形する。\n",
+                "\n",
+                "\tsp := formatSparse(x)\n",
+                "\t// ヘッダブロックのサイズ欄を更新する。\n",
+                "\thdr.Size = n",
+            )
+        );
+    }
+
+    /// A fence delimiter goes through the same call and is not a comment, so
+    /// the fence still opens and closes where it was written.
+    #[test]
+    fn a_fence_delimiter_is_not_a_comment() {
+        assert_eq!(
+            CommentShape::parse(
+                "/// ```rust\n/// // Note.\n/// f();\n/// ```",
+                CommentRules::Fenced
+            )
+            .source(),
+            "```rust\n// Note.\nf();\n```"
         );
     }
 }
