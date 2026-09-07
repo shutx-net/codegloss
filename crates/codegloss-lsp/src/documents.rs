@@ -258,6 +258,37 @@ mod tests {
         assert_eq!(document.blocks[0].text, "Return the cached user.");
     }
 
+    /// The seam this file owns: the `languageId` a client sends with `didOpen`
+    /// is the only thing that decides the grammar, and the block that comes
+    /// back carries the rules the worker will mask and rebuild it under.
+    #[test]
+    fn a_typescript_document_is_read_under_typescript() {
+        let store = DocumentStore::new();
+        let uri = Uri::from_str("file:///tmp/user.ts").expect("valid file uri");
+        store.open(
+            uri.clone(),
+            "typescript".to_owned(),
+            1,
+            concat!(
+                "/**\n",
+                " * Loads a user.\n",
+                " *\n",
+                " * @param {string} id The user id.\n",
+                " */\n",
+                "export function load(id: string) {}\n",
+            )
+            .to_owned(),
+        );
+
+        let document = store.snapshot(&uri).expect("document is open");
+        assert_eq!(document.blocks.len(), 1);
+        assert_eq!(document.blocks[0].rules, CommentRules::Fenced);
+        assert_eq!(
+            document.blocks[0].text,
+            "Loads a user. @param {string} id The user id."
+        );
+    }
+
     #[test]
     fn an_unsupported_language_yields_no_blocks() {
         let store = DocumentStore::new();

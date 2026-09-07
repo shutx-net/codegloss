@@ -41,7 +41,17 @@ use std::process::ExitCode;
 
 use codegloss_parser::{SupportedLanguage, corpus, extract_comment_blocks};
 
-const USAGE: &str = "usage: extract [--lang rust|go] <file>...";
+/// The languages `--lang` will take, spelled the way an editor spells them.
+///
+/// Built from the registry rather than written out, so that a language added
+/// there cannot be missing from the one line that tells a reader it exists.
+fn usage() -> String {
+    let languages: Vec<&str> = SupportedLanguage::ALL
+        .iter()
+        .map(|language| language.as_str())
+        .collect();
+    format!("usage: extract [--lang {}] <file>...", languages.join("|"))
+}
 
 fn main() -> ExitCode {
     let mut arguments = std::env::args().skip(1).peekable();
@@ -49,13 +59,13 @@ fn main() -> ExitCode {
     if arguments.peek().is_some_and(|first| first == "--lang") {
         arguments.next();
         let Some(named) = arguments.next() else {
-            eprintln!("{USAGE}");
+            eprintln!("{}", usage());
             return ExitCode::FAILURE;
         };
         match SupportedLanguage::from_lsp_language_id(&named) {
             Some(chosen) => language = chosen,
             None => {
-                eprintln!("unknown language {named:?}\n{USAGE}");
+                eprintln!("unknown language {named:?}\n{}", usage());
                 return ExitCode::FAILURE;
             }
         }
@@ -63,7 +73,7 @@ fn main() -> ExitCode {
 
     let paths: Vec<PathBuf> = arguments.map(PathBuf::from).collect();
     if paths.is_empty() {
-        eprintln!("{USAGE}");
+        eprintln!("{}", usage());
         return ExitCode::FAILURE;
     }
 

@@ -386,13 +386,31 @@ fn url(rest: &str) -> Option<usize> {
 /// same reason. Swallowing the rest of the comment behind a stray brace would
 /// be worse than leaving the brace where it is.
 fn inline_doc_tag(rest: &str) -> Option<usize> {
-    let body = rest.strip_prefix('{')?;
     // The tag word is whatever `doc_tag` calls one, so the two rules cannot
     // drift apart over what `@name` means.
-    doc_tag(body)?;
+    doc_tag(rest.strip_prefix('{')?)?;
+    braced_span(rest)
+}
 
-    // Depth, not the first `}`: the body of `{@code {1, 2}}` carries braces of
-    // its own, and the construct ends where they are all closed.
+/// The length of the balanced `{ ... }` that `rest` opens with, closing brace
+/// included, or `None` if it does not open with one or never closes on this
+/// line.
+///
+/// Depth, not the first `}`: the body of `{@code {1, 2}}` carries braces of its
+/// own, and the construct ends where they are all closed.
+///
+/// An unbalanced `{` is not a match, and neither is one whose `}` is on the
+/// next line - the refusal [`inline_code`] makes of a lone back quote, for the
+/// same reason. Swallowing the rest of the comment behind a stray brace would
+/// be worse than leaving the brace where it is.
+///
+/// Shared with `docblock`, which reads a JSDoc type annotation
+/// (`@param {Array<string>} names`) with it. That is a different construct
+/// under a different rule - it has no `@`, and it is taken into the line's lead
+/// rather than masked - but where a brace closes is one question, and two
+/// answers to it would disagree over `{Object.<string, {a: number}>}`.
+pub(crate) fn braced_span(rest: &str) -> Option<usize> {
+    let body = rest.strip_prefix('{')?;
     let mut depth = 1usize;
     for (offset, character) in body.char_indices() {
         match character {

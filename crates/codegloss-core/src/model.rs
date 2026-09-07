@@ -136,7 +136,10 @@ pub struct GlossKey(pub [u8; 32]);
 ///   fence.
 /// - `7` - a block carries the shape rules of its language, and they are part
 ///   of the key.
-pub const PIPELINE_VERSION: &str = "7";
+/// - `8` - a doc tag says what follows it: JSDoc's type annotation, name and
+///   hyphen go into the line's lead, an `@example` body is code, and a tag
+///   whose argument is a name is copied through whole.
+pub const PIPELINE_VERSION: &str = "8";
 
 impl GlossKey {
     /// Separator between the hashed fields. NUL cannot appear in a language tag
@@ -194,7 +197,7 @@ mod tests {
                 "Returns the user."
             )
             .to_hex(),
-            "ae2414b77fa4f402d49b848c47c452b28c69e05894a9ea5bc02fa8934804ce22"
+            "584851349456e7fb7ecca360c06e5856b6ca8d7b79825a7b54d68b51389a6862"
         );
     }
 

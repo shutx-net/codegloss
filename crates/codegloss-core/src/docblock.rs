@@ -42,7 +42,7 @@
 //! [`CommentBlock::text`]: crate::CommentBlock::text
 //! [`CommentBlock::raw`]: crate::CommentBlock::raw
 
-use crate::preserve::{Masked, mask};
+use crate::preserve::{Masked, braced_span, mask};
 use crate::sentence::{engine_form, join_sentences, split_sentences};
 use crate::{CommentRules, Segment};
 
@@ -69,8 +69,113 @@ const FENCES: [&str; 1] = ["```"];
 /// [`opens_or_closes_a_rendered_fence`] alone. The two are not one set and a
 /// copy of it - they answer different questions, and that function says which.
 const RENDERED_FENCES: [&str; 2] = ["```", "~~~"];
+/// What a doc tag writes between itself and its prose.
+///
+/// Javadoc and JSDoc share the `@tag` shape and disagree about what follows it,
+/// so this cannot be read off the line alone: `@throws Error the request
+/// failed` names the exception in Javadoc, and JSDoc writes the same thing as
+/// `@throws {Error} the request failed`. Both have to reach the engine as `the
+/// request failed` and come back under a tag line that still parses.
+///
+/// The vocabulary of doc comments, not of languages: `codegloss-core` may hold
+/// it for the same reason it holds `{@code ...}` and a Markdown fence, and
+/// [`CommentRules`] stays the one thing the parser has to say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TagArguments {
+    /// Prose, after an optional type. `@returns {Promise<User>} the user`,
+    /// `@summary`, `@deprecated`. The default, and what an unknown tag gets - a
+    /// tag family nobody has heard of is far more likely to describe something
+    /// than to name it, and guessing that way costs an English line where
+    /// guessing the other way costs a mistranslated identifier.
+    Prose,
+    /// An identifier, then prose. Javadoc writes `@param id the user id` and
+    /// JSDoc writes `@param {string} id The user id.`, and `id` is the name of
+    /// an argument either way - never a word the engine should see.
+    Name,
+    /// One identifier, written either way. Javadoc spells the exception as a
+    /// bare word (`@throws IllegalStateException if ...`) and JSDoc spells it
+    /// as a type (`@throws {Error} Thrown if ...`); it is the same slot, so
+    /// taking a word as well as a type would eat the first word of the prose.
+    TypeOrName,
+    /// Nothing after the tag is prose. The argument names something - a person,
+    /// a module, a version, a category - and a translation of a name is a
+    /// different name.
+    Opaque,
+    /// Code, on the lines that follow. JSDoc's `@example` takes everything up
+    /// to the next tag, and this is the only entry whose meaning reaches past
+    /// its own line.
+    Example,
+}
+
 /// Tags whose first argument is an identifier by definition, never prose.
-const TAGS_WITH_A_NAME: [&str; 4] = ["@param", "@throws", "@exception", "@arg"];
+const TAGS_WITH_A_NAME: [&str; 9] = [
+    // Javadoc and JSDoc, and JSDoc's two spellings of each.
+    "@param",
+    "@arg",
+    "@argument",
+    "@property",
+    "@prop",
+    "@typedef",
+    "@callback",
+    // A type parameter is named the same way. `@typeParam` is TSDoc's spelling
+    // and carries its capital: a tag is matched as it is written.
+    "@template",
+    "@typeParam",
+];
+
+/// Tags with one identifier slot that either convention may fill.
+const TAGS_WITH_A_TYPE_OR_A_NAME: [&str; 2] = ["@throws", "@exception"];
+
+/// Tags whose argument names something instead of describing it.
+///
+/// Measured over 5,913 files of published JavaScript and TypeScript, these put
+/// 3,975 lines of identifiers, people's names, categories and version numbers
+/// in front of the engine, and five of them - `@category`, `@name`, `@author`,
+/// `@memberOf`, `@since` - account for 3,944 of those
+/// (`docs/model-runtime-notes.md` §17.3). The other nine appear nowhere in that
+/// corpus and are here on the rule rather than on a count: whatever a JSDoc
+/// reference calls the argument, it is a name.
+const TAGS_WITH_AN_OPAQUE_ARGUMENT: [&str; 18] = [
+    "@alias",
+    "@augments",
+    "@author",
+    "@borrows",
+    "@category",
+    "@copyright",
+    "@default",
+    "@extends",
+    "@lends",
+    "@license",
+    "@memberOf",
+    "@memberof",
+    "@mixes",
+    "@module",
+    "@name",
+    "@requires",
+    "@since",
+    "@version",
+];
+
+/// The tag that introduces an example.
+///
+/// One entry rather than a list, and a constant rather than a literal in
+/// [`CommentShape::parse`], so that the tag's name is written once.
+const TAG_WITH_AN_EXAMPLE: &str = "@example";
+
+/// What follows `tag`, which is a tag word spelled with its `@`.
+fn tag_arguments(tag: &str) -> TagArguments {
+    if TAGS_WITH_A_NAME.contains(&tag) {
+        TagArguments::Name
+    } else if TAGS_WITH_A_TYPE_OR_A_NAME.contains(&tag) {
+        TagArguments::TypeOrName
+    } else if TAGS_WITH_AN_OPAQUE_ARGUMENT.contains(&tag) {
+        TagArguments::Opaque
+    } else if tag == TAG_WITH_AN_EXAMPLE {
+        TagArguments::Example
+    } else {
+        TagArguments::Prose
+    }
+}
 
 /// Whether a line opens or closes a fence **CodeGloss copies through**.
 ///
@@ -167,9 +272,33 @@ impl CommentShape {
         let mut pieces = Vec::new();
         let mut paragraph: Option<String> = None;
         let mut fenced = false;
+        let mut example = false;
 
         for (index, line) in raw.lines().enumerate() {
             let content = strip_markers(line, block, index == 0);
+
+            // The body of an `@example` is code, and it runs to the next tag -
+            // JSDoc's own rule, and the only one available: the body is not
+            // fenced (22 of 1,574 examples in the measured corpus open with a
+            // fence) and not indented either, so nothing on the line itself
+            // says it is code. Which means a line of the example that begins
+            // with an `@` ends it, exactly as it would for JSDoc: a decorator
+            // written at the start of a line inside an example is read as a
+            // tag by both.
+            if example {
+                if leading_tag(content).is_some() {
+                    example = false;
+                } else {
+                    flush(&mut paragraph, &mut pieces);
+                    // With its indentation, for the reason a fenced line keeps
+                    // its own: inside an example the leading whitespace is the
+                    // code.
+                    pieces.push(Piece::Verbatim(
+                        after_markers(line, block, index == 0).to_owned(),
+                    ));
+                    continue;
+                }
+            }
 
             let fence_line = opens_or_closes_a_fence(content);
             if fenced || fence_line {
@@ -200,6 +329,8 @@ impl CommentShape {
             }
 
             if let Some((lead, prose)) = lead_of(content) {
+                example = leading_tag(content)
+                    .is_some_and(|(tag, _)| tag_arguments(tag) == TagArguments::Example);
                 flush(&mut paragraph, &mut pieces);
                 pieces.push(if prose.is_empty() {
                     Piece::Verbatim(lead.trim_end().to_owned())
@@ -673,8 +804,15 @@ fn lead_of(content: &str) -> Option<(String, &str)> {
     tag_lead(content).or_else(|| marker_lead(content))
 }
 
-/// `@return `, `@param name `, `@throws Type `.
-fn tag_lead(content: &str) -> Option<(String, &str)> {
+/// The tag a line opens with, and what follows it: `("@param", "{string} id
+/// The user id.")`.
+///
+/// A tag word is an `@` and the ASCII letters after it, which is the same rule
+/// `preserve`'s masking reads a tag by. Split out of [`tag_lead`] because
+/// [`CommentShape::parse`] needs the tag alone: whether a line ends an
+/// `@example` is a question about the tag, asked of lines that are not
+/// otherwise looked at.
+fn leading_tag(content: &str) -> Option<(&str, &str)> {
     let letters = content
         .strip_prefix('@')?
         .bytes()
@@ -683,18 +821,84 @@ fn tag_lead(content: &str) -> Option<(String, &str)> {
     if letters == 0 {
         return None;
     }
-
     let (tag, rest) = content.split_at('@'.len_utf8() + letters);
-    let rest = rest.trim_start();
+    Some((tag, rest.trim_start()))
+}
+
+/// The length of the JSDoc type annotation `rest` opens with, braces included.
+///
+/// `@param {Array<string>} names`, `@returns {Promise<User>} the user`,
+/// `@type {import('./user').User}`. Where the braces close is
+/// [`braced_span`]'s answer and not a second copy of it - the two constructs
+/// differ in what they mean and not in how they are delimited.
+///
+/// `{@link User}` is not one. It is an inline tag, `preserve` masks it as a
+/// single span, and taking it into a line's lead here would hide it from that
+/// and leave the label untranslated for no reason. The test is `{@` rather
+/// than the tag rule `preserve` uses, because nothing that starts `{@` is a
+/// type in either convention, and answering "not a type" is all that is needed
+/// here.
+fn type_annotation(rest: &str) -> Option<usize> {
+    if rest.starts_with("{@") {
+        return None;
+    }
+    braced_span(rest)
+}
+
+/// `@return `, `@param name `, `@param {string} id `, `@throws Type `.
+///
+/// Returns the text emitted in front of the prose and the prose itself. What
+/// goes in the lead is what a translation must not touch: the tag, the type
+/// annotation JSDoc writes after it, the name of the thing being documented,
+/// and the hyphen JSDoc lets a writer put between the two.
+fn tag_lead(content: &str) -> Option<(String, &str)> {
+    let (tag, mut rest) = leading_tag(content)?;
+    let arguments = tag_arguments(tag);
+
+    // Nothing after the tag is prose, so the line is copied through whole
+    // rather than taken apart. `@example` joins it here because its own line
+    // carries no text either - what follows it is on the lines below, and
+    // `CommentShape::parse` is what reads those.
+    if matches!(arguments, TagArguments::Opaque | TagArguments::Example) {
+        return Some((content.to_owned(), ""));
+    }
+
+    let mut lead = format!("{tag} ");
+
+    let mut typed = false;
+    if let Some(length) = type_annotation(rest) {
+        lead.push_str(&rest[..length]);
+        lead.push(' ');
+        rest = rest[length..].trim_start();
+        typed = true;
+    }
 
     // `@param id the user id`: `id` names an argument, so it is an identifier
-    // whatever it looks like, and the engine never needs to see it.
-    if TAGS_WITH_A_NAME.contains(&tag) && !rest.is_empty() {
+    // whatever it looks like, and the engine never needs to see it. A type
+    // fills the same slot for `@throws`, which is why that one asks.
+    let takes_a_name = match arguments {
+        TagArguments::Name => true,
+        TagArguments::TypeOrName => !typed,
+        _ => false,
+    };
+    if takes_a_name && !rest.is_empty() {
         let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
         let (name, tail) = rest.split_at(end);
-        return Some((format!("{tag} {name} "), tail.trim_start()));
+        lead.push_str(name);
+        lead.push(' ');
+        rest = tail.trim_start();
     }
-    Some((format!("{tag} "), rest))
+
+    // JSDoc lets a writer separate the name from the description with a
+    // hyphen, and reads it as punctuation rather than as text. So does this:
+    // handing `- The name of the user.` to the engine asks it to translate a
+    // sentence that starts with a dangling list marker.
+    if let Some(tail) = rest.strip_prefix("- ") {
+        lead.push_str("- ");
+        rest = tail.trim_start();
+    }
+
+    Some((lead, rest))
 }
 
 /// `- `, `+ `, `1. `, `# ` - the Markdown decoration of a line.
@@ -1605,5 +1809,247 @@ mod tests {
                 "in {raw:?}"
             );
         }
+    }
+
+    /// A JSDoc block, as JSDoc's own reference writes one: a type in braces
+    /// after the tag, then the name of the argument, then the description.
+    const JSDOC: &str = concat!(
+        "/**\n",
+        " * Returns the currently authenticated user.\n",
+        " *\n",
+        " * @param {string} id The user id.\n",
+        " * @returns {Promise<User>} the user\n",
+        " * @throws {NotFoundError} Thrown when no user has that id.\n",
+        " */",
+    );
+
+    /// The type and the name are the tag's arguments, not its prose. Before
+    /// this, `@param {string} id ...` handed `id The user id.` to the engine -
+    /// the type had filled the name's slot - and `@returns {Promise<User>} the
+    /// user` handed over the type itself.
+    #[test]
+    fn a_jsdoc_type_and_name_stay_out_of_the_engine() {
+        assert_eq!(
+            CommentShape::parse(JSDOC, CommentRules::Fenced).units(),
+            [
+                "Returns the currently authenticated user.",
+                "The user id.",
+                "the user",
+                "Thrown when no user has that id.",
+            ]
+        );
+    }
+
+    /// And they come back where they were written.
+    #[test]
+    fn the_structure_of_a_jsdoc_block_survives_the_round_trip() {
+        assert_eq!(
+            CommentShape::parse(JSDOC, CommentRules::Fenced).source(),
+            concat!(
+                "Returns the currently authenticated user.\n",
+                "\n",
+                "@param {string} id The user id.\n",
+                "@returns {Promise<User>} the user\n",
+                "@throws {NotFoundError} Thrown when no user has that id.",
+            )
+        );
+    }
+
+    /// Javadoc names the exception with a bare word and JSDoc names it with a
+    /// type. It is one slot, so taking a word as well as a type would eat
+    /// `Thrown` off the front of the description - which is what the row above
+    /// pins from the other side.
+    #[test]
+    fn one_identifier_slot_is_filled_either_way() {
+        for (raw, units) in [
+            (
+                "/** @throws AuthenticationException if authentication failed */",
+                vec!["if authentication failed"],
+            ),
+            (
+                "/** @throws {Error} Thrown if authentication failed. */",
+                vec!["Thrown if authentication failed."],
+            ),
+            (
+                "/** @exception {RangeError} Thrown when out of range. */",
+                vec!["Thrown when out of range."],
+            ),
+        ] {
+            assert_eq!(
+                CommentShape::parse(raw, CommentRules::Fenced).units(),
+                units,
+                "in {raw:?}"
+            );
+        }
+    }
+
+    /// A tag whose argument names something has no prose at all, so the line is
+    /// copied through. A person's name is not a sentence, and a version number
+    /// translated is a different version number.
+    #[test]
+    fn a_tag_that_names_something_is_copied_through() {
+        let raw = concat!(
+            "/**\n",
+            " * Formats a date.\n",
+            " *\n",
+            " * @name format\n",
+            " * @author Sasha Koss\n",
+            " * @category Common Helpers\n",
+            " * @since 2.0.0\n",
+            " * @memberOf _\n",
+            " */",
+        );
+        let shape = CommentShape::parse(raw, CommentRules::Fenced);
+        assert_eq!(shape.units(), ["Formats a date."]);
+        assert_eq!(
+            shape.source(),
+            concat!(
+                "Formats a date.\n",
+                "\n",
+                "@name format\n",
+                "@author Sasha Koss\n",
+                "@category Common Helpers\n",
+                "@since 2.0.0\n",
+                "@memberOf _",
+            )
+        );
+    }
+
+    /// The body of an `@example` is code and runs to the next tag. Nothing on
+    /// those lines says so - they carry no fence and no indentation - which is
+    /// why the tag has to say it for them.
+    #[test]
+    fn an_example_body_is_code_until_the_next_tag() {
+        let raw = concat!(
+            "/**\n",
+            " * Loads a user.\n",
+            " *\n",
+            " * @example\n",
+            " * // Load Alice.\n",
+            " * const user = await load('alice');\n",
+            " * //=> { name: 'alice' }\n",
+            " *\n",
+            " * @param {string} id The id.\n",
+            " */",
+        );
+        let shape = CommentShape::parse(raw, CommentRules::Fenced);
+        assert_eq!(shape.units(), ["Loads a user.", "The id."]);
+        assert_eq!(
+            shape.source(),
+            concat!(
+                "Loads a user.\n",
+                "\n",
+                "@example\n",
+                "// Load Alice.\n",
+                "const user = await load('alice');\n",
+                "//=> { name: 'alice' }\n",
+                "\n",
+                "@param {string} id The id.",
+            )
+        );
+    }
+
+    /// An example's own indentation is the code's, the way a fence's is.
+    #[test]
+    fn an_example_body_keeps_its_indentation() {
+        let raw = concat!(
+            "/**\n",
+            " * @example\n",
+            " * if (user) {\n",
+            " *   greet(user);\n",
+            " * }\n",
+            " */",
+        );
+        assert_eq!(
+            CommentShape::parse(raw, CommentRules::Fenced).source(),
+            "@example\nif (user) {\n  greet(user);\n}"
+        );
+    }
+
+    /// `{@link User}` is an inline tag, not a type: `preserve` masks it as one
+    /// construct, and taking it into the lead would hide it from that and leave
+    /// the label in English for nothing.
+    #[test]
+    fn an_inline_tag_after_a_tag_word_is_not_a_type() {
+        assert_eq!(
+            CommentShape::parse(
+                "/** @see {@link User} for the shape. */",
+                CommentRules::Fenced
+            )
+            .units(),
+            ["{@link User} for the shape."]
+        );
+    }
+
+    /// A brace that never closes on the line is not a type. Swallowing the rest
+    /// of the comment behind a stray `{` would be worse than leaving it where
+    /// it is - the refusal `braced_span` makes, reached from here.
+    #[test]
+    fn an_unbalanced_brace_is_not_a_type() {
+        assert_eq!(
+            CommentShape::parse("/** @returns {string the user */", CommentRules::Fenced).units(),
+            ["{string the user"]
+        );
+    }
+
+    /// JSDoc lets a writer put a hyphen between the name and the description
+    /// and reads it as punctuation. So does this: it is a list marker to the
+    /// engine otherwise.
+    #[test]
+    fn the_hyphen_between_a_name_and_its_description_is_punctuation() {
+        for (raw, units) in [
+            (
+                "/** @param {string} name - The name of the user. */",
+                vec!["The name of the user."],
+            ),
+            (
+                "/** @typeParam T - The element type. */",
+                vec!["The element type."],
+            ),
+            // A hyphen with no space after it is a minus sign, not a
+            // separator.
+            ("/** @returns -1 when absent */", vec!["-1 when absent"]),
+        ] {
+            assert_eq!(
+                CommentShape::parse(raw, CommentRules::Fenced).units(),
+                units,
+                "in {raw:?}"
+            );
+        }
+    }
+
+    /// A JSDoc name is not always an identifier - an optional argument is
+    /// written in brackets, with its default inside them - and none of it is
+    /// prose.
+    #[test]
+    fn an_optional_argument_keeps_its_brackets_out_of_the_engine() {
+        assert_eq!(
+            CommentShape::parse(
+                concat!(
+                    "/**\n",
+                    " * @param {Object} [options] - Optional settings.\n",
+                    " * @param {boolean} [options.force=false] Overwrite the file.\n",
+                    " */",
+                ),
+                CommentRules::Fenced
+            )
+            .units(),
+            ["Optional settings.", "Overwrite the file."]
+        );
+    }
+
+    /// A tag nobody has heard of describes something rather than naming it.
+    /// Guessing the other way would leave prose in English for every tag a
+    /// house style invented.
+    #[test]
+    fn an_unknown_tag_takes_prose() {
+        assert_eq!(
+            CommentShape::parse(
+                "/** @remarks Only the first call blocks. */",
+                CommentRules::Fenced
+            )
+            .units(),
+            ["Only the first call blocks."]
+        );
     }
 }

@@ -208,6 +208,44 @@ Zed の Go は本体組み込みで、拡張が提供するものではない。
 - [ ] `//go:build` の行にレンズが出なくなっている
   - 所見:
 
+### 2.7 JavaScript / TypeScript / TSX（Issue #30。**すべて未確認**）
+
+3 つとも Zed 本体組み込みで、拡張が提供するものではない。`extension.toml` に
+書いた `"JavaScript"` / `"TypeScript"` / `"TSX"` は zed main の
+`crates/grammars/src/{javascript,typescript,tsx}/config.toml` の `name` と、LSP に
+送られる `languageId` が `LanguageName::lsp_id()` ＝ `"Plain Text"` 以外は
+`name.to_lowercase()` であること（`crates/language_core/src/language_name.rs`）を
+**一次情報で確認して**決めた値だが、利用者が動かしている版でそうかは確かめられて
+いない。実測は `docs/model-runtime-notes.md` §17。
+
+以下は実機を持つ人間が埋める。**推測を所見として書かないこと。**
+
+- [ ] `.js` / `.ts` / `.tsx` のバッファで `codegloss-lsp` が起動する
+      （`languages` の 3 つがそれぞれ当たる）
+  - 所見:
+- [ ] `.jsx` のバッファでも起動する（Zed では JSX は JavaScript の
+      `path_suffixes` の 1 つで、別の言語ではない）
+  - 所見:
+- [ ] typescript-language-server / vtsls と並走して、両方のレンズ／ホバーが出る
+  - 所見:
+- [ ] **`@example` の本文がどう描かれるか。**フェンスも字下げも無い生の行が
+      `Piece::Verbatim` として並ぶので、renderer は段落として繋げて描くはずである
+      （コーパスの例 1,574 件のうち、フェンスで始まるのは `.d.ts` の 22 件だけ。
+      `docs/model-runtime-notes.md` §17.4）。コードが 1 行に潰れて出ていないか
+  - 所見:
+- [ ] `@param {string} id ...` の gloss で、`{string}` が Markdown に食われずに
+      そのまま出るか（`{` は CommonMark では特別な文字ではないが、Zed の
+      renderer が何をするかは確かめていない）
+  - 所見:
+- [ ] `@example` の中の `// コメント`（コーパスで 3,704 行）が英語のまま出る。
+      読み手にとって邪魔か——**これは意図した挙動で、代償として選んである**
+      （`docs/model-runtime-notes.md` §17.9）
+  - 所見:
+- [ ] `// @ts-ignore` や `// eslint-disable-next-line` の行にレンズが出なくなっている
+  - 所見:
+- [ ] `/// <reference types="node" />` の行にレンズが出なくなっている
+  - 所見:
+
 ## 3. 性能の実測値（Zed 無しで測定・実測）
 
 `tech-stack-evaluation.md` 8.3「大きなファイルでコメント数が多い場合の再計算
