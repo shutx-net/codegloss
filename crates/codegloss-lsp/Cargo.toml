@@ -14,12 +14,23 @@ codegloss-core = { path = "../codegloss-core" }
 codegloss-parser = { path = "../codegloss-parser" }
 codegloss-translator = { path = "../codegloss-translator" }
 dashmap.workspace = true
+# `log` ファサード経由の記録を橋渡しするため（src/logging.rs）。**新しいクレートは
+# 1 つも増えない**: 実測で `log v0.4.34` は既定ツリー（81 クレート）にも candle
+# ツリー（199 クレート）にも既に居り、直接依存にしても数は動かない。candle ツリーで
+# 引いているのは rustls / rustls-platform-verifier / tokenizers（0.22.2 と 0.23.1 の
+# 両方）/ ureq / ureq-proto——**どれも tracing-log ではない**ので、tracing-subscriber
+# を外しても橋は残る。既定ツリーで `log` を引いているのは今のところ tracing-log
+# だけで、`log` で記録するクレートも入っていないが、optional にはしない: 橋の実装が
+# feature で分かれると、既定の `cargo test` がそれを一度も通らなくなる。
+log.workspace = true
 anyhow = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
 tokio.workspace = true
 tower-lsp-server.workspace = true
+# facade だけ。subscriber は `src/logging.rs` が持っているので
+# tracing-subscriber は引かない（**`tracing` は残す**——tower-lsp-server が
+# どのみち引くので、こちらの使用をやめても 1 クレートも減らない）。
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 # IMPORTANT: candle は既定に入れない。既定の `cargo build` / `cargo test` は
 # candle 無しで通し、実モデルを積むリリースビルドだけ `--features candle` を

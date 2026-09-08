@@ -333,6 +333,32 @@ When something does not work, look at `zed: open log`. The server's log level is
 set with `CODEGLOSS_LOG` (for example `CODEGLOSS_LOG=debug`). Logs go to stderr
 only; stdout carries the LSP's JSON-RPC.
 
+What you can write is the part of `RUST_LOG` everybody uses, and no more: **span
+names, field predicates and regular expressions do not work** (what reads the
+variable is not `tracing-subscriber`'s `EnvFilter` but the implementation in
+`crates/codegloss-lsp/src/logging.rs`). The levels are the six `error` / `warn` /
+`info` / `debug` / `trace` / `off`, in any case (and, as in `RUST_LOG`, as the
+numbers `0`-`5`). `off` drops errors too.
+
+| Written | Meaning |
+|---|---|
+| `debug` | a bare level, applying to everything no directive names |
+| `warn,codegloss_lsp::translation=debug` | `warn` everywhere, `debug` for the target named |
+| `codegloss_lsp=debug` | with no bare level the list is a **whitelist**: anything not named logs nothing, `error` included |
+
+A target matches on any **prefix** of the module path (`codegloss` covers
+`codegloss_lsp::translation`), and where several match, **the longest one decides
+on its own**. It is not "whichever matches may let it through", so
+`debug,codegloss_lsp::translation=warn` drops that target's `debug`. A value that
+cannot be read falls back to `info` and says so in one line (better than
+`CODEGLOSS_LOG=dbug` silencing everything). An empty value counts as unset, and
+spaces around either separator are ignored.
+
+Under `--features candle` the model-pack download (ureq / rustls / tokenizers)
+writes through the `log` crate instead, and **that is filtered by the same
+variable in the same way** (`CODEGLOSS_LOG=warn,ureq=debug` keeps ureq's debug
+lines and leaves everything else at `warn`).
+
 ## Trying the VS Code extension
 
 1. Build the server first. Like the Zed extension, this one only starts it: no
