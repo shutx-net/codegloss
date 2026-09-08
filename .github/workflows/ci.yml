@@ -145,6 +145,49 @@ jobs:
       # 唯一の版の定義であり、ここに書くと二重管理になる）。
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
+      # ログの subscriber は自前で持っている（crates/codegloss-lsp/src/logging.rs）。
+      # **tracing-subscriber が戻ってきても、何一つ落ちない**——`tracing_subscriber::fmt()`
+      # を 1 行書けばコンパイルは通り、テストは緑のままで、出るログの見た目すら
+      # 変わらない（1 行の形は上流の既定とバイト単位で同じにしてある）。差が出るのは
+      # 依存ツリーだけなので、ここで見る。
+      #
+      # **禁止するのは tracing-subscriber 1 つだけにする。**一緒に消えた 6 つ
+      # （lazy_static / matchers / nu-ansi-term / sharded-slab / thread_local /
+      # tracing-log）は結果であって原因ではない。無関係のクレートが正当に
+      # thread_local を引いた日に落ちるのは、この検査が見たいことではない。
+      # `sha2` も入れない——あれは置き換えていない（モデルパックの照合と
+      # EXPECTED_MODEL_VERSION が使っている。docs/model-pack.md）。`tracing` と
+      # `log` は使い続けるファサードで、どちらも他の依存がどのみち引く。
+      #
+      # 見るのは `--features candle` のツリー、つまり**出荷する構成**である
+      # （既定ツリーはこれの部分集合なので、こちらだけで足りる）。ビルドは要らない。
+      - name: check the shipped dependency tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          banned="tracing-subscriber"
+
+          # 名前だけの一覧にする。`--prefix none` なので 1 行 1 クレートで、
+          # 第 1 語が名前、第 2 語が版になる。
+          tree=$(cargo tree -p codegloss-lsp --features candle -e normal --prefix none \
+            | awk '{print $1}' | sort -u)
+          [ -n "$tree" ] || {
+            echo "NG: 依存ツリーを読み取れませんでした" >&2
+            exit 1
+          }
+
+          found=0
+          for crate in $banned; do
+            echo "$tree" | grep -qx "$crate" || continue
+            echo "NG: $crate が出荷ツリーに戻っています。" >&2
+            echo "    crates/codegloss-lsp/src/logging.rs が置き換えたものなので、" >&2
+            echo "    引き直すなら先にあのモジュールを消すこと。" >&2
+            found=1
+          done
+          [ "$found" -eq 0 ] || exit 1
+
+          echo "OK: 出荷ツリーは $(echo "$tree" | wc -l) クレートで、禁止したものは入っていません"
+
       # 仮想マニフェストに対する `--features candle` は、その名前の feature を
       # 持つメンバ全部に効く。codegloss-translator（marian / candle）と
       # codegloss-lsp（model_pack）の両方がここで入る。片方だけ名指しして

@@ -40,8 +40,17 @@ thiserror = "2.0"
 tokio = { version = "1.53", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
 tower-lsp-server = "0.23"
+# `log` ファサード経由の記録を自前の Logger へ橋渡しするために要る
+# （crates/codegloss-lsp/src/logging.rs）。実測は同クレートの Cargo.toml。
+# std feature: `set_boxed_logger` と `impl Log for Arc<T>`（Subscriber と同じ 1 つの
+# Logger を両方の registry に入れるため）。既定 feature は空なのでどちらも無い。
+log = { version = "0.4", features = ["std"] }
+# facade だけ。**subscriber はここには無い**——1 行を組み立てて stderr へ書くのも
+# `CODEGLOSS_LOG` を読むのも crates/codegloss-lsp/src/logging.rs が自前でやるので、
+# tracing-subscriber は引かない（出荷ツリーから 7 クレート減った。戻すと CI の
+# `check the shipped dependency tree` が落ちる）。`tracing` 自体は
+# tower-lsp-server がどのみち引くので、残しても 1 クレートも増えない。
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Tokenizer::from_file で FuguMT の tokenizer.json を読む。既定 feature の
 # esaxx_fast は C++ のビルドを、progressbar は indicatif を引くのでどちらも切る。
 # onig は Regex 実装として必須（無効にすると tokenizers 自体がコンパイルできない）。

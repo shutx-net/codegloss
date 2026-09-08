@@ -293,6 +293,30 @@ cd editors/zed && cargo build --target wasm32-wasip2 --release
 `CODEGLOSS_LOG`（例 `CODEGLOSS_LOG=debug`）で変えられる。ログは stderr にしか
 出さない（stdout は LSP の JSON-RPC が占有している）。
 
+書けるのは `RUST_LOG` のうち誰もが使う部分だけで、**span 名・フィールド述語・
+正規表現は使えない**（読むのは `tracing-subscriber` の `EnvFilter` ではなく
+`crates/codegloss-lsp/src/logging.rs` の自前実装）。レベルは `error` / `warn` /
+`info` / `debug` / `trace` / `off` の 6 つで、大小は問わない（`RUST_LOG` と
+同じく `0`〜`5` の数字でもよい）。`off` はエラーも出さない。
+
+| 書き方 | 意味 |
+|---|---|
+| `debug` | 裸のレベル。名指ししていないものすべてに効く |
+| `warn,codegloss_lsp::translation=debug` | 全体は `warn` で、名指しした target だけ `debug` |
+| `codegloss_lsp=debug` | 裸のレベルが無いと**ホワイトリスト**になり、名指ししていないものは `error` も出ない |
+
+target はモジュールパスの**前方一致**で（`codegloss` は
+`codegloss_lsp::translation` にも当たる）、複数当たったときは**最も長いもの
+1 つだけが決める**。「当たったどれかが通せばよい」ではないので、
+`debug,codegloss_lsp::translation=warn` はその target の `debug` を落とす。
+読めない値のときは `info` に落として警告を 1 行出す（`CODEGLOSS_LOG=dbug` で
+全部黙るよりよい）。空の値は未設定と同じ扱いで、区切りの前後の空白は無視する。
+
+`--features candle` のときはモデルパックの取得経路（ureq / rustls /
+tokenizers）が `log` クレート越しに記録するが、**これも同じ変数で同じように
+絞れる**（`CODEGLOSS_LOG=warn,ureq=debug` なら ureq の debug が残り、ほかは
+`warn` 以上だけになる）。
+
 ## VS Code 拡張の動作確認
 
 1. サーバを先にビルドする。Zed 拡張と同じく、こちらもサーバを起動するだけで
