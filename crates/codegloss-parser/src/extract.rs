@@ -14,26 +14,47 @@ use crate::languages::{CommentSyntax, SupportedLanguage};
 /// Every variant is a bug in this crate rather than a property of the document:
 /// the grammars and the queries are compiled in. They are returned instead of
 /// panicking so that one broken grammar cannot take the language server down.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum ExtractError {
     /// The linked Tree-sitter cannot run this grammar, typically an ABI mismatch.
-    #[error("the {language} grammar cannot be loaded: {source}")]
     Grammar {
         language: &'static str,
-        #[source]
         source: tree_sitter::LanguageError,
     },
     /// The bundled `.scm` does not compile against its own grammar.
-    #[error("the {language} comment query does not compile: {source}")]
     Query {
         language: &'static str,
-        #[source]
         source: tree_sitter::QueryError,
     },
     /// Tree-sitter gave up, e.g. because a timeout or cancellation flag was set.
-    #[error("tree-sitter produced no tree for a {language} document")]
     NoTree { language: &'static str },
+}
+
+impl std::fmt::Display for ExtractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Grammar { language, source } => {
+                write!(f, "the {language} grammar cannot be loaded: {source}")
+            }
+            Self::Query { language, source } => {
+                write!(f, "the {language} comment query does not compile: {source}")
+            }
+            Self::NoTree { language } => {
+                write!(f, "tree-sitter produced no tree for a {language} document")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExtractError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Grammar { source, .. } => Some(source),
+            Self::Query { source, .. } => Some(source),
+            Self::NoTree { .. } => None,
+        }
+    }
 }
 
 /// Extracts every translatable comment from `source`.
@@ -388,6 +409,41 @@ fn close_run(run: &mut Vec<RawComment>, blocks: &mut Vec<CommentBlock>, source: 
 
 #[cfg(test)]
 mod tests {
+
+    /// Both messages used to come from `#[error(..)]` attributes, which could
+    /// not drift from the type they were on. Hand-written they can, so the two
+    /// that can be built without an ABI mismatch are pinned here - together
+    /// with the `source` chain, which is what puts the grammar's own complaint
+    /// in front of whoever reads the log.
+    #[test]
+    fn an_extract_error_says_which_language_and_why() {
+        use std::error::Error as _;
+
+        let no_tree = ExtractError::NoTree { language: "rust" };
+        assert_eq!(
+            no_tree.to_string(),
+            "tree-sitter produced no tree for a rust document"
+        );
+        assert!(no_tree.source().is_none());
+
+        let grammar = SupportedLanguage::Rust.grammar();
+        let source = tree_sitter::Query::new(&grammar, "(((")
+            .expect_err("an unbalanced query does not compile");
+        let inner = source.to_string();
+        let query = ExtractError::Query {
+            language: "rust",
+            source,
+        };
+        assert_eq!(
+            query.to_string(),
+            format!("the rust comment query does not compile: {inner}")
+        );
+        assert_eq!(
+            query.source().map(ToString::to_string),
+            Some(inner),
+            "the grammar's own complaint has to stay reachable"
+        );
+    }
     use codegloss_core::CommentShape;
 
     use super::*;
