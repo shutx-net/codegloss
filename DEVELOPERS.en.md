@@ -333,6 +333,22 @@ When something does not work, look at `zed: open log`. The server's log level is
 set with `CODEGLOSS_LOG` (for example `CODEGLOSS_LOG=debug`). Logs go to stderr
 only; stdout carries the LSP's JSON-RPC.
 
+`CODEGLOSS_LOG` takes **a level, or a comma-separated list of `target=level`**,
+and nothing else: the subscriber is this crate's own rather than
+`tracing_subscriber::EnvFilter` (the reasoning is at the top of
+`crates/codegloss-lsp/src/logging.rs`). Spans, field values and per-callsite
+directives are not read. A directive it cannot read is reported on stderr and
+skipped; the server still starts.
+
+```sh
+CODEGLOSS_LOG=debug                              # everything at debug
+CODEGLOSS_LOG=codegloss_lsp=debug,warn           # this server at debug, the rest at warn
+CODEGLOSS_LOG=codegloss_lsp::translation=trace   # one module
+```
+
+**The second form earns its keep**: `tower-lsp-server` logs from 83 places of
+its own, so `CODEGLOSS_LOG=debug` brings the protocol layer's chatter with it.
+
 ## Trying the VS Code extension
 
 1. Build the server first. Like the Zed extension, this one only starts it: no

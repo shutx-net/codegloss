@@ -293,6 +293,21 @@ cd editors/zed && cargo build --target wasm32-wasip2 --release
 `CODEGLOSS_LOG`（例 `CODEGLOSS_LOG=debug`）で変えられる。ログは stderr にしか
 出さない（stdout は LSP の JSON-RPC が占有している）。
 
+`CODEGLOSS_LOG` が受け取るのは**レベルと `target=レベル` のカンマ区切りだけ**で、
+`tracing_subscriber::EnvFilter` の全機能ではない（購読側は自前実装。理由は
+`crates/codegloss-lsp/src/logging.rs` の冒頭）。スパン・フィールド・callsite
+単位の指定は読まない。読めなかった指定は stderr に 1 行出して無視され、
+サーバは止まらない。
+
+```sh
+CODEGLOSS_LOG=debug                              # 全部 debug
+CODEGLOSS_LOG=codegloss_lsp=debug,warn           # うちだけ debug、他は warn
+CODEGLOSS_LOG=codegloss_lsp::translation=trace   # 1 モジュールだけ
+```
+
+**2 つ目の形は実用上要る。**`tower-lsp-server` は 83 箇所でログを出すので、
+`CODEGLOSS_LOG=debug` にするとプロトコル層の分まで混ざる。
+
 ## VS Code 拡張の動作確認
 
 1. サーバを先にビルドする。Zed 拡張と同じく、こちらもサーバを起動するだけで

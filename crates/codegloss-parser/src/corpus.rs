@@ -48,9 +48,23 @@ pub fn header(rules: CommentRules) -> String {
 /// An error rather than a fallback to [`CommentRules::Fenced`]: a file that
 /// names its rules and is read under different ones is exactly the silent
 /// mis-scoring the header exists to stop.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("corpus header names rules this build does not have: {0:?}")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownRules(pub String);
+
+impl std::fmt::Display for UnknownRules {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `{:?}` on the tag, not `{}`: the whole point of this error is that
+        // the header held something unexpected, and quoting shows up a stray
+        // space or a `\r` that would otherwise be invisible in the message.
+        write!(
+            f,
+            "corpus header names rules this build does not have: {:?}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnknownRules {}
 
 /// Splits a corpus into the rules it declares and the blocks under them.
 ///
@@ -73,6 +87,20 @@ pub fn rules(text: &str) -> Result<(CommentRules, &str), UnknownRules> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The message used to be generated from a `#[error(..)]` attribute, which
+    /// could not drift from the type. Written by hand it can, so it is pinned:
+    /// this string is what a person sees when a corpus names rules that are
+    /// not in the build, and `{:?}` on the tag is what makes a stray space
+    /// visible.
+    #[test]
+    fn an_unknown_rules_error_says_what_it_read() {
+        let error = UnknownRules("indent ed".to_owned());
+        assert_eq!(
+            error.to_string(),
+            r#"corpus header names rules this build does not have: "indent ed""#
+        );
+    }
     use super::*;
 
     #[test]

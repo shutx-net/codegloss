@@ -10,6 +10,7 @@ pub mod backend;
 pub mod code_lens;
 pub mod config;
 pub mod documents;
+pub mod logging;
 #[cfg(feature = "candle")]
 pub mod model_pack;
 pub mod translation;

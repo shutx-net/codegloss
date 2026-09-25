@@ -19,7 +19,6 @@ ureq = { workspace = true, optional = true }
 tokio.workspace = true
 tower-lsp-server.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 # IMPORTANT: candle は既定に入れない。既定の `cargo build` / `cargo test` は
 # candle 無しで通し、実モデルを積むリリースビルドだけ `--features candle` を

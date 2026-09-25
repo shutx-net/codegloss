@@ -34,14 +34,12 @@ dashmap = "6"
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "2.0"
 # sync: 翻訳ジョブのキュー（mpsc）と完了通知（watch）。
 # time: デバウンスと refresh のスロットリング。
 tokio = { version = "1.53", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
 tower-lsp-server = "0.23"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Tokenizer::from_file で FuguMT の tokenizer.json を読む。既定 feature の
 # esaxx_fast は C++ のビルドを、progressbar は indicatif を引くのでどちらも切る。
 # onig は Regex 実装として必須（無効にすると tokenizers 自体がコンパイルできない）。
