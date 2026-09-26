@@ -1,0 +1,89 @@
+# cargo-deny の設定。CI の `supply chain` ジョブが読む（.github/workflows/ci.yml）。
+#
+# 入れた理由は #81。既知の脆弱性が **0 件のうちに** 仕組みを入れておく、という
+# もので、最初に赤くなる日がまさに知りたかった日である。
+
+[graph]
+# `--all-features` で解決したグラフを見る。これは出荷する構成
+# （`--features candle`）の上位集合で、既定ビルドのツリーはさらにその部分集合。
+# 1 回で全部を覆えるので、構成ごとに走らせ分けない。
+all-features = true
+
+[advisories]
+# RustSec に載ったものは落とす。無関係の PR が赤くなる日は来るが、それは
+# 「依存に穴が見つかった」という知りたい事実そのものである。
+yanked = "deny"
+# **ここに足すのは「知っていて、そのうえで進む」という判断である。**足すなら
+# 理由と、何が起きたら外せるのかを隣に書く。黙って増やさない。
+#
+# 一括で黙らせる設定（`unmaintained = "workspace"` など）は使わない。あれは
+# **次に出たものまで見えなくする**が、この一覧なら 1 件ずつ判断を強いられる。
+ignore = [
+    # paste: 保守されていない proc-macro（＝ビルド時にコードを走らせる）。
+    # candle-core → gemm 系 8 crate が引いていて、**安全な上げ先が無い**
+    # （advisory 自身が "No safe upgrade is available!" と言う）。candle を
+    # 使うことは確定済みの設計判断なので、こちらから動かせるものが無い。
+    # **外せるのは gemm が paste をやめたときか、翻訳ランタイムを差し替えた
+    # とき**（`trait Translator` の裏なので、それは起こりうる）。
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+# **実測した集合そのままで、推測で広げない。**広げた分だけ、新しいライセンスが
+# 入ってきたことに気づけなくなる。出荷ツリーの crate の `license` を全部数えて
+# 作った（#81 に内訳）。copyleft は 0 件、`license` の無い crate も 0 件。
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    # webpki-roots（Mozilla の CA ルートストア）だけがこれ。**うちは
+    # rustls-platform-verifier を使っていて、このルート集合は使っていない**
+    # のに ureq の rustls feature が引いてくる（#81 で確認）。使わないものを
+    # 積んでいる話は別に見る。
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+# **重複は警告どまり。**実際に重複している（tokenizers 0.22 と 0.23、
+# base64 0.13 と 0.23、thiserror 1 と 2）が、どれも上流の版が揃うまでこちらでは
+# 動かせない。落とすようにすると、直せないもので毎回赤くなる。
+multiple-versions = "warn"
+# 版を `*` で書いた依存は、次の上流の版で黙って中身が変わる。ただし
+# **ワークスペース内の `path` 依存は別**——あれは版を書かないのが正しい形で、
+# 外から降ってくるものでもない。
+wildcards = "deny"
+allow-wildcard-paths = true
+
+# **`[[bans.deny]]` は置かない。**「手書きに置き換えた依存が戻っていないか」は
+# CI の `check the shipped dependency tree` が見ており、**あちらのほうが正確
+# だから**である。試したうえでの判断で、理由は 2 つ:
+#
+# 1. cargo-deny は既定で**全ターゲット**のグラフを見る。`thiserror` を
+#    `wrappers = ["candle-core", "candle-nn", "tokenizers"]` で許そうとすると、
+#    Android の `jni` 経由の経路と `thiserror 1.0.69` が引っかかって落ちる。
+#    うちが配るのは 5 構成だけ（release.yml のビルド行列）なので、これは
+#    見たいものではない。
+# 2. ターゲットをその 5 つに絞れば通せるが、**ビルド行列の写しが 3 枚目**に
+#    なる（release.yml・editors/zed の `asset_name()`・ここ）。AGENTS.md が
+#    繰り返し避けている形である。
+#
+# あちらは `cargo tree -p codegloss-lsp` をホストターゲットで引き、出荷ツリーと
+# 既定ツリーを別々に見る。訊いている問いが「うちの依存として戻ったか」なので、
+# そちらが答えるのが正しい。ここが見るのは advisory・ライセンス・出どころと、
+# 上の重複とワイルドカードだけ。
+
+[sources]
+# crates.io 以外から引いていないこと。git 依存は版が動かせるので入れない。
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # **上流に新しい advisory が出るのは、こちらが何も push していない日である。**
+  # 1 日 1 回 supply chain ジョブだけを走らせる（他のジョブは下の `if` で外して
+  # あるので、この回に動くのは 1 つだけ）。
+  schedule:
+    - cron: "17 3 * * *"
+
   # PR を開く前のブランチはこれで回す。Actions タブの Run workflow から
   # 任意のブランチを選べる（ワークフロー定義は選んだブランチのものが使われる）。
   workflow_dispatch:
@@ -22,6 +28,8 @@ jobs:
   check:
     name: fmt / clippy / test
     runs-on: ubuntu-latest
+    # 毎日の回で見たいのは supply chain だけ。
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v7
 
@@ -138,6 +146,8 @@ jobs:
   candle:
     name: clippy / test (candle)
     runs-on: ubuntu-latest
+    # 毎日の回で見たいのは supply chain だけ。
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v7
 
@@ -161,6 +171,10 @@ jobs:
       #
       # 見るのは `--features candle` のツリー、つまり**出荷する構成**である
       # （既定ツリーはこれの部分集合なので、こちらだけで足りる）。ビルドは要らない。
+      # **advisory・ライセンス・出どころはここでは見ない。**あれは supply chain
+      # ジョブ（deny.toml）の仕事。ここが答えるのは「手書きに置き換えた依存が
+      # うちの依存として戻っていないか」だけで、出荷ツリーと既定ツリーを別々に
+      # 見るためにこちらに残してある（理由は deny.toml の `[bans]`）。
       - name: check the shipped dependency tree
         shell: bash
         run: |
@@ -247,6 +261,8 @@ jobs:
   wasm:
     name: zed extension (wasm)
     runs-on: ubuntu-latest
+    # 毎日の回で見たいのは supply chain だけ。
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v7
 
@@ -292,6 +308,8 @@ jobs:
   msrv:
     name: zed extension (msrv)
     runs-on: ubuntu-latest
+    # 毎日の回で見たいのは supply chain だけ。
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v7
 
@@ -336,6 +354,8 @@ jobs:
   vscode:
     name: vscode extension
     runs-on: ubuntu-latest
+    # 毎日の回で見たいのは supply chain だけ。
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v7
 
@@ -370,3 +390,26 @@ jobs:
           set -euo pipefail
           version=$(node -p 'require("./package.json").version')
           test -f "codegloss-$version.vsix"
+
+  # 依存の脆弱性・ライセンス・出どころを見る（#81）。設定は deny.toml で、
+  # **何をなぜ許しているかはあちらに書いてある。**
+  #
+  # **ビルドしない**ので他のジョブと独立に速く終わり、Rust のツールチェーンも
+  # 要らない。action は cargo-deny 本体と**同じ publisher**（EmbarkStudios）
+  # なので、道具を信頼すると決めた時点より信頼の起点は増えない——サプライ
+  # チェーンの検査にサードパーティを足す、という筋の悪さを避けてある。
+  # 手で入れると実測 2 分 24 秒かかる（`cargo install --locked cargo-deny`）。
+  #
+  # **「手書きに置き換えた依存が戻っていないか」はここでは見ない。**あちらは
+  # candle ジョブの `check the shipped dependency tree` の仕事で、理由は
+  # deny.toml の `[bans]` に書いた（要点: cargo-deny は全ターゲットを見るので、
+  # うちが配る 5 構成に絞ろうとするとビルド行列の写しが 3 枚目になる）。
+  supply-chain:
+    name: supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
