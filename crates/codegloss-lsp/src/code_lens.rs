@@ -31,8 +31,8 @@
 //!   the buffer the moment it does, and the code under the cursor would jump.
 //!   A placeholder reserves the line up front.
 
+use crate::ls_types::{CodeLens, Command, Position, Range};
 use codegloss_core::CommentBlock;
-use tower_lsp_server::ls_types::{CodeLens, Command, Position, Range};
 
 /// Identifier of the command every lens carries.
 ///
@@ -99,14 +99,13 @@ fn lens(block: &CommentBlock, title: String) -> CodeLens {
             start: position,
             end: position,
         },
+        // `resolve_provider` is advertised as false, so a lens arrives
+        // complete: `codeLens/resolve` is never sent and there is no `data`
+        // to carry between the two halves.
         command: Some(Command {
             title,
             command: NOOP_COMMAND.to_owned(),
-            arguments: None,
         }),
-        // `resolve_provider` is advertised as false: a lens arrives complete
-        // and `codeLens/resolve` is never sent, so there is nothing to carry.
-        data: None,
     }
 }
 
@@ -191,9 +190,31 @@ mod tests {
         ] {
             let command = lens.command.expect("every lens has a command");
             assert_eq!(command.command, NOOP_COMMAND);
-            assert_eq!(command.arguments, None);
             assert!(!command.title.is_empty(), "an empty title is never drawn");
         }
+    }
+
+    /// What Zed actually receives. The title and the command name are the two
+    /// members it reads, and nothing else is sent: a lens arrives complete, so
+    /// there is no `data` for a resolve that never happens, and the command
+    /// takes no `arguments`.
+    #[test]
+    fn a_lens_goes_out_as_a_range_and_a_command_and_nothing_else() {
+        let lens = glossed(&block(7, "Return the cached user."), "キャッシュを返す。");
+
+        assert_eq!(
+            serde_json::to_value(&lens).expect("a lens serializes"),
+            serde_json::json!({
+                "range": {
+                    "start": { "line": 7, "character": 0 },
+                    "end": { "line": 7, "character": 0 },
+                },
+                "command": {
+                    "title": "キャッシュを返す。",
+                    "command": NOOP_COMMAND,
+                },
+            })
+        );
     }
 
     #[test]

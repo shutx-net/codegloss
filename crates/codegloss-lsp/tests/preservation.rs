@@ -11,19 +11,13 @@
 //! when a gloss then comes out wrong: if they still hold, the model is at fault
 //! and not this code.
 
+mod harness;
+
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use codegloss_core::Segment;
-use codegloss_lsp::Backend;
 use codegloss_translator::Translator;
-use futures::StreamExt;
-use serde_json::{Value, json};
-use tokio::sync::watch;
-use tokio::time::timeout;
-use tower::{Service, ServiceExt};
-use tower_lsp_server::LspService;
-use tower_lsp_server::jsonrpc::{Request, Response};
+use harness::Harness;
 
 const DOCUMENT_URI: &str = "file:///tmp/codegloss/preservation.rs";
 
@@ -53,87 +47,29 @@ const DOCUMENT_TEXT: &str = concat!(
     "fn cached_user() {}\n",
 );
 
-const SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// A server on the engine that ships today, with the requests it sends back
-/// answered so that the worker never waits on a refresh.
-fn server() -> LspService<Backend> {
-    let (service, socket) = LspService::new(Backend::new);
-    let (mut requests, mut responses) = socket.split();
-    tokio::spawn(async move {
-        while let Some(request) = requests.next().await {
-            if let Some(id) = request.id().cloned() {
-                let _ = futures::SinkExt::send(&mut responses, Response::from_ok(id, Value::Null))
-                    .await;
-            }
-        }
-    });
-    service
-}
-
-async fn call(service: &mut LspService<Backend>, request: Request) -> Option<Value> {
-    let response = service
-        .ready()
-        .await
-        .expect("service is ready")
-        .call(request)
-        .await
-        .expect("service has not exited");
-    response.map(|response| serde_json::to_value(response).expect("response serializes"))
-}
-
 /// Brings the server up on [`DOCUMENT_TEXT`] and waits for its glosses.
-async fn glossed_document() -> LspService<Backend> {
-    let mut service = server();
-    let mut batches: watch::Receiver<u64> = service.inner().glosses().batches_completed();
+///
+/// The engine that ships today is the passthrough, and the harness answers
+/// the refresh requests so that the worker never waits on one.
+fn glossed_document() -> Harness {
+    let mut server = Harness::new();
+    let batches = server.batches();
+    let seen = batches.count();
 
-    call(
-        &mut service,
-        Request::build("initialize")
-            .params(json!({ "capabilities": {} }))
-            .id(1)
-            .finish(),
-    )
-    .await;
-    call(
-        &mut service,
-        Request::build("initialized").params(json!({})).finish(),
-    )
-    .await;
-    call(
-        &mut service,
-        Request::build("textDocument/didOpen")
-            .params(json!({
-                "textDocument": {
-                    "uri": DOCUMENT_URI,
-                    "languageId": "rust",
-                    "version": 1,
-                    "text": DOCUMENT_TEXT,
-                }
-            }))
-            .finish(),
-    )
-    .await;
+    server.initialize();
+    server.did_open(DOCUMENT_URI, "rust", DOCUMENT_TEXT);
 
-    timeout(SETTLE_TIMEOUT, batches.changed())
-        .await
-        .expect("the pipeline finished a batch")
-        .expect("the pipeline is still running");
-    service
+    server.settle(seen);
+    server
 }
 
 /// The gloss a hover shows, without the quoted English underneath it.
-async fn gloss_at(service: &mut LspService<Backend>, line: u32, character: u32) -> String {
-    gloss_at_in(service, DOCUMENT_URI, line, character).await
+fn gloss_at(server: &mut Harness, line: u32, character: u32) -> String {
+    gloss_at_in(server, DOCUMENT_URI, line, character)
 }
 
-async fn gloss_at_in(
-    service: &mut LspService<Backend>,
-    uri: &str,
-    line: u32,
-    character: u32,
-) -> String {
-    let value = markup_at_in(service, uri, line, character).await;
+fn gloss_at_in(server: &mut Harness, uri: &str, line: u32, character: u32) -> String {
+    let value = markup_at_in(server, uri, line, character);
     let (gloss, quoted) = value
         .split_once("\n\n> ")
         .expect("a finished gloss quotes its source");
@@ -142,24 +78,8 @@ async fn gloss_at_in(
 }
 
 /// The Markdown a hover answers with, exactly as the editor receives it.
-async fn markup_at_in(
-    service: &mut LspService<Backend>,
-    uri: &str,
-    line: u32,
-    character: u32,
-) -> String {
-    let response = call(
-        service,
-        Request::build("textDocument/hover")
-            .params(json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": character },
-            }))
-            .id(2)
-            .finish(),
-    )
-    .await
-    .expect("a hover request is answered");
+fn markup_at_in(server: &mut Harness, uri: &str, line: u32, character: u32) -> String {
+    let response = server.hover(uri, line, character);
 
     response["result"]["contents"]["value"]
         .as_str()
@@ -167,20 +87,12 @@ async fn markup_at_in(
         .to_owned()
 }
 
-async fn lens_titles(service: &mut LspService<Backend>) -> Vec<(u64, String)> {
-    lens_titles_in(service, DOCUMENT_URI).await
+fn lens_titles(server: &mut Harness) -> Vec<(u64, String)> {
+    lens_titles_in(server, DOCUMENT_URI)
 }
 
-async fn lens_titles_in(service: &mut LspService<Backend>, uri: &str) -> Vec<(u64, String)> {
-    let response = call(
-        service,
-        Request::build("textDocument/codeLens")
-            .params(json!({ "textDocument": { "uri": uri } }))
-            .id(3)
-            .finish(),
-    )
-    .await
-    .expect("a code lens request is answered");
+fn lens_titles_in(server: &mut Harness, uri: &str) -> Vec<(u64, String)> {
+    let response = server.code_lens(uri);
 
     response["result"]
         .as_array()
@@ -202,32 +114,32 @@ async fn lens_titles_in(service: &mut LspService<Backend>, uri: &str) -> Vec<(u6
 
 /// A `//` comment: the `TODO:` prefix and all three shapes of identifier come
 /// back byte for byte.
-#[tokio::test(flavor = "current_thread")]
-async fn a_line_comment_keeps_its_prefix_and_its_identifiers() {
-    let mut service = glossed_document().await;
+#[test]
+fn a_line_comment_keeps_its_prefix_and_its_identifiers() {
+    let mut server = glossed_document();
 
     assert_eq!(
-        gloss_at(&mut service, 0, 5).await,
+        gloss_at(&mut server, 0, 5),
         "TODO: cache the result of find_user before UserRepository::load() runs."
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn a_doc_comment_keeps_its_inline_code() {
-    let mut service = glossed_document().await;
+#[test]
+fn a_doc_comment_keeps_its_inline_code() {
+    let mut server = glossed_document();
 
     assert_eq!(
-        gloss_at(&mut service, 3, 10).await,
+        gloss_at(&mut server, 3, 10),
         "Returns `UserDetails` when authentication succeeds."
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn a_doc_comment_keeps_its_url() {
-    let mut service = glossed_document().await;
+#[test]
+fn a_doc_comment_keeps_its_url() {
+    let mut server = glossed_document();
 
     assert_eq!(
-        gloss_at(&mut service, 5, 10).await,
+        gloss_at(&mut server, 5, 10),
         "See https://example.com/docs/auth for the protocol."
     );
 }
@@ -238,12 +150,12 @@ async fn a_doc_comment_keeps_its_url() {
 ///
 /// The two trailing spaces are Markdown's hard line break. Without them the
 /// editor would run the three tag lines together into one paragraph.
-#[tokio::test(flavor = "current_thread")]
-async fn a_javadoc_block_keeps_its_line_structure_and_its_tags() {
-    let mut service = glossed_document().await;
+#[test]
+fn a_javadoc_block_keeps_its_line_structure_and_its_tags() {
+    let mut server = glossed_document();
 
     assert_eq!(
-        gloss_at(&mut service, 9, 10).await,
+        gloss_at(&mut server, 9, 10),
         concat!(
             "Returns the currently authenticated user.\n",
             "\n",
@@ -261,12 +173,12 @@ async fn a_javadoc_block_keeps_its_line_structure_and_its_tags() {
 /// comment of two sentences was shown as `...user.Nothing...`. The engine here
 /// is the one that produces it in production - a server with no model pack
 /// answers with its input, which is English.
-#[tokio::test(flavor = "current_thread")]
-async fn a_comment_of_two_sentences_keeps_the_space_between_them() {
-    let mut service = glossed_document().await;
+#[test]
+fn a_comment_of_two_sentences_keeps_the_space_between_them() {
+    let mut server = glossed_document();
 
     assert_eq!(
-        gloss_at(&mut service, 17, 10).await,
+        gloss_at(&mut server, 17, 10),
         "Returns the cached user. Nothing is written back."
     );
 }
@@ -274,10 +186,10 @@ async fn a_comment_of_two_sentences_keeps_the_space_between_them() {
 /// The same glosses reach the other display mode. A lens is one line high, so
 /// the Javadoc block is folded and cut - that is the code lens doing it, and everything
 /// that fits is still exact.
-#[tokio::test(flavor = "current_thread")]
-async fn the_lenses_carry_the_same_glosses() {
-    let mut service = glossed_document().await;
-    let titles = lens_titles(&mut service).await;
+#[test]
+fn the_lenses_carry_the_same_glosses() {
+    let mut server = glossed_document();
+    let titles = lens_titles(&mut server);
 
     assert_eq!(
         titles[..3],
@@ -310,10 +222,10 @@ async fn the_lenses_carry_the_same_glosses() {
 
 /// Nothing in the document was left without a gloss: a pattern the
 /// pre-processing choked on would show up as a lens still saying "translating".
-#[tokio::test(flavor = "current_thread")]
-async fn every_comment_of_the_document_is_glossed() {
-    let mut service = glossed_document().await;
-    let titles = lens_titles(&mut service).await;
+#[test]
+fn every_comment_of_the_document_is_glossed() {
+    let mut server = glossed_document();
+    let titles = lens_titles(&mut server);
 
     assert_eq!(titles.len(), 5);
     for (line, title) in titles {
@@ -341,7 +253,7 @@ const DOCTEST_TEXT: &str = concat!(
     "/// ```\n",
     "/// let mut pos = 0;\n",
     "/// while pos < data.len() {\n",
-    "///     let n = writer.write(&data[pos..]).await?;\n",
+    "///     let n = writer.write(&data[pos..])?;\n",
     "///     pos += n;\n",
     "/// }\n",
     "/// Ok(())\n",
@@ -392,58 +304,19 @@ impl Translator for RecordingEngine {
     }
 }
 
-/// Brings a server up on [`DOCTEST_TEXT`] with a recording engine and waits for
-/// its glosses.
-async fn glossed_doctest() -> (LspService<Backend>, Arc<RecordingEngine>) {
+/// Brings a server up on [`DOCTEST_TEXT`] with a recording engine and waits
+/// for its glosses.
+fn glossed_doctest() -> (Harness, Arc<RecordingEngine>) {
     let engine = RecordingEngine::new();
-    let handle = Arc::clone(&engine);
-    let (mut service, socket) = LspService::new(move |client| {
-        Backend::with_engine(client, Arc::clone(&handle) as Arc<dyn Translator>)
-    });
-    let (mut requests, mut responses) = socket.split();
-    tokio::spawn(async move {
-        while let Some(request) = requests.next().await {
-            if let Some(id) = request.id().cloned() {
-                let _ = futures::SinkExt::send(&mut responses, Response::from_ok(id, Value::Null))
-                    .await;
-            }
-        }
-    });
+    let mut server = Harness::with_engine(Arc::clone(&engine) as Arc<dyn Translator>);
+    let batches = server.batches();
+    let seen = batches.count();
 
-    let mut batches: watch::Receiver<u64> = service.inner().glosses().batches_completed();
-    call(
-        &mut service,
-        Request::build("initialize")
-            .params(json!({ "capabilities": {} }))
-            .id(1)
-            .finish(),
-    )
-    .await;
-    call(
-        &mut service,
-        Request::build("initialized").params(json!({})).finish(),
-    )
-    .await;
-    call(
-        &mut service,
-        Request::build("textDocument/didOpen")
-            .params(json!({
-                "textDocument": {
-                    "uri": DOCTEST_URI,
-                    "languageId": "rust",
-                    "version": 1,
-                    "text": DOCTEST_TEXT,
-                }
-            }))
-            .finish(),
-    )
-    .await;
+    server.initialize();
+    server.did_open(DOCTEST_URI, "rust", DOCTEST_TEXT);
 
-    timeout(SETTLE_TIMEOUT, batches.changed())
-        .await
-        .expect("the pipeline finished a batch")
-        .expect("the pipeline is still running");
-    (service, engine)
+    server.settle(seen);
+    (server, engine)
 }
 
 /// The defect of Issue #53, stated where the reader meets it: no line of the
@@ -453,9 +326,9 @@ async fn glossed_doctest() -> (LspService<Backend>, Arc<RecordingEngine>) {
 /// fence this document reached the model as four blocks with no fence in any of
 /// them, and it answered `mut pos = 0 とする。` for `let mut pos = 0;` and
 /// `OK()` for `Ok(())`.
-#[tokio::test(flavor = "current_thread")]
-async fn a_doctest_never_reaches_the_engine() {
-    let (mut service, engine) = glossed_doctest().await;
+#[test]
+fn a_doctest_never_reaches_the_engine() {
+    let (mut server, engine) = glossed_doctest();
     let asked = engine.asked();
 
     assert!(
@@ -471,7 +344,7 @@ async fn a_doctest_never_reaches_the_engine() {
         );
     }
 
-    let titles = lens_titles_in(&mut service, DOCTEST_URI).await;
+    let titles = lens_titles_in(&mut server, DOCTEST_URI);
     assert_eq!(titles.len(), 3, "{titles:?}");
     assert_eq!(
         titles[2],
@@ -479,7 +352,7 @@ async fn a_doctest_never_reaches_the_engine() {
             4,
             concat!(
                 "``` let mut pos = 0; while pos < data.len() { let n = ",
-                "writer.write(&data[pos..]).await?; pos += n; } Ok(()) ```",
+                "writer.write(&data[pos..])?; pos += n; } Ok(()) ```",
             )
             .to_owned()
         ),
@@ -498,13 +371,13 @@ async fn a_doctest_never_reaches_the_engine() {
 /// The fence and the brace-only lines belong to no block at all today, so
 /// `comment_block_at` answers `null` on them and the code lines answer with a
 /// gloss of their own.
-#[tokio::test(flavor = "current_thread")]
-async fn a_doctest_answers_hover_on_every_one_of_its_lines() {
-    let (mut service, _engine) = glossed_doctest().await;
+#[test]
+fn a_doctest_answers_hover_on_every_one_of_its_lines() {
+    let (mut server, _engine) = glossed_doctest();
 
-    let fence = gloss_at_in(&mut service, DOCTEST_URI, 4, 5).await;
-    let code = gloss_at_in(&mut service, DOCTEST_URI, 5, 5).await;
-    let brace = gloss_at_in(&mut service, DOCTEST_URI, 9, 5).await;
+    let fence = gloss_at_in(&mut server, DOCTEST_URI, 4, 5);
+    let code = gloss_at_in(&mut server, DOCTEST_URI, 5, 5);
+    let brace = gloss_at_in(&mut server, DOCTEST_URI, 9, 5);
 
     assert_eq!(fence, code, "every line of the example is one block");
     assert_eq!(code, brace, "every line of the example is one block");
@@ -517,7 +390,7 @@ async fn a_doctest_answers_hover_on_every_one_of_its_lines() {
             "```\n",
             "let mut pos = 0;\n",
             "while pos < data.len() {\n",
-            "    let n = writer.write(&data[pos..]).await?;\n",
+            "    let n = writer.write(&data[pos..])?;\n",
             "    pos += n;\n",
             "}\n",
             "Ok(())\n",
@@ -534,24 +407,24 @@ async fn a_doctest_answers_hover_on_every_one_of_its_lines() {
 /// appends CommonMark's hard line break to a line, and inside a fence two
 /// trailing spaces are two characters of code - so it leaves fenced lines
 /// alone, which is why none of these lines ends in whitespace.
-#[tokio::test(flavor = "current_thread")]
-async fn the_hover_markup_keeps_the_indentation() {
-    let (mut service, _engine) = glossed_doctest().await;
+#[test]
+fn the_hover_markup_keeps_the_indentation() {
+    let (mut server, _engine) = glossed_doctest();
 
     assert_eq!(
-        markup_at_in(&mut service, DOCTEST_URI, 7, 5).await,
+        markup_at_in(&mut server, DOCTEST_URI, 7, 5),
         concat!(
             "```\n",
             "let mut pos = 0;\n",
             "while pos < data.len() {\n",
-            "    let n = writer.write(&data[pos..]).await?;\n",
+            "    let n = writer.write(&data[pos..])?;\n",
             "    pos += n;\n",
             "}\n",
             "Ok(())\n",
             "```\n",
             "\n",
             "> ``` let mut pos = 0; while pos < data.len() { ",
-            "let n = writer.write(&data[pos..]).await?; pos += n; } Ok(()) ```",
+            "let n = writer.write(&data[pos..])?; pos += n; } Ok(()) ```",
         )
     );
 }

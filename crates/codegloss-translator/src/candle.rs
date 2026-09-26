@@ -523,7 +523,7 @@ impl CandleTranslator {
     /// IMPORTANT: this blocks for as long as the load takes. It is reachable
     /// only from [`translate`](Translator::translate) and
     /// [`prepare`](CandleTranslator::prepare), and `codegloss-lsp` calls the
-    /// first from `spawn_blocking` and the second not at all.
+    /// first from its translation worker and the second not at all.
     fn with_engine<T>(&self, work: impl FnOnce(&mut Engine) -> Result<T>) -> Result<T> {
         let mut slot = self
             .engine

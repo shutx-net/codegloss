@@ -161,13 +161,14 @@ jobs:
       # 変わらない（1 行の形は上流の既定とバイト単位で同じにしてある）。差が出るのは
       # 依存ツリーだけなので、ここで見る。
       #
-      # **禁止するのは tracing-subscriber 1 つだけにする。**一緒に消えた 6 つ
-      # （lazy_static / matchers / nu-ansi-term / sharded-slab / thread_local /
-      # tracing-log）は結果であって原因ではない。無関係のクレートが正当に
-      # thread_local を引いた日に落ちるのは、この検査が見たいことではない。
-      # `sha2` も入れない——あれは置き換えていない（モデルパックの照合と
-      # EXPECTED_MODEL_VERSION が使っている。docs/model-pack.md）。`tracing` と
-      # `log` は使い続けるファサードで、どちらも他の依存がどのみち引く。
+      # **禁止するのは置き換えた当のものだけにする。**一緒に消えたもの
+      # （tracing-subscriber なら lazy_static / matchers / nu-ansi-term /
+      # sharded-slab / thread_local / tracing-log、tower-lsp-server なら
+      # ls-types / fluent-uri / futures 系）は結果であって原因ではない。
+      # 無関係のクレートが正当に thread_local を引いた日に落ちるのは、この検査が
+      # 見たいことではない。`sha2` も入れない——あれは置き換えていない
+      # （モデルパックの照合と EXPECTED_MODEL_VERSION が使っている。
+      # docs/model-pack.md）。`tracing` と `log` は使い続けるファサードである。
       #
       # 見るのは `--features candle` のツリー、つまり**出荷する構成**である
       # （既定ツリーはこれの部分集合なので、こちらだけで足りる）。ビルドは要らない。
@@ -180,7 +181,14 @@ jobs:
         run: |
           set -euo pipefail
           # 出荷ツリー（`--features candle`）に戻ってはいけないもの。
-          banned_shipped="tracing-subscriber"
+          #
+          # tower-lsp-server / tokio / dashmap と、取らなかった lsp-types は
+          # 1 つの変更で外れたものなので 1 つの一覧で見る（#78）。**lsp-types が
+          # ここに居るのが要点**で、あれは「戻ってきた」ではなく「LSP の型を
+          # 自分で書くのをやめた」の印になる（crates/codegloss-lsp/src/ls_types.rs）。
+          # 引き連れて消えた 30 個（ls-types / fluent-uri / futures 系 / tower 系
+          # / parking_lot 系 …）は結果であって原因ではないので入れない。
+          banned_shipped="tracing-subscriber tower-lsp-server lsp-types tokio dashmap"
           # 既定ツリーだけで見るもの。**`thiserror` は出荷ツリーからは消えない**
           # ——candle-core / candle-nn / tokenizers が引いているため（実測）。
           # 見られるのは「こちらの直接依存として戻っていないか」だけで、
@@ -206,8 +214,12 @@ jobs:
             for crate in $crates; do
               echo "$tree" | grep -qx "$crate" || continue
               echo "NG: $crate が${what}に戻っています。手書きに置き換えたものです" >&2
-              echo "    （tracing-subscriber は crates/codegloss-lsp/src/logging.rs、" >&2
-              echo "    thiserror は codegloss-parser の Display / Error 実装）。" >&2
+              echo "    tracing-subscriber → crates/codegloss-lsp/src/logging.rs" >&2
+              echo "    thiserror          → codegloss-parser の Display / Error 実装" >&2
+              echo "    lsp-types          → crates/codegloss-lsp/src/ls_types.rs" >&2
+              echo "    tower-lsp-server   → src/server.rs と src/client.rs（枠は lsp-server）" >&2
+              echo "    tokio              → crossbeam-channel と std::thread" >&2
+              echo "    dashmap            → RwLock<HashMap>（src/documents.rs）" >&2
               echo "    引き直すなら先にそちらを消すこと。" >&2
               found=1
             done

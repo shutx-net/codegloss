@@ -35,6 +35,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::Duration;
 
 use codegloss_translator::{MANIFEST_FILE, Manifest};
@@ -146,37 +147,47 @@ pub fn spawn_download(config: &ServerConfig, switch: EngineSwitch) {
 
     let base = base_url();
     let config = config.clone();
-    tokio::task::spawn_blocking(move || {
-        tracing::info!(from = %base, "fetching the model pack in the background");
+    // Detached on purpose: nothing joins it. The download takes minutes and
+    // the server answers in English until it lands, so the only thing that
+    // ever waits for it is the editor's next refetch.
+    let started = thread::Builder::new()
+        .name("codegloss-fetch".to_owned())
+        .spawn(move || {
+            tracing::info!(from = %base, "fetching the model pack in the background");
 
-        let pack = match obtain(&cache, &base) {
-            Ok(pack) => pack,
-            Err(error) => {
-                tracing::error!(
-                    "the model pack could not be fetched, staying in English: {error:#}"
-                );
+            let pack = match obtain(&cache, &base) {
+                Ok(pack) => pack,
+                Err(error) => {
+                    tracing::error!(
+                        "the model pack could not be fetched, staying in English: {error:#}"
+                    );
+                    return;
+                }
+            };
+
+            // Opening the pack is cheap - the manifest and a few checks - and
+            // the weights are read by the worker on its first batch. It stays
+            // on this thread all the same: it touches the disk, and this is
+            // the thread that is allowed to.
+            let Some(engine) = crate::config::load(&pack, &config) else {
+                return;
+            };
+
+            let model_version = engine.model_version().to_owned();
+            if switch.send(engine).is_err() {
+                tracing::debug!("the server stopped before the model pack was ready");
                 return;
             }
-        };
-
-        // Opening the pack is cheap - the manifest and a few checks - and the
-        // weights are read by the worker on its first batch. It stays on this
-        // task all the same: it touches the disk, and this is the task that is
-        // allowed to.
-        let Some(engine) = crate::config::load(&pack, &config) else {
-            return;
-        };
-
-        let model_version = engine.model_version().to_owned();
-        if switch.send(engine).is_err() {
-            tracing::debug!("the server stopped before the model pack was ready");
-            return;
-        }
-        // The swap changes the model version, so every gloss the passthrough
-        // made misses and the worker translates them again - which is where
-        // the weights are read.
-        tracing::info!(model_version, "the engine is ready to translate");
-    });
+            // The swap changes the model version, so every gloss the
+            // passthrough made misses and the worker translates them again -
+            // which is where the weights are read.
+            tracing::info!(model_version, "the engine is ready to translate");
+        });
+    if let Err(error) = started {
+        // Not fatal: the server keeps answering in English, which is what it
+        // would have done until the download finished anyway.
+        tracing::error!(%error, "the model pack download could not be started");
+    }
 }
 
 /// Downloads the pack into `cache`, replacing whatever was there.
@@ -395,7 +406,6 @@ fn agent() -> ureq::Agent {
 mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::thread;
 
     use super::*;
 
