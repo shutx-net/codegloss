@@ -79,6 +79,7 @@ Cargo ワークスペースがあり、`cargo build --workspace` / `cargo test -
 
 - 前処理・後処理（識別子 / バッククォート / URL / `@return` / `TODO:` の保全、Javadoc 構造の復元）とキャッシュは `codegloss-core` に置く。`Translator` 実装の中に書くとエンジン差し替え時に失われる。
 - **言語ではなく規則を配る。**コメントの形の語彙（`CommentRules`）は core、どの言語がどれを名乗るかは `codegloss-parser` のレジストリ。core に言語の一覧を持ち込むと、言語を足すたびに core が変わる。**doc コメントの語彙は別**——`{@code …}`・Markdown のフェンス・JSDoc のタグ表（`TagArguments`）は言語の一覧ではないので core が持つ。線は「どの言語がどれを名乗るか」であって「何が書かれうるか」ではない。**ファイル拡張子はどこにも使わない**——言語は `didOpen` の `languageId` から `SupportedLanguage::from_lsp_language_id` だけが決める。**その `languageId` はクライアントごとに違う**ので、レジストリが持つのは 1 言語 1 名ではなく id の集合（`lsp_language_ids`）。
+- **依存の脆弱性・ライセンス・出どころは CI が見ている**（`deny.toml`＋`supply chain` ジョブ。#81）。**許可リストは実測した集合で、推測で広げないこと**——広げた分だけ、入ってきたことに気づけなくなる。`advisories.ignore` に足すのは「知っていて、そのうえで進む」という判断なので、理由と外せる条件を隣に書く（一括で黙らせる設定は使わない。次に出たものまで見えなくなる）。**入れた初回に本物が 1 件出た**（`RUSTSEC-2026-0285`、rustls 0.23.43 の TLS 1.3 の受理、`ureq` 経由）ので、「たぶん大丈夫」で済ませないこと。1 日 1 回 schedule でも走る——**上流に advisory が出るのは、こちらが何も push していない日である。**
 - **依存を減らすときは、外して再解決した差で測る。**部分木の大きさは重複するので足し算にならない。**出荷ツリー（`--features candle`）と既定ツリーで答えが違う**ことにも注意——`thiserror` は既定から 2 つ減るが出荷からは減らない（#78）。測った結果、**手を出しても無駄なもの**が 2 つある。
   - **`dashmap` は外しても 1 クレートも減らない**（実測。`tower-lsp-server` 自身が引いている）。しかも `DocumentStore::update` は tree-sitter のパースをロックの中で走らせているので、`RwLock<HashMap>` に素直に置き換えると 1 つのロックがマップ全体を覆い、A のキーストロークが B のホバーを止める。**`tower-lsp-server` を外す日まで触らないこと。**
   - **`regex` は `tree-sitter` が引いている。**ログ周りを削っても消えない。
