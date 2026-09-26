@@ -12,7 +12,6 @@ publish = false
 # （Position / Range）を持ち込まず、バイトオフセットと行番号だけを返す。
 [dependencies]
 codegloss-core = { path = "../codegloss-core" }
-thiserror.workspace = true
 tree-sitter.workspace = true
 tree-sitter-go.workspace = true
 tree-sitter-javascript.workspace = true

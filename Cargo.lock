@@ -233,7 +233,6 @@ name = "codegloss-parser"
 version = "0.0.3"
 dependencies = [
  "codegloss-core",
- "thiserror 2.0.20",
  "tree-sitter",
  "tree-sitter-go",
  "tree-sitter-javascript",

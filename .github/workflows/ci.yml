@@ -165,28 +165,44 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          banned="tracing-subscriber"
+          # 出荷ツリー（`--features candle`）に戻ってはいけないもの。
+          banned_shipped="tracing-subscriber"
+          # 既定ツリーだけで見るもの。**`thiserror` は出荷ツリーからは消えない**
+          # ——candle-core / candle-nn / tokenizers が引いているため（実測）。
+          # 見られるのは「こちらの直接依存として戻っていないか」だけで、
+          # それが既定ツリーで測る理由である（#78）。
+          banned_default="thiserror"
 
           # 名前だけの一覧にする。`--prefix none` なので 1 行 1 クレートで、
           # 第 1 語が名前、第 2 語が版になる。
-          tree=$(cargo tree -p codegloss-lsp --features candle -e normal --prefix none \
-            | awk '{print $1}' | sort -u)
-          [ -n "$tree" ] || {
+          names() {
+            cargo tree -p codegloss-lsp "$@" -e normal --prefix none \
+              | awk '{print $1}' | sort -u
+          }
+          shipped=$(names --features candle)
+          default=$(names)
+          [ -n "$shipped" ] && [ -n "$default" ] || {
             echo "NG: 依存ツリーを読み取れませんでした" >&2
             exit 1
           }
 
           found=0
-          for crate in $banned; do
-            echo "$tree" | grep -qx "$crate" || continue
-            echo "NG: $crate が出荷ツリーに戻っています。" >&2
-            echo "    crates/codegloss-lsp/src/logging.rs が置き換えたものなので、" >&2
-            echo "    引き直すなら先にあのモジュールを消すこと。" >&2
-            found=1
-          done
+          check() {
+            local tree=$1 what=$2 crates=$3
+            for crate in $crates; do
+              echo "$tree" | grep -qx "$crate" || continue
+              echo "NG: $crate が${what}に戻っています。手書きに置き換えたものです" >&2
+              echo "    （tracing-subscriber は crates/codegloss-lsp/src/logging.rs、" >&2
+              echo "    thiserror は codegloss-parser の Display / Error 実装）。" >&2
+              echo "    引き直すなら先にそちらを消すこと。" >&2
+              found=1
+            done
+          }
+          check "$shipped" "出荷ツリー" "$banned_shipped"
+          check "$default" "既定ツリー" "$banned_default"
           [ "$found" -eq 0 ] || exit 1
 
-          echo "OK: 出荷ツリーは $(echo "$tree" | wc -l) クレートで、禁止したものは入っていません"
+          echo "OK: 出荷ツリー $(echo "$shipped" | wc -l) / 既定ツリー $(echo "$default" | wc -l) クレートで、禁止したものは入っていません"
 
       # 仮想マニフェストに対する `--features candle` は、その名前の feature を
       # 持つメンバ全部に効く。codegloss-translator（marian / candle）と
