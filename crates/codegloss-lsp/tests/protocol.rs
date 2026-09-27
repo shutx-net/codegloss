@@ -1,19 +1,16 @@
-//! Drives `LspService` directly as a tower `Service`.
+//! Drives the message loop directly.
 //!
 //! No process is spawned and no stdio is involved: requests go in as
-//! `jsonrpc::Request` values and responses come back as `jsonrpc::Response`.
-//! The server refuses everything before `initialize` (JSON-RPC -32002), so the
-//! order of the calls below is part of what is under test.
+//! `lsp_server::Request` values and responses come back as JSON. The server
+//! refuses everything before `initialize` (JSON-RPC -32002), so the order of
+//! the calls below is part of what is under test.
 
-use std::str::FromStr;
+mod harness;
 
-use codegloss_lsp::Backend;
 use codegloss_lsp::code_lens::{NOOP_COMMAND, PENDING_TITLE};
+use codegloss_lsp::ls_types::Uri;
+use harness::Harness;
 use serde_json::{Value, json};
-use tower::{Service, ServiceExt};
-use tower_lsp_server::LspService;
-use tower_lsp_server::jsonrpc::Request;
-use tower_lsp_server::ls_types::Uri;
 
 const DOCUMENT_URI: &str = "file:///tmp/codegloss/main.rs";
 /// Line 0 is a comment, line 1 is code, and line 2 mixes both after a string
@@ -24,56 +21,11 @@ const DOCUMENT_TEXT: &str = concat!(
     "const NAME: &str = \"日本語\"; // Trailing note.\n",
 );
 
-/// Sends a request and returns its response as JSON.
-async fn request(service: &mut LspService<Backend>, request: Request) -> Value {
-    let response = service
-        .ready()
-        .await
-        .expect("service is ready")
-        .call(request)
-        .await
-        .expect("service has not exited")
-        .expect("a request produces a response");
-    serde_json::to_value(response).expect("response serializes")
-}
+#[test]
+fn initialize_advertises_hover_and_full_sync() {
+    let mut server = Harness::new();
 
-/// Sends a notification, which by definition has no response.
-async fn notify(service: &mut LspService<Backend>, notification: Request) {
-    let response = service
-        .ready()
-        .await
-        .expect("service is ready")
-        .call(notification)
-        .await
-        .expect("service has not exited");
-    assert!(response.is_none(), "notifications must not be answered");
-}
-
-fn initialize_request() -> Request {
-    Request::build("initialize")
-        .params(json!({ "capabilities": {} }))
-        .id(1)
-        .finish()
-}
-
-fn did_open_notification() -> Request {
-    Request::build("textDocument/didOpen")
-        .params(json!({
-            "textDocument": {
-                "uri": DOCUMENT_URI,
-                "languageId": "rust",
-                "version": 1,
-                "text": DOCUMENT_TEXT,
-            }
-        }))
-        .finish()
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn initialize_advertises_hover_and_full_sync() {
-    let (mut service, _socket) = LspService::new(Backend::new);
-
-    let response = request(&mut service, initialize_request()).await;
+    let response = server.request("initialize", json!({ "capabilities": {} }));
     let result = &response["result"];
 
     assert_eq!(result["capabilities"]["hoverProvider"], json!(true));
@@ -89,11 +41,11 @@ async fn initialize_advertises_hover_and_full_sync() {
 /// Zed takes the text of a lens from `command.title` and draws nothing for a
 /// lens without a command, so the no-op command has to be advertised as
 /// executable or clicking a gloss reports an unknown command.
-#[tokio::test(flavor = "current_thread")]
-async fn initialize_advertises_code_lenses_and_the_command_they_carry() {
-    let (mut service, _socket) = LspService::new(Backend::new);
+#[test]
+fn initialize_advertises_code_lenses_and_the_command_they_carry() {
+    let mut server = Harness::new();
 
-    let response = request(&mut service, initialize_request()).await;
+    let response = server.request("initialize", json!({ "capabilities": {} }));
     let capabilities = &response["result"]["capabilities"];
 
     assert_eq!(
@@ -106,18 +58,12 @@ async fn initialize_advertises_code_lenses_and_the_command_they_carry() {
     );
 }
 
-/// Brings a service up to the point where it has the fixture open.
-async fn opened_service() -> LspService<Backend> {
-    let (mut service, _socket) = LspService::new(Backend::new);
-
-    request(&mut service, initialize_request()).await;
-    notify(
-        &mut service,
-        Request::build("initialized").params(json!({})).finish(),
-    )
-    .await;
-    notify(&mut service, did_open_notification()).await;
-    service
+/// Brings a server up to the point where it has the fixture open.
+fn opened_server() -> Harness {
+    let mut server = Harness::new();
+    server.initialize();
+    server.did_open(DOCUMENT_URI, "rust", DOCUMENT_TEXT);
+    server
 }
 
 /// Asserts that a hover answer is about `source`.
@@ -135,25 +81,11 @@ fn assert_hover_is_about(result: &Value, source: &str) {
     assert!(value.contains(source), "{value:?} is not about {source:?}");
 }
 
-async fn hover_at(service: &mut LspService<Backend>, line: u32, character: u32) -> Value {
-    request(
-        service,
-        Request::build("textDocument/hover")
-            .params(json!({
-                "textDocument": { "uri": DOCUMENT_URI },
-                "position": { "line": line, "character": character },
-            }))
-            .id(2)
-            .finish(),
-    )
-    .await
-}
+#[test]
+fn hover_over_a_comment_answers_about_that_comment() {
+    let mut server = opened_server();
 
-#[tokio::test(flavor = "current_thread")]
-async fn hover_over_a_comment_answers_about_that_comment() {
-    let mut service = opened_service().await;
-
-    let response = hover_at(&mut service, 0, 3).await;
+    let response = server.hover(DOCUMENT_URI, 0, 3);
     let result = &response["result"];
 
     assert_hover_is_about(result, "Return the cached user.");
@@ -168,12 +100,12 @@ async fn hover_over_a_comment_answers_about_that_comment() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn hover_over_code_returns_nothing() {
-    let mut service = opened_service().await;
+#[test]
+fn hover_over_code_returns_nothing() {
+    let mut server = opened_server();
 
     // Inside `find_user` on the function line.
-    let response = hover_at(&mut service, 1, 5).await;
+    let response = server.hover(DOCUMENT_URI, 1, 5);
     assert_eq!(response["result"], Value::Null);
     assert!(response.get("error").is_none(), "{response}");
 }
@@ -182,15 +114,15 @@ async fn hover_over_code_returns_nothing() {
 /// makes the byte offset run six ahead of the code-unit offset - the comment
 /// starts at code unit 26 but at byte 32 - so a server that confuses the two
 /// answers on the wrong halves of the line.
-#[tokio::test(flavor = "current_thread")]
-async fn hover_on_a_multibyte_line_lands_on_the_right_half() {
-    let mut service = opened_service().await;
+#[test]
+fn hover_on_a_multibyte_line_lands_on_the_right_half() {
+    let mut server = opened_server();
 
     // Character 22 is inside the string literal.
-    assert_eq!(hover_at(&mut service, 2, 22).await["result"], Value::Null);
+    assert_eq!(server.hover(DOCUMENT_URI, 2, 22)["result"], Value::Null);
 
     // Character 30 is inside the trailing comment.
-    let response = hover_at(&mut service, 2, 30).await;
+    let response = server.hover(DOCUMENT_URI, 2, 30);
     assert_hover_is_about(&response["result"], "Trailing note.");
     assert_eq!(
         response["result"]["range"]["start"],
@@ -198,24 +130,13 @@ async fn hover_on_a_multibyte_line_lands_on_the_right_half() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn hover_in_a_document_that_was_never_opened_returns_nothing() {
-    let (mut service, _socket) = LspService::new(Backend::new);
-    request(&mut service, initialize_request()).await;
+#[test]
+fn hover_in_a_document_that_was_never_opened_returns_nothing() {
+    let mut server = Harness::new();
+    server.initialize();
 
-    let response = hover_at(&mut service, 0, 3).await;
+    let response = server.hover(DOCUMENT_URI, 0, 3);
     assert_eq!(response["result"], Value::Null);
-}
-
-async fn code_lens_for(service: &mut LspService<Backend>, uri: &str) -> Value {
-    request(
-        service,
-        Request::build("textDocument/codeLens")
-            .params(json!({ "textDocument": { "uri": uri } }))
-            .id(3)
-            .finish(),
-    )
-    .await
 }
 
 /// One lens per comment block, on the comment's own line.
@@ -223,11 +144,11 @@ async fn code_lens_for(service: &mut LspService<Backend>, uri: &str) -> Value {
 /// The line matters more than it looks: Zed inserts the lens as a block *above*
 /// the line, so the gloss of a comment on line 2 only lands between the code and
 /// the comment if the lens says line 2.
-#[tokio::test(flavor = "current_thread")]
-async fn code_lens_answers_one_lens_per_comment_on_the_comment_line() {
-    let mut service = opened_service().await;
+#[test]
+fn code_lens_answers_one_lens_per_comment_on_the_comment_line() {
+    let mut server = opened_server();
 
-    let response = code_lens_for(&mut service, DOCUMENT_URI).await;
+    let response = server.code_lens(DOCUMENT_URI);
     let lenses = response["result"]
         .as_array()
         .expect("the answer is a list of lenses");
@@ -252,29 +173,25 @@ async fn code_lens_answers_one_lens_per_comment_on_the_comment_line() {
 }
 
 /// A file the client never opened has no answer, as opposed to an empty one.
-#[tokio::test(flavor = "current_thread")]
-async fn code_lens_for_an_unopened_document_returns_nothing() {
-    let mut service = opened_service().await;
+#[test]
+fn code_lens_for_an_unopened_document_returns_nothing() {
+    let mut server = opened_server();
 
-    let response = code_lens_for(&mut service, "file:///tmp/codegloss/other.rs").await;
+    let response = server.code_lens("file:///tmp/codegloss/other.rs");
     assert_eq!(response["result"], Value::Null);
     assert!(response.get("error").is_none(), "{response}");
 }
 
 /// A lens is clickable whether or not that was wanted, and the click has to be
 /// answered rather than refused.
-#[tokio::test(flavor = "current_thread")]
-async fn executing_the_lens_command_answers_without_an_error() {
-    let mut service = opened_service().await;
+#[test]
+fn executing_the_lens_command_answers_without_an_error() {
+    let mut server = opened_server();
 
-    let response = request(
-        &mut service,
-        Request::build("workspace/executeCommand")
-            .params(json!({ "command": NOOP_COMMAND, "arguments": [] }))
-            .id(4)
-            .finish(),
-    )
-    .await;
+    let response = server.request(
+        "workspace/executeCommand",
+        json!({ "command": NOOP_COMMAND, "arguments": [] }),
+    );
 
     assert_eq!(response["result"], Value::Null);
     assert!(response.get("error").is_none(), "{response}");
@@ -284,27 +201,27 @@ async fn executing_the_lens_command_answers_without_an_error() {
 /// does. Hover falls back to the English source instead, because a popup cannot
 /// be refreshed once it is on screen and because a lens sits directly above the
 /// English it would otherwise be repeating.
-#[tokio::test(flavor = "current_thread")]
-async fn the_lens_placeholder_is_not_what_hover_falls_back_to() {
-    let mut service = opened_service().await;
+#[test]
+fn the_lens_placeholder_is_not_what_hover_falls_back_to() {
+    let mut server = opened_server();
 
-    let hover = hover_at(&mut service, 0, 3).await;
+    let hover = server.hover(DOCUMENT_URI, 0, 3);
     let value = hover["result"]["contents"]["value"]
         .as_str()
         .expect("hover contents carry a string");
     assert!(!value.contains(PENDING_TITLE), "{value:?}");
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn documents_follow_open_change_and_close() {
-    let (mut service, _socket) = LspService::new(Backend::new);
-    let uri = Uri::from_str(DOCUMENT_URI).expect("valid file uri");
+#[test]
+fn documents_follow_open_change_and_close() {
+    let mut server = Harness::new();
+    let uri = Uri::from(DOCUMENT_URI);
 
-    request(&mut service, initialize_request()).await;
-    notify(&mut service, did_open_notification()).await;
+    server.request("initialize", json!({ "capabilities": {} }));
+    server.did_open(DOCUMENT_URI, "rust", DOCUMENT_TEXT);
 
-    let opened = service
-        .inner()
+    let opened = server
+        .backend()
         .documents()
         .snapshot(&uri)
         .expect("document is open");
@@ -312,19 +229,10 @@ async fn documents_follow_open_change_and_close() {
     assert_eq!(opened.version, 1);
     assert_eq!(opened.blocks.len(), 2);
 
-    notify(
-        &mut service,
-        Request::build("textDocument/didChange")
-            .params(json!({
-                "textDocument": { "uri": DOCUMENT_URI, "version": 2 },
-                "contentChanges": [{ "text": "// Changed.\n" }],
-            }))
-            .finish(),
-    )
-    .await;
+    server.did_change(DOCUMENT_URI, 2, "// Changed.\n");
 
-    let changed = service
-        .inner()
+    let changed = server
+        .backend()
         .documents()
         .snapshot(&uri)
         .expect("document is still open");
@@ -334,33 +242,79 @@ async fn documents_follow_open_change_and_close() {
     assert_eq!(changed.blocks.len(), 1);
     assert_eq!(changed.blocks[0].text, "Changed.");
 
-    notify(
-        &mut service,
-        Request::build("textDocument/didClose")
-            .params(json!({ "textDocument": { "uri": DOCUMENT_URI } }))
-            .finish(),
-    )
-    .await;
+    server.did_close(DOCUMENT_URI);
 
-    assert!(service.inner().documents().is_empty());
+    assert!(server.backend().documents().is_empty());
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn requests_before_initialize_are_refused() {
-    let (mut service, _socket) = LspService::new(Backend::new);
+#[test]
+fn requests_before_initialize_are_refused() {
+    let mut server = Harness::new();
 
-    let response = request(
-        &mut service,
-        Request::build("textDocument/hover")
-            .params(json!({
-                "textDocument": { "uri": DOCUMENT_URI },
-                "position": { "line": 0, "character": 0 },
-            }))
-            .id(1)
-            .finish(),
-    )
-    .await;
+    let response = server.hover(DOCUMENT_URI, 0, 0);
 
     // -32002 == ServerNotInitialized.
     assert_eq!(response["error"]["code"], json!(-32002));
+}
+
+/// A notification that arrives before `initialize` is dropped rather than
+/// answered - the protocol gives a notification nowhere to report an error,
+/// and a server that acted on one would be reading a document it was never
+/// told the client had opened.
+#[test]
+fn notifications_before_initialize_are_dropped() {
+    let mut server = Harness::new();
+
+    server.did_open(DOCUMENT_URI, "rust", DOCUMENT_TEXT);
+
+    assert!(server.backend().documents().is_empty());
+}
+
+/// After `shutdown` the server is on its way out, and the protocol says to
+/// refuse what arrives in the meantime rather than serve it.
+#[test]
+fn requests_after_shutdown_are_refused() {
+    let mut server = opened_server();
+
+    let shutdown = server.request("shutdown", Value::Null);
+    assert_eq!(shutdown["result"], Value::Null);
+    assert!(shutdown.get("error").is_none(), "{shutdown}");
+
+    let response = server.hover(DOCUMENT_URI, 0, 3);
+    // -32600 == InvalidRequest.
+    assert_eq!(response["error"]["code"], json!(-32600));
+}
+
+/// A method this server does not implement is refused by name, not answered
+/// with an empty result: a client that asked for something is entitled to know
+/// it was not understood.
+#[test]
+fn an_unimplemented_request_says_so() {
+    let mut server = opened_server();
+
+    let response = server.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": DOCUMENT_URI },
+            "position": { "line": 0, "character": 0 },
+        }),
+    );
+
+    // -32601 == MethodNotFound.
+    assert_eq!(response["error"]["code"], json!(-32601));
+}
+
+/// Parameters that cannot be read are an error on a request, and the request
+/// is the only place there is to report one.
+#[test]
+fn unreadable_request_parameters_are_an_error() {
+    let mut server = opened_server();
+
+    let response = server.request(
+        "textDocument/hover",
+        json!({ "textDocument": { "uri": DOCUMENT_URI } }),
+    );
+
+    // -32602 == InvalidParams.
+    assert_eq!(response["error"]["code"], json!(-32602));
 }

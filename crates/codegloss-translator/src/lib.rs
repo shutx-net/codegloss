@@ -41,10 +41,10 @@ pub trait Translator: Send + Sync {
     /// to change.
     ///
     /// This is deliberately a **blocking** call: NMT inference is CPU-bound
-    /// work, and an `async fn` here would only wrap something that still has to
-    /// be handed to a blocking thread pool. The caller is responsible for
-    /// keeping it off the async executor - `codegloss-lsp` runs it inside
-    /// `tokio::task::spawn_blocking`.
+    /// work, and an `async fn` here would only wrap something that still has
+    /// to be handed to a thread. The caller is responsible for keeping it off
+    /// whatever answers requests - `codegloss-lsp` runs it on a worker thread
+    /// of its own, never on the thread that reads the connection.
     fn translate(&self, segments: &[Segment]) -> anyhow::Result<Vec<String>>;
 
     /// Identifies the engine together with the weights it is running.

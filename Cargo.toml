@@ -28,17 +28,15 @@ sha2 = "0.10"
 # platform-verifier は OS の証明書ストアを使う。webpki-roots（コンパイル時に
 # 埋め込む集合）だと、TLS を傍受するプロキシの下で UnknownIssuer になる。
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "gzip"] }
-dashmap = "6"
-# tower-lsp-server が使う futures と同じ版。テストでサーバ発リクエスト
-# （workspace/*/refresh）を ClientSocket から読むためだけに使う。
-futures = "0.3"
+# lsp-server のチャネルと同じ版。ワーカーのキュー・エンジン差し替えの通知・
+# サーバ発リクエストの待ち合わせに使う（tokio の mpsc / watch / time を
+# これと std::thread に置き換えた）。
+crossbeam-channel = "0.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# sync: 翻訳ジョブのキュー（mpsc）と完了通知（watch）。
-# time: デバウンスと refresh のスロットリング。
-tokio = { version = "1.53", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
-tower = { version = "0.5", features = ["util"] }
-tower-lsp-server = "0.23"
+# JSON-RPC の枠と stdio だけ。LSP の型は持たないので、こちらが使う面は
+# crates/codegloss-lsp/src/ls_types.rs に自分で書いてある。
+lsp-server = "0.10"
 # `log` ファサード経由の記録を自前の Logger へ橋渡しするために要る
 # （crates/codegloss-lsp/src/logging.rs）。実測は同クレートの Cargo.toml。
 # std feature: `set_boxed_logger` と `impl Log for Arc<T>`（Subscriber と同じ 1 つの
@@ -47,8 +45,14 @@ log = { version = "0.4", features = ["std"] }
 # facade だけ。**subscriber はここには無い**——1 行を組み立てて stderr へ書くのも
 # `CODEGLOSS_LOG` を読むのも crates/codegloss-lsp/src/logging.rs が自前でやるので、
 # tracing-subscriber は引かない（出荷ツリーから 7 クレート減った。戻すと CI の
-# `check the shipped dependency tree` が落ちる）。`tracing` 自体は
-# tower-lsp-server がどのみち引くので、残しても 1 クレートも増えない。
+# `check the shipped dependency tree` が落ちる）。
+#
+# **tower-lsp-server を外したので「どのみち引かれる」ではなくなった。**外すと
+# 既定ツリーから 5 つ（tracing / tracing-attributes / tracing-core / once_cell /
+# pin-project-lite）減るが、**出荷ツリーからは 1 つも減らない**——candle 側の
+# codegloss-translator が引いているため。53 箇所の記録を書き換えて logging.rs の
+# Subscriber 側を捨てても出荷ツリーが変わらないので、やっていない（#78 の
+# thiserror と同じ形の測定結果）。
 tracing = "0.1"
 # Tokenizer::from_file で FuguMT の tokenizer.json を読む。既定 feature の
 # esaxx_fast は C++ のビルドを、progressbar は indicatif を引くのでどちらも切る。

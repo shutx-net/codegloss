@@ -5,10 +5,13 @@
 //! Each stored buffer keeps the comment blocks extracted from it, which is what
 //! the request handlers answer from.
 
+use std::collections::HashMap;
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
 use codegloss_core::{CommentBlock, CommentRules};
 use codegloss_parser::{SupportedLanguage, extract_comment_blocks};
-use dashmap::DashMap;
-use tower_lsp_server::ls_types::{Position, Range, Uri};
+
+use crate::ls_types::{Position, Range, Uri};
 
 /// The client's current view of one open document.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,13 +59,23 @@ pub struct CommentBlockHit {
     pub range: Range,
 }
 
-/// Concurrent map of open documents.
+/// Map of open documents.
 ///
-/// Translation runs on background tasks that need to read the buffer while the
-/// LSP handlers keep serving requests, hence a `DashMap` rather than a `Mutex`.
+/// One lock over the whole map, which is the right size for how this is used:
+/// every caller is the thread that reads the connection
+/// ([`crate::server::serve`]), so two of these methods never run at once.
+/// Translation does not read the store at all - a handler takes the comments
+/// out with [`Self::comment_sources`] and sends them down the queue by value,
+/// so the worker holds no borrow of anything here.
+///
+/// IMPORTANT: that is what makes a single lock cheap, and it is the thing to
+/// re-examine before handlers are ever run on more than one thread. With
+/// several of them, parsing inside [`Self::update`] would hold this lock while
+/// it ran, and one buffer's keystroke would stall another buffer's hover; the
+/// answer then is a lock per document, not a bigger lock.
 #[derive(Debug, Default)]
 pub struct DocumentStore {
-    documents: DashMap<Uri, DocumentState>,
+    documents: RwLock<HashMap<Uri, DocumentState>>,
 }
 
 impl DocumentStore {
@@ -70,9 +83,30 @@ impl DocumentStore {
         Self::default()
     }
 
+    /// The map, readable even if a panic elsewhere poisoned the lock.
+    ///
+    /// A poisoned lock means some handler panicked while holding it. The data
+    /// behind it is a mirror of what the editor has open, and nothing about it
+    /// can be left half-written by a panic: every method below replaces whole
+    /// entries. Refusing to read it from then on would blind the server for
+    /// the rest of the session over one bad request, which is worse than the
+    /// panic was.
+    fn read(&self) -> RwLockReadGuard<'_, HashMap<Uri, DocumentState>> {
+        self.documents
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, HashMap<Uri, DocumentState>> {
+        self.documents
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     pub fn open(&self, uri: Uri, language_id: String, version: i32, text: String) {
+        // Parsed before the lock is taken, not under it.
         let blocks = extract(&uri, &language_id, &text);
-        self.documents.insert(
+        self.write().insert(
             uri,
             DocumentState {
                 language_id,
@@ -88,22 +122,32 @@ impl DocumentStore {
     /// A change for a document that was never opened is dropped: without the
     /// language id from `didOpen` there is no grammar to parse it with.
     pub fn update(&self, uri: &Uri, version: i32, text: String) {
-        let Some(mut document) = self.documents.get_mut(uri) else {
+        // The language id is read under the read lock and the parse runs
+        // outside both, so the write lock is held only for the swap. There is
+        // one writer (see the type's docs), so nothing can have replaced the
+        // entry in between; the `get_mut` below still copes if it was closed.
+        let Some(language_id) = self.read().get(uri).map(|d| d.language_id.clone()) else {
             return;
         };
-        document.blocks = extract(uri, &document.language_id, &text);
+        let blocks = extract(uri, &language_id, &text);
+
+        let mut documents = self.write();
+        let Some(document) = documents.get_mut(uri) else {
+            return;
+        };
+        document.blocks = blocks;
         document.version = version;
         document.text = text;
     }
 
     pub fn close(&self, uri: &Uri) {
-        self.documents.remove(uri);
+        self.write().remove(uri);
     }
 
     /// Returns a snapshot of the document. Cloning keeps the map unlocked while
-    /// a background translation job works on the text.
+    /// the caller works on the text.
     pub fn snapshot(&self, uri: &Uri) -> Option<DocumentState> {
-        self.documents.get(uri).map(|entry| entry.value().clone())
+        self.read().get(uri).cloned()
     }
 
     /// The comment block `position` points into, if any.
@@ -112,7 +156,8 @@ impl DocumentStore {
     /// in the code part of `let x = 1; // note` yields nothing while a position
     /// in the comment part of the same line yields the note.
     pub fn comment_block_at(&self, uri: &Uri, position: Position) -> Option<CommentBlockHit> {
-        let document = self.documents.get(uri)?;
+        let documents = self.read();
+        let document = documents.get(uri)?;
         let offset = byte_offset_at(&document.text, position)?;
         let block = document
             .blocks
@@ -138,7 +183,7 @@ impl DocumentStore {
     /// IMPORTANT: `read` runs while the document is locked for reading. It must
     /// not touch this store again, and it must not block.
     pub fn with_blocks<T>(&self, uri: &Uri, read: impl FnOnce(&[CommentBlock]) -> T) -> Option<T> {
-        self.documents.get(uri).map(|entry| read(&entry.blocks))
+        self.read().get(uri).map(|document| read(&document.blocks))
     }
 
     /// Every comment of a document, in source order, each exactly as the file
@@ -153,17 +198,17 @@ impl DocumentStore {
     /// job carrying only part of a document could not safely replace an earlier
     /// job for the same one.
     pub fn comment_sources(&self, uri: &Uri) -> Vec<CommentSource> {
-        self.documents.get(uri).map_or_else(Vec::new, |document| {
+        self.read().get(uri).map_or_else(Vec::new, |document| {
             document.blocks.iter().map(CommentSource::of).collect()
         })
     }
 
     pub fn len(&self) -> usize {
-        self.documents.len()
+        self.read().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.documents.is_empty()
+        self.read().is_empty()
     }
 }
 
@@ -227,14 +272,13 @@ fn position_at(text: &str, offset: usize) -> Option<Position> {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
 
     use super::*;
 
     const RUST: &str = "// Return the cached user.\nfn find_user() {}\n";
 
     fn uri() -> Uri {
-        Uri::from_str("file:///tmp/main.rs").expect("valid file uri")
+        Uri::from("file:///tmp/main.rs")
     }
 
     fn store() -> DocumentStore {
@@ -264,7 +308,7 @@ mod tests {
     #[test]
     fn a_typescript_document_is_read_under_typescript() {
         let store = DocumentStore::new();
-        let uri = Uri::from_str("file:///tmp/user.ts").expect("valid file uri");
+        let uri = Uri::from("file:///tmp/user.ts");
         store.open(
             uri.clone(),
             "typescript".to_owned(),
@@ -297,7 +341,7 @@ mod tests {
     #[test]
     fn a_tsx_document_is_read_under_the_id_vs_code_sends() {
         let store = DocumentStore::new();
-        let uri = Uri::from_str("file:///tmp/hello.tsx").expect("valid file uri");
+        let uri = Uri::from("file:///tmp/hello.tsx");
         store.open(
             uri.clone(),
             "typescriptreact".to_owned(),
@@ -465,7 +509,7 @@ mod tests {
 
     #[test]
     fn a_position_in_an_unknown_document_finds_nothing() {
-        let other = Uri::from_str("file:///tmp/other.rs").expect("valid file uri");
+        let other = Uri::from("file:///tmp/other.rs");
         assert!(
             store()
                 .comment_block_at(&other, Position::new(0, 0))

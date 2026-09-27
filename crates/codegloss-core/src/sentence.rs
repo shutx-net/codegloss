@@ -219,8 +219,9 @@ fn is_abbreviation(piece: &str) -> bool {
     // rather than `rfind`, because `rfind` gives the offset the separator
     // *starts* at: adding one lands inside it whenever it is not one byte, and
     // slicing there panics. A comment carrying `§7.2.` or a pasted `”` is
-    // enough, and this runs on the worker's task rather than inside
-    // `spawn_blocking`, so the panic took translation down for the session.
+    // enough, and this runs on the worker itself rather than inside the
+    // engine call it guards, so the panic took translation down for the
+    // session.
     let start = word
         .char_indices()
         .rev()

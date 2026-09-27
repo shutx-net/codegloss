@@ -10,24 +10,21 @@ use std::sync::Arc;
 
 use codegloss_core::{GlossCache, opens_or_closes_a_rendered_fence};
 use codegloss_translator::{PassthroughTranslator, Translator};
-use tower_lsp_server::jsonrpc::Result;
-use tower_lsp_server::ls_types::{
-    CodeLens, CodeLensOptions, CodeLensParams, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, ExecuteCommandOptions,
-    ExecuteCommandParams, Hover, HoverContents, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, InitializedParams, LSPAny, MarkupContent, MarkupKind,
-    MessageType, ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind,
-    Uri,
-};
-use tower_lsp_server::{Client, LanguageServer};
 
+use crate::client::Client;
 use crate::code_lens;
 use crate::documents::DocumentStore;
+use crate::ls_types::{
+    CodeLens, CodeLensOptions, CodeLensParams, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, ExecuteCommandOptions,
+    ExecuteCommandParams, Hover, HoverParams, InitializeResult, MarkupContent, MarkupKind,
+    MessageType, ServerCapabilities, ServerInfo, TextDocumentSyncKind, Uri,
+};
 use crate::translation::{EngineWatch, TranslationService, engine_channel};
 
 #[derive(Debug)]
 pub struct Backend {
-    client: Client,
+    client: Arc<Client>,
     documents: DocumentStore,
     glosses: TranslationService,
 }
@@ -35,9 +32,8 @@ pub struct Backend {
 impl Backend {
     /// The server as it runs for real, on the engine of the day.
     ///
-    /// Must be called from inside a tokio runtime: it starts the background
-    /// worker.
-    pub fn new(client: Client) -> Self {
+    /// Starts the background worker, which is a thread of its own.
+    pub fn new(client: Arc<Client>) -> Self {
         Self::with_engine(client, Arc::new(PassthroughTranslator))
     }
 
@@ -47,7 +43,7 @@ impl Backend {
     /// apart from the source text, which the passthrough engine cannot do
     /// because its output is its input. It is what picks candle when a
     /// model pack is installed and to fall back when it is not.
-    pub fn with_engine(client: Client, engine: Arc<dyn Translator>) -> Self {
+    pub fn with_engine(client: Arc<Client>, engine: Arc<dyn Translator>) -> Self {
         // The switch is dropped on the way out, which is how this says the
         // engine will not change: nothing here is going to download a pack.
         let (_switch, engine) = engine_channel(engine);
@@ -61,10 +57,10 @@ impl Backend {
     /// restart does not re-translate what the last run already translated, and
     /// an engine that starts out as the passthrough and becomes candle once the
     /// model pack has been downloaded.
-    pub fn with_cache(client: Client, engine: EngineWatch, cache: Arc<GlossCache>) -> Self {
+    pub fn with_cache(client: Arc<Client>, engine: EngineWatch, cache: Arc<GlossCache>) -> Self {
         Self {
             documents: DocumentStore::new(),
-            glosses: TranslationService::spawn(client.clone(), engine, cache),
+            glosses: TranslationService::spawn(Arc::clone(&client), engine, cache),
             client,
         }
     }
@@ -85,16 +81,20 @@ impl Backend {
     }
 }
 
-impl LanguageServer for Backend {
-    async fn initialize(&self, _params: InitializeParams) -> Result<InitializeResult> {
-        Ok(InitializeResult {
+/// The LSP methods themselves.
+///
+/// Plain synchronous methods: nothing here awaits, and nothing here may run
+/// the engine (see the module docs). `shutdown` and `exit` are the lifecycle's
+/// business and are answered by [`crate::server`], which is also what routes
+/// a message to one of these.
+impl Backend {
+    pub fn initialize(&self) -> InitializeResult {
+        InitializeResult {
             capabilities: ServerCapabilities {
                 // FULL sync: the client resends the whole buffer on every
                 // change, so there is no incremental patching to get wrong.
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
-                )),
-                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                text_document_sync: Some(TextDocumentSyncKind::FULL),
+                hover_provider: Some(true),
                 code_lens_provider: Some(CodeLensOptions {
                     // A lens leaves here complete. Resolving one is for a
                     // client that wants to defer expensive work per lens, and
@@ -106,33 +106,25 @@ impl LanguageServer for Backend {
                 // [`code_lens::NOOP_COMMAND`].
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![code_lens::NOOP_COMMAND.to_owned()],
-                    ..ExecuteCommandOptions::default()
                 }),
-                ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
                 name: "codegloss-lsp".to_owned(),
                 version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             }),
-            ..InitializeResult::default()
-        })
+        }
     }
 
-    async fn initialized(&self, _params: InitializedParams) {
+    pub fn initialized(&self) {
         tracing::info!("codegloss-lsp {} initialized", env!("CARGO_PKG_VERSION"));
         // Only now may the pipeline ask the client to refetch anything: a
         // `workspace/*/refresh` sent earlier is refused with -32002.
         self.glosses.mark_initialized();
         self.client
-            .log_message(MessageType::INFO, "CodeGloss language server initialized")
-            .await;
+            .log_message(MessageType::INFO, "CodeGloss language server initialized");
     }
 
-    async fn shutdown(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn did_open(&self, params: DidOpenTextDocumentParams) {
+    pub fn did_open(&self, params: DidOpenTextDocumentParams) {
         let document = params.text_document;
         tracing::debug!(
             uri = document.uri.as_str(),
@@ -152,7 +144,7 @@ impl LanguageServer for Backend {
         self.request_glosses(&uri);
     }
 
-    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+    pub fn did_change(&self, params: DidChangeTextDocumentParams) {
         // Under FULL sync the client sends a single change holding the entire
         // document. Take the last one so a client that batches still wins.
         let Some(change) = params.content_changes.into_iter().next_back() else {
@@ -166,7 +158,7 @@ impl LanguageServer for Backend {
         self.request_glosses(&uri);
     }
 
-    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+    pub fn did_close(&self, params: DidCloseTextDocumentParams) {
         self.documents.close(&params.text_document.uri);
     }
 
@@ -183,12 +175,9 @@ impl LanguageServer for Backend {
     /// screen cannot be replaced: showing the English is more use than showing
     /// a placeholder, and the next hover over the same comment shows the
     /// Japanese.
-    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let position = params.text_document_position_params;
-        let uri = position.text_document.uri;
-        let Some(hit) = self.documents.comment_block_at(&uri, position.position) else {
-            return Ok(None);
-        };
+    pub fn hover(&self, params: HoverParams) -> Option<Hover> {
+        let uri = params.text_document.uri;
+        let hit = self.documents.comment_block_at(&uri, params.position)?;
 
         // Keyed on the comment as written, which is what the gloss was built
         // from; the flattened `text` is only what the popup quotes underneath.
@@ -202,13 +191,13 @@ impl LanguageServer for Backend {
 
         // Markdown unconditionally: Zed advertises Markdown as the only hover
         // content format it accepts, so there is nothing to negotiate.
-        Ok(Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
+        Some(Hover {
+            contents: MarkupContent {
                 kind: MarkupKind::Markdown,
                 value,
-            }),
+            },
             range: Some(hit.range),
-        }))
+        })
     }
 
     /// One lens per comment block, each showing the gloss of that comment.
@@ -222,13 +211,13 @@ impl LanguageServer for Backend {
     /// Nothing here waits for the engine: a block with no gloss is queued and
     /// gets a placeholder, and the `workspace/codeLens/refresh` the pipeline
     /// sends when the batch lands brings the client back for the real title.
-    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+    pub fn code_lens(&self, params: CodeLensParams) -> Option<Vec<CodeLens>> {
         let uri = params.text_document.uri;
 
         // `None` for a document that was never opened, an empty list for one
         // that has no comments. The first is a question this server cannot
         // answer; the second is an answer.
-        let Some((lenses, missing)) = self.documents.with_blocks(&uri, |blocks| {
+        let (lenses, missing) = self.documents.with_blocks(&uri, |blocks| {
             let mut lenses = Vec::with_capacity(blocks.len());
             let mut missing = false;
             for block in blocks {
@@ -241,16 +230,14 @@ impl LanguageServer for Backend {
                 }
             }
             (lenses, missing)
-        }) else {
-            return Ok(None);
-        };
+        })?;
 
         if missing {
             // Outside the closure on purpose: it reads the document store
             // again, and the closure ran with the document locked.
             self.request_glosses(&uri);
         }
-        Ok(Some(lenses))
+        Some(lenses)
     }
 
     /// Accepts [`code_lens::NOOP_COMMAND`] and does nothing with it.
@@ -259,13 +246,12 @@ impl LanguageServer for Backend {
     /// and a drawn lens is clickable whether or not anything should happen.
     /// Answering `null` is what keeps a click from raising an error in the
     /// editor.
-    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<LSPAny>> {
+    pub fn execute_command(&self, params: ExecuteCommandParams) {
         if params.command != code_lens::NOOP_COMMAND {
             // Not worth failing the request over: an unknown command here is
             // the client's mistake, and an error would surface as a popup.
             tracing::debug!(command = %params.command, "ignoring an unknown command");
         }
-        Ok(None)
     }
 }
 

@@ -8,10 +8,11 @@
 //! once results are in.
 //!
 //! The engine in the tree today returns its input unchanged and takes
-//! microseconds, so a synchronous handler would look perfectly healthy. That is
-//! precisely why the pipeline is built now: with candle in place a synchronous
-//! handler freezes the editor for as long as inference takes, and by then the
-//! shortcut is load-bearing.
+//! microseconds, so a handler that ran it would look perfectly healthy. That is
+//! precisely why the pipeline is built now: with candle in place such a handler
+//! freezes the editor for as long as inference takes, and by then the shortcut
+//! is load-bearing. The loop that reads the connection is a single thread, so
+//! it would freeze every other request with it.
 //!
 //! Shape of one round trip:
 //!
@@ -21,7 +22,7 @@
 //!   -> worker collects jobs for 150 ms    (a burst of keystrokes is one batch)
 //!   -> drops cached and duplicate blocks
 //!   -> GlossPlan::new                     (pre-processing: mask)
-//!   -> spawn_blocking(translate(batch))   (off the async executor)
+//!   -> translate(batch)                   (on the worker thread, never the reader's)
 //!   -> GlossPlan::restore                 (post-processing: unmask, rebuild)
 //!   -> cache.insert(..)
 //!   -> workspace/inlayHint/refresh + workspace/codeLens/refresh
@@ -35,19 +36,19 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::future::Future;
-use std::sync::Arc;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use codegloss_core::{CommentRules, GlossCache, GlossKey, GlossPlan, Segment};
 use codegloss_translator::Translator;
-use tokio::sync::{mpsc, watch};
-use tokio::time::{Instant, timeout, timeout_at};
-use tower_lsp_server::ls_types::Uri;
-use tower_lsp_server::{Client, jsonrpc};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, select, unbounded};
 
+use crate::client::{Client, Outcome};
 use crate::documents::CommentSource;
+use crate::ls_types::Uri;
 
 /// The only language pair v0.1 handles.
 ///
@@ -79,30 +80,124 @@ const MIN_REFRESH_INTERVAL: Duration = Duration::from_millis(300);
 /// this one.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The end of the engine channel a reader holds.
+/// The engine as everything else sees it: a slot to read, and a bell.
 ///
-/// The engine is not owned by the pipeline any more, because it can be
-/// replaced while the server runs: a server that started without a model pack
-/// downloads one in the background and swaps candle in when it arrives
+/// The engine is not owned by the pipeline, because it can be replaced while
+/// the server runs: a server that started without a model pack downloads one
+/// in the background and swaps candle in when it arrives
 /// (`model_pack::spawn_download`).
 ///
-/// A `watch` rather than a lock, because the worker has to *notice* the swap
-/// and not merely see a new value the next time it happens to look: every
-/// gloss the old engine produced is now unreachable (the model version is part
-/// of the cache key), so the client has to be told to ask again. Readers get
-/// the engine of the moment with `borrow()`, which is what the request path
-/// needs.
-pub type EngineWatch = watch::Receiver<Arc<dyn Translator>>;
+/// Two halves, because the two readers need different things. The request
+/// path needs the engine of the moment and must not block, which is
+/// [`EngineWatch::current`] - a read lock and an `Arc` clone. The worker has
+/// to *notice* the swap rather than see a new value the next time it happens
+/// to look: every gloss the old engine produced is now unreachable (the model
+/// version is part of the cache key), so the client has to be told to ask
+/// again. That is [`EngineWatch::changes`], a channel it can wait on next to
+/// the job queue.
+#[derive(Clone)]
+pub struct EngineWatch {
+    current: Arc<RwLock<Arc<dyn Translator>>>,
+    changes: Receiver<()>,
+}
+
+impl EngineWatch {
+    /// The engine as it stands. Cheap, and safe to call from a handler.
+    #[must_use]
+    pub fn current(&self) -> Arc<dyn Translator> {
+        Arc::clone(&self.current.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Fires once per replacement. Disconnected once the switch is dropped,
+    /// which is how a server that can never be given another engine says so.
+    #[must_use]
+    pub fn changes(&self) -> &Receiver<()> {
+        &self.changes
+    }
+}
 
 /// The other end: whoever may replace the engine holds this one.
 ///
 /// Dropping it is normal and means the engine will never change - which is the
 /// case for every build without a downloader, and for the tests.
-pub type EngineSwitch = watch::Sender<Arc<dyn Translator>>;
+pub struct EngineSwitch {
+    current: Arc<RwLock<Arc<dyn Translator>>>,
+    changes: Sender<()>,
+}
 
-/// A channel carrying the engine, starting out on `initial`.
+/// `dyn Translator` is not `Debug`, and the only thing worth printing about
+/// an engine is which one it is.
+impl fmt::Debug for EngineWatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EngineWatch")
+            .field("model_version", &self.current().model_version())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for EngineSwitch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EngineSwitch")
+            .finish_non_exhaustive()
+    }
+}
+
+impl EngineSwitch {
+    /// Puts `engine` in place and rings the bell.
+    ///
+    /// Fails only once nothing is listening, which means the worker has
+    /// stopped. The slot is written either way, so a reader that outlives the
+    /// worker still sees the new engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine back when the watcher is gone.
+    pub fn send(&self, engine: Arc<dyn Translator>) -> Result<(), NoWatcher> {
+        *self.current.write().unwrap_or_else(PoisonError::into_inner) = Arc::clone(&engine);
+        self.changes.send(()).map_err(|_| NoWatcher(engine))
+    }
+}
+
+/// [`EngineSwitch::send`] found nothing watching: the worker has stopped.
+///
+/// It carries the engine back, because the caller built it and this is the
+/// only way to return it. `dyn Translator` is not `Debug`, so the derive
+/// cannot be used and the name alone is what a panic prints.
+pub struct NoWatcher(pub Arc<dyn Translator>);
+
+impl fmt::Debug for NoWatcher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NoWatcher(..)")
+    }
+}
+
+impl fmt::Display for NoWatcher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the translation worker has stopped")
+    }
+}
+
+impl std::error::Error for NoWatcher {}
+
+/// A slot holding the engine, starting out on `initial`, and the bell for it.
+#[must_use]
 pub fn engine_channel(initial: Arc<dyn Translator>) -> (EngineSwitch, EngineWatch) {
-    watch::channel(initial)
+    let current = Arc::new(RwLock::new(initial));
+    // Unbounded so that a replacement never blocks the downloader on the
+    // worker being ready to look. There is at most a handful in a session.
+    let (changes, receiver) = unbounded();
+    (
+        EngineSwitch {
+            current: Arc::clone(&current),
+            changes,
+        },
+        EngineWatch {
+            current,
+            changes: receiver,
+        },
+    )
 }
 
 /// One document's worth of comments to translate.
@@ -115,12 +210,61 @@ struct Job {
     sources: Vec<CommentSource>,
 }
 
+/// How many batches the worker has finished, and a way to wait for the next.
+///
+/// Only the tests wait on it, and what they need is the pipeline to have
+/// settled: a batch is counted after its glosses are cached and its refresh
+/// requests have been answered, so a count that has moved means the new
+/// translations are readable.
+#[derive(Clone, Debug, Default)]
+pub struct BatchCounter {
+    state: Arc<(Mutex<u64>, Condvar)>,
+}
+
+impl BatchCounter {
+    /// Batches finished so far.
+    #[must_use]
+    pub fn count(&self) -> u64 {
+        *self.state.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Waits until the count has moved past `seen`, or `patience` runs out.
+    ///
+    /// Returns the count reached, or `None` on a timeout. Taking `seen` rather
+    /// than remembering a position is what makes this safe to use from a test
+    /// that read the count before queueing the work: a batch that finished in
+    /// between is not missed.
+    #[must_use]
+    pub fn wait_past(&self, seen: u64, patience: Duration) -> Option<u64> {
+        let (count, moved) = &*self.state;
+        let deadline = Instant::now() + patience;
+        let mut count = count.lock().unwrap_or_else(PoisonError::into_inner);
+        while *count <= seen {
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            let (next, timed_out) = moved
+                .wait_timeout(count, remaining)
+                .unwrap_or_else(PoisonError::into_inner);
+            count = next;
+            if timed_out.timed_out() && *count <= seen {
+                return None;
+            }
+        }
+        Some(*count)
+    }
+
+    fn bump(&self) {
+        let (count, moved) = &*self.state;
+        *count.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        moved.notify_all();
+    }
+}
+
 /// The handle the LSP handlers hold: a cache to read and a queue to write.
 pub struct TranslationService {
     engine: EngineWatch,
     cache: Arc<GlossCache>,
-    jobs: mpsc::UnboundedSender<Job>,
-    batches: watch::Receiver<u64>,
+    jobs: Sender<Job>,
+    batches: BatchCounter,
     initialized: Arc<AtomicBool>,
 }
 
@@ -128,7 +272,7 @@ impl fmt::Debug for TranslationService {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TranslationService")
-            .field("model_version", &self.engine.borrow().model_version())
+            .field("model_version", &self.engine.current().model_version())
             .field("cached", &self.cache.len())
             .finish_non_exhaustive()
     }
@@ -138,24 +282,31 @@ impl TranslationService {
     /// Starts the worker task and returns the handle to talk to it.
     ///
     /// Exactly one worker, on purpose. Translation is serialised so that a real
-    /// engine holds one model in memory and runs one inference at a time;
-    /// `spawn_blocking`'s pool would otherwise happily start hundreds.
+    /// engine holds one model in memory and runs one inference at a time.
     ///
-    /// Must be called from inside a tokio runtime.
-    pub fn spawn(client: Client, engine: EngineWatch, cache: Arc<GlossCache>) -> Self {
+    /// A thread rather than a pool, and a thread rather than the loop that
+    /// reads the connection: inference is CPU-bound and takes seconds, and the
+    /// reader must stay free to answer the next request out of the cache.
+    pub fn spawn(client: Arc<Client>, engine: EngineWatch, cache: Arc<GlossCache>) -> Self {
         let initialized = Arc::new(AtomicBool::new(false));
-        let (jobs, queue) = mpsc::unbounded_channel();
-        let (completed, batches) = watch::channel(0);
+        let (jobs, queue) = unbounded();
+        let batches = BatchCounter::default();
 
         let worker = Worker {
             client,
             engine: engine.clone(),
             cache: Arc::clone(&cache),
             initialized: Arc::clone(&initialized),
-            completed,
+            completed: batches.clone(),
             last_refresh: None,
         };
-        tokio::spawn(worker.run(queue));
+        // Named so that it can be told apart in a backtrace or a profile.
+        // A failure to start one thread is not something to paper over: the
+        // server would run and never gloss anything.
+        thread::Builder::new()
+            .name("codegloss-translate".to_owned())
+            .spawn(move || worker.run(&queue))
+            .expect("the translation worker thread could not be started");
 
         Self {
             engine,
@@ -211,7 +362,8 @@ impl TranslationService {
     /// for the pipeline to settle. The counter is bumped once per batch, after
     /// its results are cached and its refresh requests have been answered, so
     /// observing a change means the new translations are readable.
-    pub fn batches_completed(&self) -> watch::Receiver<u64> {
+    #[must_use]
+    pub fn batches_completed(&self) -> BatchCounter {
         self.batches.clone()
     }
 
@@ -222,54 +374,57 @@ impl TranslationService {
     /// the point: after a swap this has to start missing, so that the comments
     /// glossed by the engine before it are translated again.
     pub fn key(&self, source: &str, rules: CommentRules) -> GlossKey {
-        key(self.engine.borrow().model_version(), source, rules)
+        key(self.engine.current().model_version(), source, rules)
     }
 }
 
-/// The task that runs the engine.
+/// The thread that runs the engine.
 struct Worker {
-    client: Client,
+    client: Arc<Client>,
     engine: EngineWatch,
     cache: Arc<GlossCache>,
     initialized: Arc<AtomicBool>,
-    completed: watch::Sender<u64>,
+    completed: BatchCounter,
     last_refresh: Option<Instant>,
 }
 
 impl Worker {
-    async fn run(mut self, mut queue: mpsc::UnboundedReceiver<Job>) {
+    fn run(mut self, queue: &Receiver<Job>) {
         // Cleared once the switch is gone, which is how a server that can
         // never be given another engine says so.
         //
         // IMPORTANT: the branch has to be taken out of the running, not merely
-        // ignored. `changed()` on a closed watch is ready immediately and stays
-        // ready, so leaving it in the select turns this wait into a spin - it
-        // went round 286,000 times in 100 ms when measured. It does not stall
-        // anything (tokio yields the task when its budget runs out, so every
-        // test still passes) and it does not corrupt anything. It just burns a
-        // core for as long as the editor is open, which is why the guard is
-        // here and not a test.
+        // ignored. A receive on a disconnected channel is ready immediately
+        // and stays ready, so leaving it in the select turns this wait into a
+        // spin - the tokio version of this loop went round 286,000 times in
+        // 100 ms when measured, and a thread has no scheduler budget to yield
+        // on, so here it would be a core at 100% rather than a busy one. That
+        // is why the guard is written out and not left to a test.
         let mut swappable = true;
 
         loop {
-            let job = tokio::select! {
-                job = queue.recv() => job,
-                changed = self.engine.changed(), if swappable => {
-                    if changed.is_err() {
-                        swappable = false;
-                    } else {
-                        self.engine_replaced().await;
+            let job = if swappable {
+                select! {
+                    recv(queue) -> job => job,
+                    recv(self.engine.changes()) -> changed => {
+                        if changed.is_err() {
+                            swappable = false;
+                        } else {
+                            self.engine_replaced();
+                        }
+                        continue;
                     }
-                    continue;
                 }
+            } else {
+                queue.recv()
             };
 
-            let Some(job) = job else { break };
+            let Ok(job) = job else { break };
             let mut pending = HashMap::new();
             pending.insert(job.uri, job.sources);
 
-            let still_open = collect_until_quiet(&mut queue, &mut pending).await;
-            self.run_batch(pending).await;
+            let still_open = collect_until_quiet(queue, &mut pending);
+            self.run_batch(pending);
 
             if !still_open {
                 break;
@@ -286,54 +441,50 @@ impl Worker {
     /// can no longer be found. Asking the client to refetch is what turns that
     /// into work: it comes back for the lenses it is showing, they miss, and
     /// the handler queues them.
-    async fn engine_replaced(&mut self) {
-        let model_version = self.engine.borrow_and_update().model_version().to_owned();
+    fn engine_replaced(&mut self) {
+        let model_version = self.engine.current().model_version().to_owned();
         tracing::info!(
             model_version,
             "the engine was replaced; asking for a refetch"
         );
-        self.refresh().await;
+        self.refresh();
     }
 
     /// Translates whatever of `pending` is not cached yet, then asks the client
     /// to refetch.
-    async fn run_batch(&mut self, pending: HashMap<Uri, Vec<CommentSource>>) {
+    fn run_batch(&mut self, pending: HashMap<Uri, Vec<CommentSource>>) {
         let documents = pending.len();
         // Taken once and used for the whole batch. Reading it again after the
         // engine ran would store what one engine produced under another one's
         // key, and nothing downstream could tell.
         //
-        // `borrow`, not `borrow_and_update`: a swap that lands while a batch is
-        // being collected would otherwise be marked as seen here and never
-        // reach the branch that asks the client to refetch. Leaving it unseen
-        // costs at most one extra refresh, which is rate-limited anyway.
-        let translator = self.engine.borrow().clone();
+        // Reading the slot does not consume the bell: a swap that lands while
+        // a batch is being collected still reaches the branch that asks the
+        // client to refetch. It costs at most one extra refresh, which is
+        // rate-limited anyway, and the alternative loses the refetch.
+        let translator = self.engine.current();
         let sources = uncached_sources(&self.cache, translator.model_version(), pending);
 
         let stored = if sources.is_empty() {
             0
         } else {
-            self.run_engine(&translator, sources).await
+            self.run_engine(&translator, sources)
         };
 
         tracing::debug!(documents, stored, "translation batch finished");
         if stored > 0 {
-            self.refresh().await;
+            self.refresh();
         }
 
         // Bumped for every batch, including one that had nothing left to do:
         // the counter says "the queue has been drained up to here", which is
         // what a caller waiting for the pipeline to settle needs to know.
-        self.completed.send_modify(|count| *count += 1);
+        self.completed.bump();
     }
 
     /// Pre-processes, runs the engine off the async executor, post-processes and
     /// caches what comes back. Returns how many glosses were stored.
-    async fn run_engine(
-        &self,
-        translator: &Arc<dyn Translator>,
-        sources: Vec<CommentSource>,
-    ) -> usize {
+    fn run_engine(&self, translator: &Arc<dyn Translator>, sources: Vec<CommentSource>) -> usize {
         // Pre-processing (`codegloss-core`): each comment is taken apart into
         // the units a translator should see, with identifiers, inline code,
         // URLs and doc tags replaced by placeholders.
@@ -355,20 +506,24 @@ impl Worker {
             return self.store(translator, &sources, &plans, &slots, &[]);
         }
 
-        let engine = Arc::clone(translator);
-        // IMPORTANT: inference is CPU-bound and blocking. Running it on the
-        // executor would stall every other LSP handler on the same thread.
-        let finished = tokio::task::spawn_blocking(move || {
-            let translations = engine.translate(&segments);
-            (segments, translations)
-        })
-        .await;
+        // IMPORTANT: a panic in the engine must not take the worker with it.
+        // Losing the thread would stop every future translation silently -
+        // the handlers would go on answering from the cache and queueing
+        // misses that nobody reads. Catching it costs one batch instead.
+        //
+        // `AssertUnwindSafe` because the only things reachable across the
+        // boundary are the engine behind an `Arc` and the segments, and a
+        // panicking `translate` leaves neither of them half-written: the
+        // segments are read-only here, and an engine that broke its own state
+        // gets replaced by nothing - the next batch calls it again and, if it
+        // keeps panicking, keeps costing one batch.
+        let finished = catch_unwind(AssertUnwindSafe(|| translator.translate(&segments)));
 
         match finished {
-            Ok((segments, Ok(translations))) if translations.len() == segments.len() => {
+            Ok(Ok(translations)) if translations.len() == segments.len() => {
                 self.store(translator, &sources, &plans, &slots, &translations)
             }
-            Ok((segments, Ok(translations))) => {
+            Ok(Ok(translations)) => {
                 // The trait says one output per input. An engine that breaks
                 // that would otherwise pair every following comment with the
                 // wrong translation, and the cache would keep serving the mix-up.
@@ -379,15 +534,18 @@ impl Worker {
                 );
                 0
             }
-            Ok((_, Err(error))) => {
+            Ok(Err(error)) => {
                 // A failed batch is dropped rather than retried: the next
                 // didChange or hover queues it again, and an engine that fails
                 // on a given text will keep failing on it.
                 tracing::warn!(%error, "the engine failed on a batch");
                 0
             }
-            Err(error) => {
-                tracing::error!(%error, "the translation task did not finish");
+            Err(panic) => {
+                tracing::error!(
+                    reason = panic_message(panic.as_ref()),
+                    "the engine panicked; dropping the batch"
+                );
                 0
             }
         }
@@ -423,7 +581,7 @@ impl Worker {
     /// Hover has no counterpart to this - the protocol has no
     /// `workspace/hover/refresh` - so a hover that missed the cache stays as it
     /// was until the user hovers again.
-    async fn refresh(&mut self) {
+    fn refresh(&mut self) {
         if !self.initialized.load(Ordering::Acquire) {
             tracing::debug!("client has not sent initialized yet; not refreshing");
             return;
@@ -432,22 +590,35 @@ impl Worker {
         if let Some(last) = self.last_refresh {
             let elapsed = last.elapsed();
             if elapsed < MIN_REFRESH_INTERVAL {
-                tokio::time::sleep(MIN_REFRESH_INTERVAL - elapsed).await;
+                // Sleeping the worker is the point: a burst of batches that
+                // each asked the editor to refetch everything would make a
+                // large file unusable. Nothing is waiting on this thread.
+                thread::sleep(MIN_REFRESH_INTERVAL - elapsed);
             }
         }
         self.last_refresh = Some(Instant::now());
 
-        send_refresh(
+        report(
             "workspace/inlayHint/refresh",
-            self.client.inlay_hint_refresh(),
-        )
-        .await;
-        send_refresh(
+            self.client.inlay_hint_refresh(REFRESH_TIMEOUT),
+        );
+        report(
             "workspace/codeLens/refresh",
-            self.client.code_lens_refresh(),
-        )
-        .await;
+            self.client.code_lens_refresh(REFRESH_TIMEOUT),
+        );
     }
+}
+
+/// What a panic said, as far as it can be read.
+///
+/// `panic!` with a formatted message produces a `String` and one with a
+/// literal produces a `&str`; anything else is a payload this cannot name.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("a panic with no message")
 }
 
 /// Keeps taking jobs until the queue stays quiet for [`DEBOUNCE`].
@@ -457,18 +628,18 @@ impl Worker {
 ///
 /// Returns `false` once the queue is closed, which happens when the server is
 /// shutting down.
-async fn collect_until_quiet(
-    queue: &mut mpsc::UnboundedReceiver<Job>,
+fn collect_until_quiet(
+    queue: &Receiver<Job>,
     pending: &mut HashMap<Uri, Vec<CommentSource>>,
 ) -> bool {
     let deadline = Instant::now() + DEBOUNCE;
     loop {
-        match timeout_at(deadline, queue.recv()).await {
-            Ok(Some(job)) => {
+        match queue.recv_deadline(deadline) {
+            Ok(job) => {
                 pending.insert(job.uri, job.sources);
             }
-            Ok(None) => return false,
-            Err(_elapsed) => return true,
+            Err(RecvTimeoutError::Disconnected) => return false,
+            Err(RecvTimeoutError::Timeout) => return true,
         }
     }
 }
@@ -535,13 +706,20 @@ impl Batch {
     }
 }
 
-async fn send_refresh(name: &str, request: impl Future<Output = jsonrpc::Result<()>>) {
-    match timeout(REFRESH_TIMEOUT, request).await {
-        Ok(Ok(())) => tracing::debug!(request = name, "the client accepted the refresh"),
+fn report(name: &str, outcome: Outcome) {
+    match outcome {
+        Outcome::Accepted => tracing::debug!(request = name, "the client accepted the refresh"),
         // Not every client supports these requests, and one that does not says
         // so per request. It is not an error worth bothering the user with.
-        Ok(Err(error)) => tracing::debug!(request = name, %error, "the client refused the refresh"),
-        Err(_elapsed) => tracing::warn!(request = name, "the client did not answer the refresh"),
+        Outcome::Refused(error) => {
+            tracing::debug!(request = name, error, "the client refused the refresh");
+        }
+        Outcome::TimedOut => {
+            tracing::warn!(request = name, "the client did not answer the refresh");
+        }
+        Outcome::Disconnected => {
+            tracing::debug!(request = name, "the connection closed before the refresh");
+        }
     }
 }
 
@@ -584,7 +762,7 @@ mod tests {
     }
 
     fn uri(path: &str) -> Uri {
-        path.parse().expect("valid file uri")
+        Uri::from(path)
     }
 
     /// A queued comment out of a Rust document.

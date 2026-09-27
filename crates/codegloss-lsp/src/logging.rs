@@ -972,7 +972,7 @@ mod tests {
         let filter = filter("debug");
 
         assert!(filter.allows("codegloss_lsp::translation", &Level::DEBUG));
-        assert!(filter.allows("tower_lsp_server", &Level::DEBUG));
+        assert!(filter.allows("lsp_server", &Level::DEBUG));
         assert!(!filter.allows("codegloss_lsp::translation", &Level::TRACE));
     }
 
@@ -1043,7 +1043,7 @@ mod tests {
         let filter = filter("codegloss_lsp=debug");
 
         assert!(filter.allows("codegloss_lsp::translation", &Level::DEBUG));
-        assert!(!filter.allows("tower_lsp_server", &Level::ERROR));
+        assert!(!filter.allows("lsp_server", &Level::ERROR));
     }
 
     /// A target matches by bytes and not by module segment - `EnvFilter`'s

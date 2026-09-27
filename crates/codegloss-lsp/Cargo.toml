@@ -8,12 +8,12 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# IMPORTANT: LSP の型（tower_lsp_server::ls_types）はこのクレートの外に出さない。
+# IMPORTANT: LSP の型（src/ls_types.rs）はこのクレートの外に出さない。
 [dependencies]
 codegloss-core = { path = "../codegloss-core" }
 codegloss-parser = { path = "../codegloss-parser" }
 codegloss-translator = { path = "../codegloss-translator" }
-dashmap.workspace = true
+crossbeam-channel.workspace = true
 # `log` ファサード経由の記録を橋渡しするため（src/logging.rs）。**新しいクレートは
 # 1 つも増えない**: 実測で `log v0.4.34` は既定ツリー（81 クレート）にも candle
 # ツリー（199 クレート）にも既に居り、直接依存にしても数は動かない。candle ツリーで
@@ -25,11 +25,19 @@ dashmap.workspace = true
 log.workspace = true
 anyhow = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
-tokio.workspace = true
-tower-lsp-server.workspace = true
+# JSON-RPC の枠（Message / Request / Response）と stdio のスレッドだけを取る。
+# **LSP の型は入っていない**——`lsp-types` に依存しないのがこのクレートの要点で、
+# こちらが読み書きする面は `src/ls_types.rs` に書いてある。
+lsp-server.workspace = true
+# LSP の型（src/ls_types.rs）と、lsp-server が運ぶ params / result の
+# 読み書き。**新しいクレートは 1 つも増えない**——lsp-server 自身が
+# serde / serde_json を引いている。
+serde.workspace = true
+serde_json.workspace = true
 # facade だけ。subscriber は `src/logging.rs` が持っているので
-# tracing-subscriber は引かない（**`tracing` は残す**——tower-lsp-server が
-# どのみち引くので、こちらの使用をやめても 1 クレートも減らない）。
+# tracing-subscriber は引かない。**外しても出荷ツリーは 1 つも減らない**
+# （codegloss-translator が candle 側で引いている。理由はワークスペースの
+# Cargo.toml）。
 tracing.workspace = true
 
 # IMPORTANT: candle は既定に入れない。既定の `cargo build` / `cargo test` は
@@ -44,6 +52,3 @@ candle = ["codegloss-translator/candle", "dep:anyhow", "dep:ureq"]
 sha2.workspace = true
 # テスト用の Translator を書くために anyhow が要る（trait Translator の戻り値）。
 anyhow.workspace = true
-futures.workspace = true
-serde_json.workspace = true
-tower.workspace = true

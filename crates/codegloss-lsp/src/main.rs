@@ -4,11 +4,12 @@
 
 use std::sync::Arc;
 
+use codegloss_lsp::client::Client;
+use codegloss_lsp::server::{Dispatcher, serve};
 use codegloss_lsp::{Backend, ServerConfig, config, translation};
-use tower_lsp_server::{LspService, Server};
+use lsp_server::Connection;
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+fn main() -> std::process::ExitCode {
     codegloss_lsp::logging::init();
 
     // Downloading is a thing a person does once, not a thing a language server
@@ -39,16 +40,36 @@ async fn main() -> std::process::ExitCode {
     #[cfg(not(feature = "candle"))]
     drop(switch);
 
-    // Built here rather than inside the closure: `LspService::new` may call it
-    // more than once, and every call has to answer from the same glosses.
-    let cache = Arc::new(config::cache(&settings));
+    // IMPORTANT: `stdio` takes stdout for the protocol. Nothing in this
+    // workspace may print to it; the log goes to stderr (`logging.rs`).
+    let (connection, io) = Connection::stdio();
+    let client = Arc::new(Client::new(connection.sender.clone()));
+    let backend = Backend::with_cache(
+        Arc::clone(&client),
+        engine,
+        Arc::new(config::cache(&settings)),
+    );
 
-    let (service, socket) = LspService::new(move |client| {
-        Backend::with_cache(client, engine.clone(), Arc::clone(&cache))
-    });
-    Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
-        .serve(service)
-        .await;
+    serve(&connection, Dispatcher::new(backend, client));
+
+    // IMPORTANT: the io threads are dropped, not joined.
+    //
+    // `IoThreads::join` waits for the writer, and the writer ends only once
+    // every clone of the sender is gone - including the one the translation
+    // worker holds. A worker in the middle of a batch would make the server
+    // linger for as long as inference takes, and one waiting out a refresh
+    // that nobody will answer now for another five seconds. An editor that
+    // asked the server to exit and watched it sit there would call that a
+    // hang, and it would be right.
+    //
+    // Nothing is lost by leaving: every message is flushed as it is written
+    // (`lsp_server::Message::write`), and the last thing sent on this path is
+    // the answer to `shutdown`, which the client had to receive before it
+    // could send the `exit` that got us here. What a batch in flight had
+    // translated is dropped instead of being cached, and the next session
+    // translates it again.
+    drop(io);
+    drop(connection);
     std::process::ExitCode::SUCCESS
 }
 

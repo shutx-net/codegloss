@@ -242,6 +242,7 @@ Issue が「最大の未解決事項」とした点。調査の結果、**現実
   Zed 拡張: Rust → WASM
 - ネイティブ LSP: Rust + tower-lsp-server + Tokio + Serde
 + ネイティブ LSP: Rust + tower-lsp-server + Tokio + Serde   （変更なし・妥当）
++                 ※ #78 で lsp-server + 自前の型 + std::thread へ。下記を見よ
 
 - 表示: Inlay Hint を主、Hover を後回し
 + 表示: Hover を最初に実装（設定不要で動く）
@@ -275,6 +276,49 @@ Issue が「最大の未解決事項」とした点。調査の結果、**現実
 11. Inlay Hint モード、対応言語の拡大、設定項目
 
 Issue のマイルストーンとの最大の違いは **6 と 7**。翻訳エンジンを入れる前に一度「完成」させることで、モデル選定という最大の不確実性を製品の完成から切り離せる。
+
+---
+
+## 7.1 追記（#78）: ネイティブ LSP の枠を lsp-server に替えた
+
+**上の「変更なし・妥当」は、サプライチェーンの観点を勘定に入れていない。**当時見ていたのは
+「書きやすいか・LSP を正しく喋れるか」で、そこでは tower-lsp-server は妥当なままである。
+後から加わった基準は**信頼の起点の数**で、これは実測で動いた。
+
+`codegloss-lsp` の依存ツリー（`cargo tree -e normal`、クレート名の異なり数）:
+
+| | 置き換え前 | 置き換え後 | 差 |
+|---|---:|---:|---:|
+| 既定ツリー | 72 | 41 | **−31** |
+| 出荷ツリー（`--features candle`） | 192 | 168 | **−24** |
+| 既定ツリーの信頼の起点（GitHub の owner） | 23 | 14 | **−9** |
+| 出荷ツリーの信頼の起点 | 83 | 77 | **−6** |
+
+**増えた起点は 0 である。**`lsp-server` は rust-lang、`crossbeam-channel` は crossbeam-rs で、
+どちらも既にツリーに居た owner だからである（前者は regex / log と、後者は
+tree-sitter 経由の crossbeam-utils と同じ）。
+
+消えた起点: actyx・amanieu・bitflags・seanmonstar・servo・tower-lsp-community・tower-rs・
+xacrimon・yescallop（既定ツリー）。
+
+置き換えたもの:
+
+| やめたもの | 代わり |
+|---|---|
+| `tower-lsp-server`（＋ `tower` 系 3・`futures` 系 8） | `lsp-server`（JSON-RPC の枠と stdio だけ） |
+| `ls-types`（＋ `fluent-uri` / `borrow-or-share` / `percent-encoding` / `ref-cast` 系） | `crates/codegloss-lsp/src/ls_types.rs`（使っている面だけを手書き） |
+| `tokio`（＋ `tokio-macros` / `tokio-util` / `bytes` / `slab` / `libc` / `parking_lot` 系） | `crossbeam-channel` と `std::thread` |
+| `dashmap`（＋ `hashbrown` / `lock_api` / `smallvec` …） | `RwLock<HashMap>` |
+
+**`dashmap` を外せるようになったのは、外したから**である。AGENTS.md には「`tower-lsp-server` を
+外す日まで触らないこと」と書いてあった——ハンドラが tokio のエグゼキュータ上で同時に走る限り、
+マップ全体を覆うロックは A のキーストロークで B のホバーを止めるからである。同期のループでは
+ハンドラは 1 本のスレッドで順に走るので、この問題そのものが無くなる。
+
+**`tracing` は残した。**外すと既定ツリーから 5 つ（tracing / tracing-attributes / tracing-core /
+once_cell / pin-project-lite）減るが、**出荷ツリーからは 1 つも減らない**——candle 側の
+`codegloss-translator` が引いているため。53 箇所の記録を書き換えて `logging.rs` の Subscriber 側を
+捨てても出荷ツリーが動かないので、やっていない（同じ #78 の `thiserror` と同じ形の結果である）。
 
 ---
 
