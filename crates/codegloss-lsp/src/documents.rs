@@ -401,11 +401,11 @@ mod tests {
             vec![
                 CommentSource {
                     raw: "// First.".to_owned(),
-                    rules: CommentRules::Fenced,
+                    rules: CommentRules::FencedUntagged,
                 },
                 CommentSource {
                     raw: "/// Second.".to_owned(),
-                    rules: CommentRules::Fenced,
+                    rules: CommentRules::FencedUntagged,
                 },
             ]
         );

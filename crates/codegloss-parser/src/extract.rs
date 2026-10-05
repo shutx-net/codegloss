@@ -7,7 +7,7 @@
 use codegloss_core::{CommentBlock, CommentRules, CommentStyle};
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
-use crate::languages::{CommentSyntax, SupportedLanguage};
+use crate::languages::{BlockMarkers, CommentSyntax, LineDocMarkers, SupportedLanguage};
 
 /// Why a document could not be scanned for comments.
 ///
@@ -120,9 +120,11 @@ pub fn extract_comment_blocks(
 
 /// Which marker opened a comment.
 ///
-/// Read off the syntax tree rather than off the text: the grammar exposes the
-/// doc-comment markers as their own nodes, so `//////////` is not mistaken for
-/// a `///` doc comment.
+/// Read off the syntax tree when the grammar exposes the doc-comment markers
+/// as nodes of their own (Rust's), and off the text when the grammar has one
+/// token for every comment and the registry spells the markers for it (Zig's,
+/// through [`line_doc_marker`]). Either way `//////////` is a rule and not a
+/// `///` doc comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Marker {
     /// `//` or `/* */`.
@@ -169,52 +171,60 @@ impl RawComment {
         let text = source.get(start_byte..node.end_byte())?.trim_end();
         let end_byte = start_byte + text.len();
 
-        let is_block = text.starts_with(syntax.block_start);
+        let block = syntax.block.filter(|block| text.starts_with(block.start));
+        let is_block = block.is_some();
+        // The doc marker and the byte it ends at: the tree's marker node when
+        // the grammar hands one over, and otherwise, for a line comment, the
+        // registry's spelling read off the text. A language whose grammar
+        // marks its doc comments has no spelling in the registry, so the two
+        // never both answer.
         let doc_marker = node
             .child_by_field_name("inner")
-            .map(|node| (Marker::InnerDoc, node))
+            .map(|node| (Marker::InnerDoc, node.end_byte()))
             .or_else(|| {
                 node.child_by_field_name("outer")
-                    .map(|node| (Marker::OuterDoc, node))
+                    .map(|node| (Marker::OuterDoc, node.end_byte()))
+            })
+            .or_else(|| {
+                if is_block {
+                    return None;
+                }
+                let (marker, length) = line_doc_marker(text, syntax.line_doc_markers?)?;
+                Some((marker, start_byte + length))
             });
         let marker = doc_marker.map_or(Marker::Plain, |(marker, _)| marker);
 
-        let opener = if is_block {
-            syntax.block_start
-        } else {
-            syntax.line
-        };
-        let content_start =
-            doc_marker.map_or(start_byte + opener.len(), |(_, node)| node.end_byte());
-        let content_end = if is_block && text.ends_with(syntax.block_end) {
-            end_byte
-                .saturating_sub(syntax.block_end.len())
-                .max(content_start)
-        } else {
-            end_byte
+        let opener = block.map_or(syntax.line, |block| block.start);
+        let content_start = doc_marker.map_or(start_byte + opener.len(), |(_, end)| end);
+        let content_end = match block {
+            Some(block) if text.ends_with(block.end) => {
+                end_byte.saturating_sub(block.end.len()).max(content_start)
+            }
+            _ => end_byte,
         };
         let mut content = source.get(content_start..content_end)?;
-        // A grammar that marks its doc comments hands the marker over as a
-        // node, and `content_start` is then past the whole of it. One that does
-        // not - JavaScript's and Go's single `(comment)` - leaves it in the
-        // text, where `/**` reads as the block opener with a decoration star
-        // stuck to it and the star ends up at the head of the body. It is the
-        // head of every JSDoc block, and `CommentBlock::text` is what a code
-        // lens shows and what a hover falls back to.
+        // Wherever a doc marker was found, `content_start` is past the whole of
+        // it: the tree's node when the grammar hands one over, the registry's
+        // spelling when a line comment keeps its marker in the text. The one
+        // marker still in place is a block comment's in a grammar that marks
+        // none - JavaScript's and Go's single `(comment)` - where `/**` reads
+        // as the block opener with a decoration star stuck to it, and the star
+        // ends up at the head of the body. It is the head of every JSDoc block,
+        // and `CommentBlock::text` is what a code lens shows and what a hover
+        // falls back to.
         //
         // The doc opener needs no name of its own: it is the block opener with
         // one continuation marker on it, and the registry already says what
         // both of those are.
-        if doc_marker.is_none() && is_block {
-            content = content
-                .strip_prefix(syntax.block_continuation)
-                .unwrap_or(content);
+        if doc_marker.is_none()
+            && let Some(block) = block
+        {
+            content = content.strip_prefix(block.continuation).unwrap_or(content);
         }
 
-        let body = if is_block {
-            join_block_lines(content, syntax)
-        } else {
-            content.trim().to_owned()
+        let body = match block {
+            Some(block) => join_block_lines(content, block),
+            None => content.trim().to_owned(),
         };
 
         let start_line = node.start_position().row as u32;
@@ -240,7 +250,14 @@ impl RawComment {
             own_line: source[line_start..start_byte]
                 .chars()
                 .all(char::is_whitespace),
-            directive: !is_block && syntax.directives.matches(content),
+            // Only a plain comment can be a directive. A doc comment is
+            // addressed to a reader, and zig fmt never even asks:
+            // `renderComments` scans the gaps between tokens, and a Zig doc
+            // comment is a token. Its body also starts past the doc marker,
+            // where `DirectiveSyntax::matches` is promised a line with only its
+            // `//` off. Every Go and JavaScript comment is plain and Rust has no
+            // directives, so for them the condition never decides anything.
+            directive: !is_block && marker == Marker::Plain && syntax.directives.matches(content),
         })
     }
 
@@ -300,9 +317,34 @@ impl RawComment {
     }
 }
 
+/// Which doc marker a line comment opens with, and how many bytes the marker
+/// takes, for a grammar that leaves the marker in the text.
+///
+/// The rule is the tokenizer's, and Zig's and Rust's are the same rule. The
+/// inner marker makes a doc comment whatever follows it. The outer marker makes
+/// one unless its own last character comes again straight after it, so `////`
+/// is a plain comment - which is also what keeps a `//////////` rule the
+/// decoration it is - and an empty `///` is a doc comment, the blank line of
+/// one.
+///
+/// Zig 0.17.0's `lib/std/zig/tokenizer.zig` decides it in `.line_comment_start`
+/// (the byte after `//`) and `.doc_comment_start` (the byte after `///`), and
+/// its test `"line comment and doc comment"` pins the cases: `///` and `/// a`
+/// are doc comments, `////` is not, and `//!` and `//!!` are both container doc
+/// comments. `rustc_lexer`'s `line_comment` decides on the same two bytes the
+/// same way.
+fn line_doc_marker(text: &str, markers: LineDocMarkers) -> Option<(Marker, usize)> {
+    if text.starts_with(markers.inner) {
+        return Some((Marker::InnerDoc, markers.inner.len()));
+    }
+    let after = text.strip_prefix(markers.outer)?;
+    let last = markers.outer.chars().next_back()?;
+    (!after.starts_with(last)).then_some((Marker::OuterDoc, markers.outer.len()))
+}
+
 /// Strips the leading `*` decoration from the continuation lines of a block
 /// comment and joins what is left into one line.
-fn join_block_lines(content: &str, syntax: CommentSyntax) -> String {
+fn join_block_lines(content: &str, block: BlockMarkers) -> String {
     let mut parts = Vec::new();
     for (index, line) in content.lines().enumerate() {
         let line = line.trim();
@@ -311,7 +353,7 @@ fn join_block_lines(content: &str, syntax: CommentSyntax) -> String {
         let line = if index == 0 {
             line
         } else {
-            line.strip_prefix(syntax.block_continuation).unwrap_or(line)
+            line.strip_prefix(block.continuation).unwrap_or(line)
         };
         let line = line.trim();
         if !line.is_empty() {

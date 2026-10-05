@@ -65,3 +65,10 @@ tree-sitter-go = "0.25"
 tree-sitter-javascript = "0.25"
 tree-sitter-rust = "0.24"
 tree-sitter-typescript = "0.23"
+# Zig。1.1.2 の src/parser.c は ABI 14。crates.io の最新はこの 1.1.2（2024-12）で、
+# 上流 master は ABI 15 に上がっているが版として出ていない。**owner が
+# tree-sitter-grammars で、信頼の起点が 1 つ増える**（上の 4 つの文法の owner は
+# すべて tree-sitter）。crates.io には arborium-zig（bearcove）もあるが、あれは
+# 同じ上流の master を生成し直した再配布で、取っても起点が 1 つ増えるのは同じ
+# なので、上流が自分で出しているものを取る。
+tree-sitter-zig = "1.1"

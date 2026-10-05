@@ -42,8 +42,8 @@
 //! [`codegloss_parser::corpus`]) and `CODEGLOSS_SHEET=<file>` writes the
 //! blinded A/B sheet for the fragments no automatic metric can separate. The
 //! corpus that ships here is the 62 blocks §7.2 and §9.3 were measured on,
-//! frozen; it has no header, which reads as [`CommentRules::Fenced`], which is
-//! what it is. Where it came from, and how to build another, is §12.
+//! frozen; it has no header, which reads as Rust, which is what it is. Where it
+//! came from, and how to build another, is §12.
 
 // The scoreboard needs a model; the drift guard does not. Everything carrying
 // `#[cfg(feature = "candle")]` below belongs to the scoring path, so that
@@ -229,8 +229,8 @@ impl Corpus {
     ///
     /// The header, not an assumption: a corpus extracted with `--lang go` marks
     /// its examples by indenting them, and reading it as Rust hands the engine
-    /// code as prose (Issue #62). A file without one is Fenced, which is what
-    /// every corpus written before the header is.
+    /// code as prose (Issue #62). A file without one is read as Rust, which is
+    /// what every corpus written before the header is.
     fn read(text: &str) -> Self {
         let (rules, blocks) = codegloss_parser::corpus::rules(text)
             .unwrap_or_else(|error| panic!("{CORPUS_VARIABLE}: {error}"));
@@ -246,10 +246,14 @@ impl Corpus {
     }
 
     /// One block written here in the test, which is Rust however the corpus on
-    /// disk was extracted.
+    /// disk was extracted - so it is read under Rust's rules as the registry
+    /// says them, the way a headerless corpus is.
     fn of(raw: &str) -> Self {
         Self {
-            blocks: vec![Block::prepare(raw, CommentRules::Fenced)],
+            blocks: vec![Block::prepare(
+                raw,
+                codegloss_parser::SupportedLanguage::Rust.rules(),
+            )],
         }
     }
 
@@ -583,16 +587,19 @@ fn intact(unit: &Unit, fragment: &Fragment, gloss: &str) -> bool {
 ///
 /// It is the 62 blocks §7.2 and §9.3 were measured on and it is deliberately
 /// not regenerated, so nothing in it says which rules it was read under. What
-/// scores it correctly is the fallback - it is Rust, and Rust is
-/// [`CommentRules::Fenced`]. Move the fallback, or give this file a header
-/// naming something else, and §12's scoreboard moves without an arm being
-/// touched.
+/// scores it correctly is the fallback - it is Rust, and the fallback is
+/// Rust's rules, [`CommentRules::FencedUntagged`]. Rust was read as
+/// [`CommentRules::Fenced`] when the corpus was measured, and §12's scoreboard
+/// did not move with the change only because no line of it opens with `@` and
+/// a word, the one thing the two sets read differently. Move the fallback -
+/// which moving Rust's rules now does too - or give this file a header naming
+/// something else, and the scoreboard can move without an arm being touched.
 #[test]
-fn the_frozen_corpus_is_read_as_fenced() {
+fn the_frozen_corpus_is_read_as_fenced_untagged() {
     assert_eq!(
         codegloss_parser::corpus::rules(CORPUS),
-        Ok((CommentRules::Fenced, CORPUS)),
-        "the frozen corpus is no longer headerless Fenced text"
+        Ok((CommentRules::FencedUntagged, CORPUS)),
+        "the frozen corpus is no longer headerless text read as FencedUntagged"
     );
 }
 

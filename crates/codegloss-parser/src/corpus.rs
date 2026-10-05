@@ -16,11 +16,19 @@
 //! engine indented examples as prose and the scoreboard of
 //! `docs/model-runtime-notes.md` §12 measures something that does not happen.
 //!
-//! **A file with no header reads as [`CommentRules::Fenced`].** Every corpus
-//! written before the header existed is Rust - `codegloss-parser` read nothing
-//! else until #59 - so the fallback is not a guess, and the frozen corpus of
+//! **A file with no header reads as Rust.** Every corpus written before the
+//! header existed is Rust - `codegloss-parser` read nothing else until #59 - so
+//! the fallback is not a guess, and the frozen corpus of
 //! `codegloss-translator/tests/fixtures/comment-corpus.txt` keeps reading
 //! correctly without being rewritten.
+//!
+//! Rust's rules as the registry says them ([`SupportedLanguage::rules`]), not
+//! a set named here, because Rust's can move and the fallback has to move with
+//! them. They have once, from [`CommentRules::Fenced`] to
+//! [`CommentRules::FencedUntagged`]; a fallback that had written the set down
+//! would have gone on reading every old corpus the way the server no longer
+//! reads Rust. The frozen corpus reads the same under both - no line of it
+//! opens with `@` and a word, the one thing that move changed.
 //!
 //! The rules are named once, at the top, rather than beside each `%%%`. One
 //! `extract` run has one `--lang`, so a file has one set of rules by
@@ -30,6 +38,8 @@
 //! of it, so a per-block scheme needs a header for it anyway.
 
 use codegloss_core::CommentRules;
+
+use crate::languages::SupportedLanguage;
 
 /// What a header line says before the tag.
 ///
@@ -45,7 +55,7 @@ pub fn header(rules: CommentRules) -> String {
 
 /// A header line naming rules this build does not have.
 ///
-/// An error rather than a fallback to [`CommentRules::Fenced`]: a file that
+/// An error rather than the headerless fallback to Rust's rules: a file that
 /// names its rules and is read under different ones is exactly the silent
 /// mis-scoring the header exists to stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,11 +78,11 @@ impl std::error::Error for UnknownRules {}
 
 /// Splits a corpus into the rules it declares and the blocks under them.
 ///
-/// Returns the text unchanged beside [`CommentRules::Fenced`] when there is no
-/// header, so a caller can go on splitting on `%%%` exactly as before.
+/// Returns the text unchanged beside Rust's rules when there is no header, so
+/// a caller can go on splitting on `%%%` exactly as before.
 pub fn rules(text: &str) -> Result<(CommentRules, &str), UnknownRules> {
     let Some(rest) = text.strip_prefix(HEADER) else {
-        return Ok((CommentRules::Fenced, text));
+        return Ok((SupportedLanguage::Rust.rules(), text));
     };
     let (tag, blocks) = rest.split_once('\n').unwrap_or((rest, ""));
     // Trimmed before it is matched: a corpus is a file people hand-edit and
@@ -104,9 +114,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_corpus_without_a_header_is_fenced_and_untouched() {
+    fn a_corpus_without_a_header_is_rust_and_untouched() {
         let text = "/// One.\n%%%\n/// Two.\n";
-        assert_eq!(rules(text), Ok((CommentRules::Fenced, text)));
+        assert_eq!(rules(text), Ok((SupportedLanguage::Rust.rules(), text)));
     }
 
     #[test]
@@ -123,7 +133,11 @@ mod tests {
 
     #[test]
     fn what_extract_writes_is_what_this_reads() {
-        for written in [CommentRules::Fenced, CommentRules::Indented] {
+        for written in [
+            CommentRules::Fenced,
+            CommentRules::FencedUntagged,
+            CommentRules::Indented,
+        ] {
             let text = format!("{}// One.\n", header(written));
             assert_eq!(rules(&text), Ok((written, "// One.\n")));
         }
@@ -147,12 +161,10 @@ mod tests {
     /// this reads files, and `probe` turns the answer into an exit code.
     #[test]
     fn a_malformed_corpus_answers_rather_than_panicking() {
-        assert_eq!(rules(""), Ok((CommentRules::Fenced, "")));
-        assert_eq!(rules("%%%"), Ok((CommentRules::Fenced, "%%%")));
-        assert_eq!(
-            rules("%%% rules:"),
-            Ok((CommentRules::Fenced, "%%% rules:"))
-        );
+        let rust = SupportedLanguage::Rust.rules();
+        assert_eq!(rules(""), Ok((rust, "")));
+        assert_eq!(rules("%%%"), Ok((rust, "%%%")));
+        assert_eq!(rules("%%% rules:"), Ok((rust, "%%% rules:")));
         // A header with no newline after it: the tag runs to the end and there
         // are no blocks.
         assert_eq!(

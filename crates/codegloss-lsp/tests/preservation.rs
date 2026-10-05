@@ -25,6 +25,10 @@ const DOCUMENT_URI: &str = "file:///tmp/codegloss/preservation.rs";
 /// a `TODO:` prefix, identifiers of each shape, inline code, a URL, and a
 /// Javadoc block with `@param` / `@return` / `@throws`, plus the comment of
 /// more than one sentence Issue #49 was about.
+///
+/// The file is Rust, and Rust's rules have no doc tags, so the Javadoc block
+/// here is read with its tag lines as prose. Its tags are read as tags in
+/// [`JAVADOC_TEXT`], under a language that has them.
 const DOCUMENT_TEXT: &str = concat!(
     "// TODO: cache the result of find_user before UserRepository::load() runs.\n",
     "fn find_user() {}\n",
@@ -58,6 +62,40 @@ fn glossed_document() -> Harness {
 
     server.initialize();
     server.did_open(DOCUMENT_URI, "rust", DOCUMENT_TEXT);
+
+    server.settle(seen);
+    server
+}
+
+const JAVADOC_URI: &str = "file:///tmp/codegloss/preservation.ts";
+
+/// The Javadoc block of [`DOCUMENT_TEXT`] in a TypeScript file of its own.
+///
+/// TypeScript because JSDoc writes block tags, and a tag line is one only
+/// under rules that say a comment has them - Rust's say it has none
+/// (`CommentRules::FencedUntagged`), because Rustdoc writes none. JSDoc's
+/// rules read Javadoc's spelling too: the two share the `@tag` shape, and the
+/// bare exception type after `@throws` fills the slot JSDoc writes a type in.
+const JAVADOC_TEXT: &str = concat!(
+    "/**\n",
+    " * Returns the currently authenticated user.\n",
+    " *\n",
+    " * @param id the id to look up\n",
+    " * @return authenticated user\n",
+    " * @throws AuthenticationException if authentication failed\n",
+    " */\n",
+    "export function currentUser() {}\n",
+);
+
+/// Brings the server up on [`JAVADOC_TEXT`] and waits for its glosses, the way
+/// [`glossed_document`] does for the Rust file.
+fn glossed_javadoc() -> Harness {
+    let mut server = Harness::new();
+    let batches = server.batches();
+    let seen = batches.count();
+
+    server.initialize();
+    server.did_open(JAVADOC_URI, "typescript", JAVADOC_TEXT);
 
     server.settle(seen);
     server
@@ -150,12 +188,15 @@ fn a_doc_comment_keeps_its_url() {
 ///
 /// The two trailing spaces are Markdown's hard line break. Without them the
 /// editor would run the three tag lines together into one paragraph.
+///
+/// Read out of [`JAVADOC_TEXT`], where the tags are tags, rather than out of
+/// the Rust file, where they are prose.
 #[test]
 fn a_javadoc_block_keeps_its_line_structure_and_its_tags() {
-    let mut server = glossed_document();
+    let mut server = glossed_javadoc();
 
     assert_eq!(
-        gloss_at(&mut server, 9, 10),
+        gloss_at_in(&mut server, JAVADOC_URI, 1, 10),
         concat!(
             "Returns the currently authenticated user.\n",
             "\n",

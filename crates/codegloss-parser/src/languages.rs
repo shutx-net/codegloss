@@ -10,9 +10,12 @@
 //! out to where this file could carry them; until that is done, budget for
 //! both.
 //!
-//! The list also exists a second time outside this workspace, in
-//! `editors/zed/extension.toml`, and CI compares the two
-//! ([`SupportedLanguage::ALL`]).
+//! The list also exists twice more outside this workspace: as Zed's language
+//! names in `editors/zed/extension.toml`, and as VS Code's `onLanguage:`
+//! activation events in `editors/vscode/package.json`. No build sees another's
+//! list, so CI holds the three together - the names against Zed's
+//! ([`SupportedLanguage::ALL`]), and the ids against the union of both editors'
+//! lists ([`SupportedLanguage::lsp_language_ids`]).
 
 use codegloss_core::CommentRules;
 use tree_sitter::Language;
@@ -33,24 +36,48 @@ pub enum SupportedLanguage {
     /// own in Tree-sitter, because `<T>x` is a cast in one and an element in
     /// the other.
     Tsx,
+    /// Zig. Built into neither Zed nor VS Code, so `zig` only ever arrives for
+    /// a buffer an editor's Zig extension has claimed. The grammar is
+    /// `tree-sitter-grammars`', where every other one here is the `tree-sitter`
+    /// organisation's - one more trust root. Its markers, `//`, `///` and
+    /// `//!`, are all ones `codegloss-core`'s `docblock` already strips, so
+    /// core does not change with it.
+    Zig,
 }
 
 /// The comment markers of one language.
 ///
-/// Doc-comment markers are deliberately absent: whether a comment is a doc
-/// comment is read off the syntax tree (`inner` / `outer` marker fields), which
-/// is sturdier than matching a prefix against the raw text.
+/// Whether a comment is a doc comment is read off the syntax tree first. A
+/// grammar that hands the doc marker over as a node of its own (Rust's `inner`
+/// and `outer` fields) has already told `///` from `////`, and the tree is
+/// sturdier than any prefix match against the text. A grammar with a single
+/// `(comment)` token for every comment leaves the marker in the text instead,
+/// and then this registry says how the language spells it
+/// ([`Self::line_doc_markers`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CommentSyntax {
     /// Opener of a line comment, e.g. `//`.
     pub line: &'static str,
-    /// Opener of a block comment, e.g. `/*`.
-    pub block_start: &'static str,
-    /// Closer of a block comment, e.g. `*/`.
-    pub block_end: &'static str,
-    /// Decoration that continuation lines of a block comment are conventionally
-    /// indented with, e.g. the `*` of a Javadoc block.
-    pub block_continuation: &'static str,
+    /// The markers of a block comment, or `None` for a language that has no
+    /// block comment at all.
+    ///
+    /// `None`, and not C's markers borrowed for want of anything to put here.
+    /// This registry is the one place that says what a language writes, and a
+    /// borrowed `/*` would be inert only for as long as the grammar never
+    /// hands over a comment that opens with one - to whoever reads this file it
+    /// is a statement about the language, and a false one. Zig is one such
+    /// language, with `//` as its only comment, and Python (Issue #61) is
+    /// another, with `#`.
+    pub block: Option<BlockMarkers>,
+    /// The doc markers of a line comment, for a grammar that leaves them in the
+    /// text: Zig's `///` and `//!`.
+    ///
+    /// `None` says one of two things. Rust has doc markers, but its grammar
+    /// hands them over as nodes, and the tree answers before this is asked. Go
+    /// and JavaScript have none: a Go doc comment is told by what it sits
+    /// above, and a JavaScript `///` is TypeScript's triple-slash directive or
+    /// a comment that happens to open with a slash, never a doc comment.
+    pub line_doc_markers: Option<LineDocMarkers>,
     /// Which line comments speak to the toolchain rather than to a reader.
     pub directives: DirectiveSyntax,
     /// What the shape of a comment means in this language.
@@ -60,6 +87,40 @@ pub(crate) struct CommentSyntax {
     /// vocabulary and never learns the list of languages, which is what keeps
     /// adding a grammar a change to this file alone.
     pub rules: CommentRules,
+}
+
+/// The markers of a block comment, the `/* */` kind.
+///
+/// One value rather than three fields of [`CommentSyntax`], because the three
+/// stand or fall together: the closer and the decoration of the lines between
+/// belong to the comment the opener opens, and a language without a block
+/// comment has none of them - one `None`, not three values made up to fill
+/// the fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BlockMarkers {
+    /// Opener of a block comment, e.g. `/*`.
+    pub start: &'static str,
+    /// Closer of a block comment, e.g. `*/`.
+    pub end: &'static str,
+    /// Decoration that continuation lines of a block comment are conventionally
+    /// indented with, e.g. the `*` of a Javadoc block.
+    pub continuation: &'static str,
+}
+
+/// How a line comment says it is a doc comment, in a language whose grammar
+/// leaves the marker in the text.
+///
+/// Two spellings for the two things a doc comment can be about: the item that
+/// follows it, and the one it sits in - Zig's doc comment and container doc
+/// comment, Rust's outer and inner. Telling a marker from the plain comment it
+/// is a prefix of (`////`) is the tokenizer's rule rather than a spelling, and
+/// `extract`'s `line_doc_marker` is where it is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LineDocMarkers {
+    /// The marker of a doc comment about what follows it, e.g. `///`.
+    pub outer: &'static str,
+    /// The marker of a doc comment about what encloses it, e.g. `//!`.
+    pub inner: &'static str,
 }
 
 /// The shape of a comment line that instructs a tool instead of addressing a
@@ -90,6 +151,16 @@ pub(crate) enum DirectiveSyntax {
     /// here` is ESLint's `global` directive and an English sentence at the same
     /// time, and the sentence is the one a reader of this tool wants.
     EcmaScript,
+    /// Zig's `// zig fmt: off` and `// zig fmt: on`, and nothing else: no other
+    /// comment is acted on anywhere in Zig 0.17.0's compiler (`src/`) or
+    /// standard library (`lib/`).
+    ///
+    /// A rule rather than a list, because zig fmt has one and it is exact.
+    /// `renderComments` in `lib/std/zig/Ast/Render.zig` takes what follows the
+    /// `//`, trims `std.ascii.whitespace` off both ends and compares the rest
+    /// whole (`mem.eql`) - so `// zig fmt: off because the table is aligned by
+    /// hand` is a sentence to zig fmt, and it stays one here.
+    Zig,
 }
 
 impl DirectiveSyntax {
@@ -150,6 +221,16 @@ impl DirectiveSyntax {
                         index == colon || byte.is_ascii_lowercase() || byte.is_ascii_digit()
                     })
             }
+            // `renderComments`' own test, spaces and all: zig fmt trims them,
+            // so `//zig fmt: off` is a directive as much as `// zig fmt: off`
+            // is. The six characters are `std.ascii.whitespace`, written out
+            // because neither of Rust's sets is that one - `char::is_whitespace`
+            // is Unicode's, and `char::is_ascii_whitespace` leaves out the
+            // vertical tab.
+            Self::Zig => {
+                let content = body.trim_matches([' ', '\t', '\n', '\r', '\u{0B}', '\u{0C}']);
+                content == "zig fmt: off" || content == "zig fmt: on"
+            }
         }
     }
 }
@@ -183,12 +264,22 @@ const ECMASCRIPT_PRAGMAS: [&str; 7] = [
     "v8 ignore",
 ];
 
+/// C's markers, read the way Rust reads them: Rust is the language that takes
+/// this as it stands, and every other one overrides what it reads differently.
+///
+/// [`CommentRules::FencedUntagged`], because Rustdoc is Markdown and nothing
+/// else. An example sits in a fence, and there is no block tag at all - so a
+/// line that opens with `@` and a word is prose like any other, and stays in
+/// the paragraph it was written in.
 const C_LIKE_SYNTAX: CommentSyntax = CommentSyntax {
     line: "//",
-    block_start: "/*",
-    block_end: "*/",
-    block_continuation: "*",
-    rules: CommentRules::Fenced,
+    block: Some(BlockMarkers {
+        start: "/*",
+        end: "*/",
+        continuation: "*",
+    }),
+    line_doc_markers: None,
+    rules: CommentRules::FencedUntagged,
     directives: DirectiveSyntax::None,
 };
 
@@ -204,9 +295,44 @@ const GO_SYNTAX: CommentSyntax = CommentSyntax {
 /// JavaScript, TypeScript and TSX. The markers are C's, and JSDoc writes an
 /// example with a Markdown fence the way Rustdoc does - indentation on its own
 /// says nothing, so these are [`CommentRules::Fenced`].
+///
+/// Said here rather than inherited, because the set is not Rust's: JSDoc writes
+/// block tags (`@param`, `@returns`, `@example`) and Rustdoc writes none, so a
+/// line that opens with `@` and a word is a tag here and prose there.
 const ECMASCRIPT_SYNTAX: CommentSyntax = CommentSyntax {
+    rules: CommentRules::Fenced,
     directives: DirectiveSyntax::EcmaScript,
     ..C_LIKE_SYNTAX
+};
+
+/// Zig writes `//` and nothing else - no block comment - and its grammar has
+/// one token for every comment, so the doc markers are read off the text, in
+/// the spelling and by the rule of Zig's own tokenizer: `///` for the
+/// declaration that follows, `//!` for the container the comment sits in.
+///
+/// Written out field by field rather than built on [`C_LIKE_SYNTAX`]: `//` is
+/// all Zig has in common with C, and sharing Rust's rules is a fact about
+/// autodoc, not an inheritance - if Rust's set moves again, Zig's is a
+/// decision of its own.
+///
+/// [`CommentRules::FencedUntagged`], because that is what autodoc renders: the
+/// lines of a doc comment, marker off, fed to its Markdown parser
+/// (`lib/docs/wasm/markdown.zig` in Zig 0.17.0). That Markdown marks a code
+/// block with a backtick fence and nothing else - `startCodeBlock` in
+/// `markdown/Parser.zig` counts backticks, and there is no indented code block
+/// and no tilde fence - and it has no block tag. A line that opens with `@` and
+/// a word is prose like any other and stays in the sentence it continues:
+/// `@intCast` at the head of a line is a builtin being named, not a tag
+/// (`docs/model-runtime-notes.md` §19).
+const ZIG_SYNTAX: CommentSyntax = CommentSyntax {
+    line: "//",
+    block: None,
+    line_doc_markers: Some(LineDocMarkers {
+        outer: "///",
+        inner: "//!",
+    }),
+    rules: CommentRules::FencedUntagged,
+    directives: DirectiveSyntax::Zig,
 };
 
 impl SupportedLanguage {
@@ -227,12 +353,13 @@ impl SupportedLanguage {
     ///
     /// A variant missing from here is not quiet: the check above then reports
     /// the language as one `extension.toml` has and this file does not.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Rust,
         Self::Go,
         Self::JavaScript,
         Self::TypeScript,
         Self::Tsx,
+        Self::Zig,
     ];
 
     /// Every `languageId` a client may send for this language.
@@ -247,7 +374,12 @@ impl SupportedLanguage {
     ///
     /// Read off zed main's `crates/grammars/src/*/config.toml` (through
     /// `LanguageName::lsp_id`) and `microsoft/vscode`'s
-    /// `extensions/*/package.json`. Nothing here is a guess at a name: an id
+    /// `extensions/*/package.json` - and for Zig, which neither editor has
+    /// built in, off the extensions that add it: `languages/zig/config.toml`
+    /// of `zed-extensions/zig` at 996432e (v0.4.2, `name = "Zig"`), and the
+    /// `contributes.languages` of `codeberg.org/ziglang/vscode-zig` at 2e987c6
+    /// (v0.6.19, `"id": "zig"`). Both claim `.zon` for Zig as well, so a ZON
+    /// file arrives as `zig` too. Nothing here is a guess at a name: an id
     /// belongs in this table once some client is known to send it.
     ///
     /// [`Self::from_lsp_language_id`] reads this and nothing else, so an id
@@ -262,6 +394,7 @@ impl SupportedLanguage {
             Self::JavaScript => &["javascript", "javascriptreact"],
             Self::TypeScript => &["typescript"],
             Self::Tsx => &["tsx", "typescriptreact"],
+            Self::Zig => &["zig"],
         }
     }
 
@@ -296,6 +429,7 @@ impl SupportedLanguage {
             Self::JavaScript => "javascript",
             Self::TypeScript => "typescript",
             Self::Tsx => "tsx",
+            Self::Zig => "zig",
         }
     }
 
@@ -308,6 +442,7 @@ impl SupportedLanguage {
             Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Self::Zig => tree_sitter_zig::LANGUAGE.into(),
         }
     }
 
@@ -321,6 +456,7 @@ impl SupportedLanguage {
             Self::JavaScript | Self::TypeScript | Self::Tsx => {
                 include_str!("queries/ecmascript.scm")
             }
+            Self::Zig => include_str!("queries/zig.scm"),
         }
     }
 
@@ -329,12 +465,15 @@ impl SupportedLanguage {
             Self::Rust => C_LIKE_SYNTAX,
             Self::Go => GO_SYNTAX,
             Self::JavaScript | Self::TypeScript | Self::Tsx => ECMASCRIPT_SYNTAX,
+            Self::Zig => ZIG_SYNTAX,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use codegloss_core::CommentShape;
+
     use super::*;
 
     #[test]
@@ -428,7 +567,10 @@ mod tests {
         // Through the public accessor: that is what a corpus is extracted and
         // scored with, and pinning only the private field would let the two
         // drift.
-        assert_eq!(SupportedLanguage::Rust.rules(), CommentRules::Fenced);
+        assert_eq!(
+            SupportedLanguage::Rust.rules(),
+            CommentRules::FencedUntagged
+        );
         assert_eq!(SupportedLanguage::Go.rules(), CommentRules::Indented);
         assert_eq!(
             SupportedLanguage::Rust.comment_syntax().directives,
@@ -529,6 +671,47 @@ mod tests {
             assert_eq!(
                 language.comment_syntax().directives,
                 DirectiveSyntax::EcmaScript,
+                "in {language:?}"
+            );
+        }
+    }
+
+    /// Which languages read a line that opens with `@` and a word as a doc tag,
+    /// through the set each one names.
+    ///
+    /// [`CommentRules::Fenced`] reads a fence and a tag, so a language under it
+    /// is one whose comments are JSDoc - the ECMAScript family, and nothing
+    /// else. Rust is [`CommentRules::FencedUntagged`]: Rustdoc has no block
+    /// tag, and the line stays in the sentence it continues. Go still reads it
+    /// as a tag, under [`CommentRules::Indented`]. Its doc comments have no
+    /// block tags either, but moving Go is a decision of its own, and it was
+    /// not taken with Rust's.
+    #[test]
+    fn which_languages_read_a_line_opening_with_an_at_word_as_a_tag() {
+        let fenced: Vec<SupportedLanguage> = SupportedLanguage::ALL
+            .into_iter()
+            .filter(|language| language.rules() == CommentRules::Fenced)
+            .collect();
+        assert_eq!(
+            fenced,
+            [
+                SupportedLanguage::JavaScript,
+                SupportedLanguage::TypeScript,
+                SupportedLanguage::Tsx,
+            ]
+        );
+
+        let raw = "// Calls\n// @intCast on the id.";
+        for (language, units) in [
+            (SupportedLanguage::Rust, vec!["Calls @intCast on the id."]),
+            (SupportedLanguage::Go, vec!["Calls", "on the id."]),
+            (SupportedLanguage::JavaScript, vec!["Calls", "on the id."]),
+            (SupportedLanguage::TypeScript, vec!["Calls", "on the id."]),
+            (SupportedLanguage::Tsx, vec!["Calls", "on the id."]),
+        ] {
+            assert_eq!(
+                CommentShape::parse(raw, language.rules()).units(),
+                units,
                 "in {language:?}"
             );
         }

@@ -141,7 +141,10 @@ pub struct GlossKey(pub [u8; 32]);
 ///   whose argument is a name is copied through whole.
 /// - `9` - a line of an example that is nothing but a comment is glossed under
 ///   its own marker, and a run of them is one unit.
-pub const PIPELINE_VERSION: &str = "9";
+/// - `10` - a set of rules can say its doc comments carry no block tags: under
+///   [`CommentRules::FencedUntagged`] (Rust, Zig) a line opening with `@` and a
+///   word is prose, not a tag.
+pub const PIPELINE_VERSION: &str = "10";
 
 impl GlossKey {
     /// Separator between the hashed fields. NUL cannot appear in a language tag
@@ -199,7 +202,7 @@ mod tests {
                 "Returns the user."
             )
             .to_hex(),
-            "dac2e397b5e4b1861f54e978c9f3df62f2a9b2f268d21c6fc39a45cd49eb5dd7"
+            "ea29aa3b38108c1894b98bf987861ff5a0079af274631a58f8366da200b4b2f9"
         );
     }
 

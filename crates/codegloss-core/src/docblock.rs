@@ -36,8 +36,12 @@
 //! Not every language marks an example with a fence. Go's doc comments have no
 //! fence at all and indent the example instead, so under
 //! [`CommentRules::Indented`] a run of indented lines is copied through the way
-//! a fenced one is. Which of the two a comment is read under is the parser's to
-//! say - this module owns the vocabulary, never the list of languages.
+//! a fenced one is. Nor does every language write doc tags: the `@return` line
+//! above is a tag only under rules that say a comment has them, and under
+//! [`CommentRules::FencedUntagged`] it is prose - Rustdoc has no block tag, and
+//! a line of a Zig comment can open with the builtin `@intCast`. Which set a
+//! comment is read under is the parser's to say - this module owns the
+//! vocabulary, never the list of languages.
 //!
 //! [`CommentBlock::text`]: crate::CommentBlock::text
 //! [`CommentBlock::raw`]: crate::CommentBlock::raw
@@ -83,6 +87,11 @@ const RENDERED_FENCES: [&str; 2] = ["```", "~~~"];
 /// The vocabulary of doc comments, not of languages: `codegloss-core` may hold
 /// it for the same reason it holds `{@code ...}` and a Markdown fence, and
 /// [`CommentRules`] stays the one thing the parser has to say.
+///
+/// Read only where the rules say a comment has tags at all
+/// ([`CommentRules::reads_doc_tags`]). Elsewhere this table would take Zig's
+/// `@intCast` for a tag nobody has heard of, read it as
+/// [`TagArguments::Prose`], and split the paragraph at it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TagArguments {
     /// Prose, after an optional type. `@returns {Promise<User>} the user`,
@@ -281,9 +290,13 @@ impl CommentShape {
         // under rules that mark an example with a fence, and read with `get`,
         // which makes that one branch below rather than two code paths.
         let examples = match rules {
-            CommentRules::Fenced => Vec::new(),
+            CommentRules::Fenced | CommentRules::FencedUntagged => Vec::new(),
             CommentRules::Indented => indented_examples(raw, block),
         };
+        // Asked of the rules here, once, rather than handed to a helper as a
+        // flag: the answer belongs to the set the comment was read under, and
+        // a parameter is a place for a caller to pass a different one.
+        let tags = rules.reads_doc_tags();
         let mut pieces = Vec::new();
         let mut paragraph: Option<Paragraph> = None;
         let mut fenced = false;
@@ -346,9 +359,22 @@ impl CommentShape {
                 continue;
             }
 
-            if let Some((lead, prose)) = lead_of(content) {
-                example = leading_tag(content)
-                    .is_some_and(|(tag, _)| tag_arguments(tag) == TagArguments::Example);
+            // Without doc tags a line that opens with `@` and a word is prose
+            // like any other - `@intCast` in Zig - so it takes no lead and
+            // falls through to the plain prose below, which joins it to the
+            // paragraph it was written in. A list item and a heading are
+            // Markdown, which every set reads.
+            let lead = if tags {
+                lead_of(content)
+            } else {
+                marker_lead(content)
+            };
+            if let Some((lead, prose)) = lead {
+                // Only a tag opens an example, so without tags nothing here
+                // does.
+                example = tags
+                    && leading_tag(content)
+                        .is_some_and(|(tag, _)| tag_arguments(tag) == TagArguments::Example);
                 flush(&mut paragraph, &mut pieces);
                 pieces.push(if prose.is_empty() {
                     Piece::Verbatim(lead.trim_end().to_owned())
@@ -921,6 +947,10 @@ fn opens_a_list(line: &str) -> bool {
 
 /// The part of a line that is emitted verbatim in front of its translation:
 /// a doc tag, a list bullet or a Markdown heading.
+///
+/// For rules that read doc tags only. Under the others
+/// [`CommentShape::parse`] asks [`marker_lead`] alone, because there what this
+/// would take for a tag is a word of the prose.
 fn lead_of(content: &str) -> Option<(String, &str)> {
     tag_lead(content).or_else(|| marker_lead(content))
 }
@@ -1875,7 +1905,11 @@ mod tests {
             "/*\r\n\tx\r\n*/",
             "\t\t",
         ] {
-            for rules in [CommentRules::Fenced, CommentRules::Indented] {
+            for rules in [
+                CommentRules::Fenced,
+                CommentRules::FencedUntagged,
+                CommentRules::Indented,
+            ] {
                 let shape = CommentShape::parse(raw, rules);
                 let _ = shape.source();
                 let _ = GlossPlan::new(raw, rules).segments();
@@ -2177,6 +2211,106 @@ mod tests {
             .units(),
             ["Only the first call blocks."]
         );
+    }
+
+    /// The one line the two fenced sets read differently, side by side.
+    ///
+    /// A Zig line can open with a builtin, and Rustdoc has no block tag at all,
+    /// so under [`CommentRules::FencedUntagged`] the line is the rest of the
+    /// sentence above it. Under [`CommentRules::Fenced`] it is a tag nobody has
+    /// heard of, and the sentence is cut in two at it - the engine is handed
+    /// `Calls` on its own, which is what a Zig comment that wraps before a
+    /// builtin would send it under those rules
+    /// (`docs/model-runtime-notes.md` §19.6).
+    #[test]
+    fn a_line_opening_with_an_at_word_is_prose_under_rules_without_tags() {
+        let raw = "/// Calls\n/// @intCast on the id.";
+
+        let untagged = CommentShape::parse(raw, CommentRules::FencedUntagged);
+        assert_eq!(untagged.units(), ["Calls @intCast on the id."]);
+        assert_eq!(untagged.source(), "Calls @intCast on the id.");
+
+        let tagged = CommentShape::parse(raw, CommentRules::Fenced);
+        assert_eq!(tagged.units(), ["Calls", "on the id."]);
+        assert_eq!(tagged.source(), "Calls\n@intCast on the id.");
+    }
+
+    /// A tag JSDoc and Javadoc both write is no tag either. Whether a comment
+    /// has tags is its language's to say, not the line's, so the whole line is
+    /// one unit of prose and nothing of it goes into a lead.
+    #[test]
+    fn a_named_tag_is_prose_under_rules_without_tags() {
+        let shape = CommentShape::parse(
+            "/// @param id the user to load",
+            CommentRules::FencedUntagged,
+        );
+        assert_eq!(shape.units(), ["@param id the user to load"]);
+        assert_eq!(shape.source(), "@param id the user to load");
+    }
+
+    /// Nor does `@example` open an example. What makes the lines under it code
+    /// is the tag and nothing on the lines themselves, so without the tag they
+    /// are the paragraph they read as - and with it, the same two lines are
+    /// copied through.
+    #[test]
+    fn an_example_tag_opens_nothing_under_rules_without_tags() {
+        let raw = "/// @example\n/// load();";
+
+        let untagged = CommentShape::parse(raw, CommentRules::FencedUntagged);
+        assert_eq!(untagged.units(), ["@example load();"]);
+
+        let tagged = CommentShape::parse(raw, CommentRules::Fenced);
+        assert!(tagged.units().is_empty(), "{tagged:?}");
+        assert_eq!(tagged.source(), "@example\nload();");
+    }
+
+    /// Everything but the tags is shared. A list item and a heading are
+    /// Markdown, and a fence is asked about before a tag is - so a line inside
+    /// one that opens with `@` is code under both sets, and a comment inside
+    /// one is glossed under both. And indentation says nothing under either:
+    /// the gate that
+    /// [`an_indented_run_is_an_example_only_under_the_rules_that_say_so`] pins
+    /// for `Fenced` holds for both.
+    #[test]
+    fn the_two_fenced_sets_differ_in_nothing_but_the_tags() {
+        for raw in [
+            "/// - item\n/// # Heading",
+            "/// ```\n/// @intCast(x);\n/// ```",
+            "/// ```\n/// // Build the client first.\n/// let client = Client::new();\n/// ```",
+            "//\tpattern:\n//\t\t{ term }",
+        ] {
+            assert_eq!(
+                CommentShape::parse(raw, CommentRules::FencedUntagged),
+                CommentShape::parse(raw, CommentRules::Fenced),
+                "in {raw:?}"
+            );
+        }
+
+        // Not two empty shapes agreeing: the markers are still leads.
+        let shape = CommentShape::parse("/// - item\n/// # Heading", CommentRules::FencedUntagged);
+        assert_eq!(shape.units(), ["item", "Heading"]);
+        assert_eq!(shape.source(), "- item\n# Heading");
+    }
+
+    /// Through the plan, which is what the engine sees: one paragraph, one
+    /// sentence, and the builtin inside it masked - `preserve` protects any
+    /// `@` and a word whatever the rules, so the engine never reads
+    /// `@intCast` and the gloss gives it back as written.
+    #[test]
+    fn a_line_opening_with_an_at_word_reaches_the_engine_masked_in_its_sentence() {
+        let plan = GlossPlan::new(
+            "/// Calls\n/// @intCast on the id.",
+            CommentRules::FencedUntagged,
+        );
+        let segments: Vec<String> = plan
+            .segments()
+            .iter()
+            .map(|segment| segment.text().to_owned())
+            .collect();
+
+        assert_eq!(segments, ["Calls X0Q on the id."]);
+        assert!(!segments[0].contains("@intCast"), "{segments:?}");
+        assert_eq!(plan.restore(&segments), "Calls @intCast on the id.");
     }
 
     /// A doctest is code, and the comments a writer put inside it are prose.
