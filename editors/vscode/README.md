@@ -8,7 +8,11 @@ extension, holds the model and the cache. Nothing is sent anywhere.
 
 ## Languages
 
-Rust, Go, JavaScript, TypeScript, JSX and TSX.
+Rust, Go, JavaScript, TypeScript, JSX, TSX and Zig.
+
+Zig needs the Zig Language extension (`ziglang.vscode-zig`). VS Code has no Zig
+language of its own, so without it a `.zig` file opens as plain text and
+CodeGloss never sees it. `.zon` files are read as Zig too.
 
 ## What you see
 

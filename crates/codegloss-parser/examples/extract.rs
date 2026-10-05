@@ -27,8 +27,8 @@
 //!
 //! The header is what makes `--lang` reach the far end. Without it a Go corpus
 //! is scored under Rust's rules, its indented examples go to the engine as
-//! prose, and nothing says so (Issue #62). The format and its Fenced fallback
-//! are [`codegloss_parser::corpus`].
+//! prose, and nothing says so (Issue #62). The format and its fallback to
+//! Rust's rules are [`codegloss_parser::corpus`].
 //!
 //! Deliberately not included: directory walking, globbing and filtering. The
 //! shell already has all three, and a corpus is worth more when the command

@@ -322,6 +322,37 @@ once_cell / pin-project-lite）減るが、**出荷ツリーからは 1 つも�
 
 ---
 
+## 7.2 追記（Zig）: 文法で信頼の起点が 1 つ増えた
+
+Zig の文法 `tree-sitter-zig`（1.1.2、MIT）を足した。数え方は 7.1 と同じで、
+`cargo tree -p codegloss-lsp -e normal` のクレート名の異なり数と、各クレートの
+`repository` の GitHub の owner（自分を除く）を数える。
+
+| | 足す前 | 足した後 | 差 |
+|---|---:|---:|---:|
+| 既定ツリー | 41 | 42 | **+1** |
+| 出荷ツリー（`--features candle`） | 168 | 169 | **+1** |
+| 既定ツリーの信頼の起点（GitHub の owner） | 14 | 15 | **+1** |
+| 出荷ツリーの信頼の起点 | 77 | 78 | **+1** |
+
+増えたクレートは `tree-sitter-zig` だけで（依存の `tree-sitter-language` は既に
+ツリーに居た）、**増えた起点は `tree-sitter-grammars` である。**ほかの 4 つの文法
+（`tree-sitter-rust` / `-go` / `-javascript` / `-typescript`）の owner は
+`tree-sitter` で、Zig の文法だけが別の owner の下にある。
+
+crates.io の Zig の文法はこれだけではない。bearcove の `arborium-zig` もあるが、
+同じ上流の再配布で、取っても起点が 1 つ増えるのは同じなので、上流の owner 自身が
+出している `tree-sitter-zig` を取った（`docs/model-runtime-notes.md` §19.9）。
+上流の新しい版（ABI 15 に上げた master）は crates.io に出ていないが、git で引く
+ことは `deny.toml` の `[sources]` が許さない。Zed の Zig 拡張自身も同じリポジトリ
+（`tree-sitter-grammars/tree-sitter-zig`）の文法を使っている（版は違い、あちらは
+master の 6479aa1 を pin している）。
+
+cargo-deny（`check advisories bans licenses sources`）は前後とも通り、重複の
+警告（10 件）も増えていない。
+
+---
+
 ## 8. 未検証・要確認事項
 
 以下は本調査で断定できなかったもの。実装前に実機確認が必要。
@@ -331,7 +362,7 @@ once_cell / pin-project-lite）減るが、**出荷ツリーからは 1 つも�
 3. Code Lens / Inlay Hint 併用時のパフォーマンス（大きなファイルでコメント数が多い場合の再計算コスト）。
 4. FuguMT の実機レイテンシ（candle f32 / f16、CPU、1 コメントあたり）。インライン表示に耐えるかはここ次第。
 5. Firefox の en→ja モデルを Rust から動かす現実的な経路（bergamot FFI 自作 / marian intgemm 形式から HF 形式への変換可否）。
-6. 拡張が `languages = ["Java", ...]` に列挙する言語のうち、Zed 本体に無く別拡張が提供するもの（Java 等）は、その拡張が未インストールなら登録が無効になる点の挙動確認。
+6. 拡張が `languages = ["Java", ...]` に列挙する言語のうち、Zed 本体に無く別拡張が提供するもの（Java 等）は、その拡張が未インストールなら登録が無効になる点の挙動確認。**Zig がこれに当たる**（Zig 拡張が言語を提供する）。zed main（96837d7）のソースでは、拡張の language server は言語名をキーに登録されるだけで、その言語があるかは確かめない（`crates/language_extension/src/extension_lsp_adapter.rs` の `register_language_server` → `crates/language/src/language_registry.rs` の `register_lsp_adapter`）。実機は未確認で、確認欄は `docs/zed-display-notes.md` 2.9。
 
 ---
 

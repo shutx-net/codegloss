@@ -1,0 +1,43 @@
+//! Fixture holding one of every comment shape Zig writes. It is stored as
+//! .zig.txt so that neither cargo nor zig build picks it up.
+
+const std = @import("std");
+
+/// Looks the user up in the cache.
+/// Falls back to the database on a miss.
+///
+/// ```zig
+/// const user = try find(42);
+///
+/// // Seed the cache first.
+/// _ = user;
+/// ```
+pub fn find(id: u64) !u64 {
+    // The // in the URL below is not a comment. It sits inside a string
+    // literal, and Tree-sitter leaves it there.
+    const endpoint = "https://example.com/users"; // Trailing note.
+    const banner =
+        \\// Not a comment either: a line of a multiline string.
+    ;
+
+    ////////////////
+
+    //// Four slashes make a plain comment, not a doc comment.
+
+    // zig fmt: off
+    const table = [_]u8{ 1,  2,
+                         3,  4 };
+    // zig fmt: on
+    _ = .{ endpoint, banner, table };
+    return id;
+}
+
+pub const User = struct {
+    /// The name shown in the UI.
+    name: []const u8,
+};
+
+// 日本語のコメントもそのまま抜き出す。
+test find {
+    _ = try find(1);
+}

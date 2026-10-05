@@ -2828,3 +2828,476 @@ lead に入るので、`    // seed the cache` の gloss は `    // キャッ�
 - **訳文の質は測っていない。**用例の中のコメントは短く、命令形が多く（`// Build
   the client first.`）、段落の散文とは文体が違う。FuguMT の出来が段落と同じとは
   限らない。§7 と同じ道具（`examples/probe.rs`）で測れるが、まだ測っていない。
+
+## 19. Zig に対応する
+
+Zig の文法（tree-sitter-zig）はコメントを `token(seq('//', /.*/))` という 1 種類の
+ノードで表す。`//`・`///`・`//!`・`////` はどれも同じ `(comment)` で、**doc の印は
+本文に残る**。Rust の文法のように印をノードとして渡してはくれないので、文法を配線
+しただけでは ```` /// ``` ```` の本文が ```` / ``` ```` になる——英数字を持たないので
+区切り線と同じく落ち、フェンスはパーサから見えなくなり、doc に書いたコードの例が
+散文としてエンジンへ渡る。#53 を Zig で作り直すことになる（実測は 19.3）。
+
+規則はどれも Zig 自身が持っている。doc かどうかは tokenizer
+（`lib/std/zig/tokenizer.zig`）、doc の書式は autodoc の Markdown
+（`lib/docs/wasm/markdown.zig`）、道具への指示は zig fmt
+（`lib/std/zig/Ast/Render.zig`）。この節はそれを CodeGloss の形に写した記録で、
+正解データも Zig 自身に出させた。
+
+途中で core に規則を 1 つ足した。Zig の doc では組み込み関数（`@intCast`）が行頭に
+来ることがあり、行頭の `@word` を doc タグと読む規則ではそこで段落が割れる（19.6）。
+
+### 19.1 コーパスと道具
+
+Zig 0.17.0 のソース tarball
+（`https://ziglang.org/download/0.17.0/zig-0.17.0.tar.xz`、2026-10-01、
+SHA-256 `b6c7f1728f043700d6529bac980800792f824256a9d2f1839b3d62beed0b8abd`。
+`https://ziglang.org/download/index.json` の `shasum` と一致）から 3 つ作った。
+
+| コーパス | 中身 | ファイル | コメント | ブロック |
+|---|---|---|---|---|
+| **主: 標準ライブラリ** | `lib/std/` の `.zig` 全部 | 563 | 49,890 | 31,242 |
+| 副: コンパイラと道具 | `src/`・`lib/{compiler,compiler_rt,docs,init}/` の `.zig` 全部と `lib/fuzzer.zig` | 478 | 35,885 | 22,571 |
+| ZON | `test/` を除く `.zon` 全部 | 7 | 268 | 212 |
+
+コメントは Zig の tokenizer が数える数（19.2）、ブロックは出荷経路
+（`extract_comment_blocks`）の数。以下、数字は主コーパスで示し、副と ZON は同じ
+測り方で並べる。
+
+入れていないもの: `test/`（`.zig` 1,553・`.zon` 78）、`doc/`（`.zig` 290）、
+`tools/`（29）、`build.zig`、`lib/c/`・`lib/build-web/`・
+`lib/{c,compiler_rt,ubsan_rt}.zig`。`test/cases/` のファイルは末尾のコメントの連なり
+をテストの指示として読まれ（`test/src/Cases.zig` の `TestManifest.parse`）、
+`test/cases/compile_errors/` はコンパイルエラーを期待するテスト（`.zig` 1,016・
+`.zon` 35）である。Zig 自身の `build.zig` も `test/cases` と `test/behavior/zon` を
+zig fmt の検査から外している（`fmt_exclude_paths`）。
+
+ブロックは誰でも取り出せる。**第三者のコメントはリポジトリに置けない**ので、この節
+の数字もコーパスを置く代わりに「作れる」ようにしてある（§12・§16・§17 と同じ）。
+
+```sh
+curl -L -o /tmp/zig-0.17.0.tar.xz https://ziglang.org/download/0.17.0/zig-0.17.0.tar.xz
+echo 'b6c7f1728f043700d6529bac980800792f824256a9d2f1839b3d62beed0b8abd  /tmp/zig-0.17.0.tar.xz' \
+  | sha256sum -c
+tar xf /tmp/zig-0.17.0.tar.xz -C /tmp
+cargo run -p codegloss-parser --example extract -- --lang zig \
+  $(find /tmp/zig-0.17.0/lib/std -name '*.zig' | sort)
+# 1 行目は %%% rules: fenced-untagged、stderr は 31242 blocks from 563 files as zig
+```
+
+比べる腕は、出荷のツリー（4d49980）を写して `languages.rs` の `ZIG_SYNTAX` の
+**1 フィールドだけ**を書き換えたもの: `line_doc_markers: None`（19.3）、
+`directives: DirectiveSyntax::None`（19.5）、`rules: CommentRules::Fenced`
+（19.6）、`rules: CommentRules::Indented`（19.4）。行ごとの数字（訳される行・写さ
+れる行）は、`CommentShape::parse` が各行をどの分岐で扱ったかを記録させた研究用の
+写しで数えた。**記録を足しても、3 コーパス × 5 つの腕のすべてで、ブロック・
+`units()`・`segments()` は記録なしの写しとバイト単位で一致する。**zig fmt を流すの
+は公式のバイナリ（`zig-x86_64-linux-0.17.0.tar.xz`、SHA-256
+`1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026`）。測ったのは
+2026-10-05。
+
+### 19.2 正解データは Zig の tokenizer から取る
+
+正解は Zig 0.17.0 自身の `std.zig.Tokenizer` に出させる。doc コメントはトークン
+（`.doc_comment` / `.container_doc_comment`）なのでそのまま拾い、普通のコメントは
+トークンにならないので、**トークンとトークンの隙間を `//` で走査して**拾う。
+zig fmt の `renderComments`（`Render.zig` 3005 行）が普通のコメントを見つけるのと
+同じ走り方である。それを tree-sitter-zig 1.1.2 の `(comment)` と（ファイル、行、
+桁、種別）で突き合わせた。道具（Zig で 50 行ほど）はリポジトリに入れていない。
+
+| コーパス | tokenizer のコメント | `(comment)` | 食い違い | 木にエラーが残るファイル | エラーの中のコメント |
+|---|---|---|---|---|---|
+| 標準ライブラリ | 49,890 | 49,890 | **0** | 74 / 563 | 17 |
+| 副 | 35,885 | 35,885 | **0** | 19 / 478 | 3 |
+| ZON | 268 | 268 | **0** | 7 / 7 | 0 |
+
+tokenizer が invalid を返した箇所は 0。**文法が読めないファイルの中でも、コメントは
+位置と種別まで全部合っている**——ERROR ノードの内側にあった 20 個も含めて。
+
+文法は古い。1.1.2 は上流の b670c8d（2024-12-21）で、Zig 0.13.0（2024-06-07）と
+0.14.0（2025-03-05）の間にあたる。上流にはその後 8 コミット（ABI 15 化、テスト
+コーパスを Zig 0.15.1 へ更新）があるが、crates.io の最新は 1.1.2 のままである
+（2026-10-05 に取った上流の HEAD は 6479aa1、2025-09-10）。0.17.0 の構文で知らない
+ものがあり、たとえばインライン asm のクロバーを構造体で書く形
+（`asm volatile ("" ::: .{ .memory = true })`）と、`async` という名のフィールドは
+最小のファイルで木にエラーが残る（同じファイルを文字列のクロバー・別名のフィールド
+にすると残らない。4 つとも `zig ast-check` は通る）。標準ライブラリで木にエラーが
+残る 74 ファイルのうち 39 は構造体のクロバーを書いていて、それを書くファイルは
+39 個すべてが読めない。ZON の 7 ファイルはどれも木の末尾に MISSING が残る。
+
+**この母集団では、文法の古さはコメントに届いていない。**届くかどうかは構文次第
+なので、19.11 に残してある。
+
+### 19.3 doc の印を本文から読む
+
+doc かどうかは tokenizer が 2 バイトで決める（`tokenizer.zig` の
+`.line_comment_start` と `.doc_comment_start`）。`//` の次が `!` なら後ろが何でも
+container doc（`//!`）、`/` なら次の 1 バイトを見て、それも `/` なら普通のコメント
+（`////`）、そうでなければ doc（`///`、空の `///` も doc）。テスト
+`"line comment and doc comment"` が 8 通りの綴りでこれを固定している。rustc の lexer
+（`rustc_lexer` の `line_comment`）も同じ規則である。
+
+CodeGloss ではレジストリが綴り（`LineDocMarkers { outer: "///", inner: "//!" }`）を
+言い、規則は `extract.rs` の `line_doc_marker` に 1 つだけある。木が印を渡す文法
+（Rust）は今までどおり木を先に読む。
+
+標準ライブラリのコメント（tokenizer）:
+
+| 印 | 行 | うち |
+|---|---|---|
+| `///` | 31,483 | 空の `///` 2,303。`///!` 3（`lib/std/wasm.zig` の 1〜3 行目。`///` の doc で本文が `!` から始まる——Zig も autodoc もそう読む） |
+| `//!` | 1,117 | 空の `//!` 183 |
+| `//` | 17,290 | 行末のコメント 4,471。`////` 5（罫線 2、語のある行 3） |
+
+ブロックは `//!` 344・`///` 18,486・`//` 12,412、計 31,242。
+
+印を読まない写し（`line_doc_markers: None`）と比べた:
+
+| | 印を読む（出荷） | 読まない（写し） |
+|---|---|---|
+| ブロック | 31,242 | 31,208 |
+| `CommentBlock::text` が `/` か `!` で始まるブロック | 8 | **18,828** |
+| フェンス行を含むブロック | 34 | 8 |
+| doc のフェンスの中のコード 232 行のうち、エンジンへ渡る行 | 0 | **147** |
+| doc のフェンス行 64 のうち、どのブロックにも入らない行 | 0 | 58 |
+
+`text` は code lens の見出しで、訳が無い間の hover の中身でもある。読まなければ
+`//! Effectively a stack of u1 values …` の見出しが `! Effectively …` に、`///` の
+見出しが `/ …` になる。
+
+フェンスはもっと悪い。```` /// ``` ```` の本文は ```` / ``` ```` で、英数字を持たないので落ち、
+連なりもそこで切れる。`lib/std/Io.zig` 1461 行の doc はこうなる:
+
+```
+/// The typical usage for this function is to protect a block of code from cancelation:
+/// ```
+/// const old_cancel_protect = io.swapCancelProtection(.blocked);
+/// defer _ = io.swapCancelProtection(old_cancel_protect);
+/// doSomeWork() catch |err| switch (err) {
+///     error.Canceled => unreachable,
+/// };
+/// ```
+```
+
+出荷経路では 1 ブロックで、断片は 1 行目の 1 つだけ。印を読まないと 2 行のフェンス
+と `/// };` が落ちて 2 ブロックに割れ、
+`const X0Q = X1Q(.blocked); defer X2Q = X3Q(X4Q);` と
+`X5Q catch |err| switch (err) { error.Canceled => unreachable.` がエンジンへ渡る。
+残る 8 ブロックのうち 6 つは ```` ```zig ```` のように情報文字列を持つ開きの行
+（英数字があるので落ちない）だけが残ったもので、閉じは落ちている。
+
+出荷経路の 8 ブロックの内訳は、`////` の 3（19.11）、`///!` の 1、`// /arch/mips/…`
+のようにパスや入れ子のコメントで始まる普通のコメントの 4。
+
+副コーパスでも同じ形で、ブロック 22,571 → 22,505、`text` が `/` か `!` で始まる
+ブロック 6 → 10,269、doc のフェンスの中のコード 11 行のうち 7 行がエンジンへ渡る。
+
+### 19.4 規則は `FencedUntagged`
+
+autodoc が描くのは、doc のトークンから印の 3 バイトを落としたものである。
+`lib/docs/wasm/main.zig` の `render_docs`（682 行）が、続く doc トークンごとに
+`ast.tokenSlice(it)[3..]` を `markdown.Parser.feedLine` へ流す（696 行）。その
+Markdown は `markdown.zig` の冒頭（38 行）で「コードブロックは 3 つ以上の
+バッククォートのフェンス」と定義し、`markdown/Parser.zig` の `startBlock`（508 行）
+が始められるブロックは区切り線・リスト項目・表・見出し・フェンス・引用だけで、
+`startCodeBlock`（787 行）が数えるのはバッククォートだけである。**字下げのコード
+ブロックもチルダのフェンスも無く、`@word` を読むものも何も無い。**つまり Zig の
+doc は「例はフェンスで示し、doc タグを持たない」——`CommentRules::FencedUntagged`
+の定義そのものである（タグを持たない側は 19.6）。
+
+コーパスの doc がどう書いているか（tokenizer の位置から読んだ本文）:
+
+| | 標準ライブラリ | 副 |
+|---|---|---|
+| doc の行 | 32,600 | 17,320 |
+| フェンス行 | 64（32 組。情報文字列は `zig` 5・`c` 1） | 10（5 組。`markdown` 2） |
+| フェンスの中の行 | 243 | 11 |
+| `~~~` で始まる行 | 0 | 0 |
+| 4 つ以上のバッククォートのフェンス | 0 | 0 |
+| 閉じないまま終わるフェンス | 0 | 0 |
+| 空行（かコメントの頭）の直後で 4 字以上下げた行 | 4 | 39 |
+
+字下げは空白だけで数えればよい。0.17.0 の tokenizer はコメントの中のタブを invalid
+にする（`.line_comment_start`・`.line_comment`・`.doc_comment` の `0x01...0x09`。
+zig fmt に通すと `comment contains invalid byte: '\t'`）。
+
+Go と同じ `CommentRules::Indented` で読んだ写しと比べた。数え方は §16.3 と同じく
+行単位で、「今日は訳されているが、字下げの例として写される側へ移る行」を数える:
+
+| | 標準ライブラリ | 副 | ZON |
+|---|---|---|---|
+| 字下げの例を含むことになるブロック | 602（doc 365・普通 237） | 397（doc 178・普通 219） | 5 |
+| 訳される側から写される側へ移る行 | **1,534**（doc 963・普通 571） | 1,118（doc 576・普通 542） | 4 |
+| 単位がすべて消えるブロック | 103（doc 49） | 114（doc 62） | 0 |
+
+（`Indented` はタグも読むので、出荷経路との差は 19.6 のぶんだけ大きい。上の表は
+字下げの規則が決めた行だけを数えている。）
+
+autodoc に字下げのコードは無いので、**doc の 963 行はすべて autodoc では段落か
+リストの本文として描かれる行である。**内訳は、fiat-crypto が生成した 6 ファイル
+（`crypto/pcurves/**/*_64.zig`。`Postconditions:` の下の式や値域）が 576 行、手書き
+が 387 行で、手書きのうち 170 行はリスト項目の続き（`///   present and non-empty.`）、
+77 行はブロックの 1 行目（34 行は `c/darwin.zig` の、`///` の後ろを 2 つ空けて書いた
+英文）、140 行は散文の直後の行である。（計画段階では約 1,464 行と見積もっていた。
+それは行の扱いを近似で数えた値で、ここでの 1,534 行は 19.1 に書いた、分岐を記録
+させた写しで数えた値である。ブロック数 602 は両者で一致する。）
+
+代わりに払っているものもある。上の表の「空行の直後で 4 字以上下げた行」4 つのうち
+3 つ——`lib/std/c.zig` 4332 行（musl の `#if __LONG_MAX …` の C、7 行）と 4342 行
+（Zig のフィールド宣言、3 行）、`zig/Ast/Render.zig` 3284 行
+（`while (foo) if (bar)`、2 行）——は**書き手がコードのつもりで下げた例**で、この
+12 行は `FencedUntagged` では散文としてエンジンへ渡る。autodoc もこれを段落として
+描くので、CodeGloss は autodoc と同じものを散文と呼んでいる。残る 1 つ
+（`math/atan2.zig` 13 行の `Special Cases:`）は英語である。
+
+### 19.5 zig fmt への指示
+
+zig fmt が読むコメントは `// zig fmt: off` と `// zig fmt: on` で、規則は
+`renderComments`（`Render.zig` 3005 行）にある。トークンの隙間の `//` を拾い、
+`//` を外して両端から `std.ascii.whitespace` を落とし、`mem.eql` で比べる
+（3040 行と 3049 行）。**doc コメントはトークンなので、そもそもここへ来ない。**
+CodeGloss の `DirectiveSyntax::Zig` は同じ trim と完全一致で、印が `Plain` の行に
+しか問わない。
+
+0.17.0 の zig fmt に実際に流して確かめた（直後に崩した行を置き、`zig fmt --stdin`
+がそれを直すかどうかで見る）:
+
+| コメント | zig fmt | CodeGloss |
+|---|---|---|
+| `// zig fmt: off`、`//zig fmt: off`、`//   zig fmt: off   ` | 指示 | 落とす |
+| `// zig fmt: on`、`//zig fmt: on`、`//   zig fmt: on  ` | 指示 | 落とす |
+| `// zig fmt: off because the table is aligned by hand` | 指示ではない | 残す |
+| `// Zig fmt: off`、`// zig fmt:off`、`// zig fmt: on again` | 指示ではない | 残す |
+| `/// zig fmt: off`、`/// zig fmt: on`、`//! zig fmt: off` | 指示ではない | 残す |
+| `//// zig fmt: off`、`//// zig fmt: on` | 指示ではない | 残す |
+
+**15 通りすべてで一致する。**CodeGloss 側は出荷のパーサにこの 15 行を通した結果。
+
+コーパスでは（「規則なし」は `DirectiveSyntax::None` の写し）:
+
+| | 標準ライブラリ | 副 | ZON |
+|---|---|---|---|
+| 指示の行 | 56（off 29・on 27、10 ファイル） | 206（off 114・on 92、59 ファイル） | 3（off 2・on 1、2 ファイル） |
+| ブロック（規則なし → あり） | 31,298 → 31,242 | 22,770 → 22,571 | 214 → 212 |
+| 消えるブロック | 56（すべて指示 1 行だけ） | 199 | 2 |
+| 指示の行が外れて短くなるブロック | 0 | 7 | 1 |
+| どのブロックにも入らなくなる行 | 56 | 206 | 3 |
+| うち指示ではない行 | **0** | **0** | **0** |
+
+**指示以外の行は 1 行も失われない。**外れる行はちょうど指示の行の集合と一致する。
+規則が無ければ、標準ライブラリだけで `zig fmt: off` 29 個と `zig fmt: on` 27 個が
+断片としてエンジンへ渡り、副の 7 ブロックでは
+`Disable formatting to avoid unnecessary source repository bloat. zig fmt: off`
+のように散文と 1 つの単位になって渡る。
+
+zig fmt に触れる散文は残る。標準ライブラリの 3 行
+（`Render.zig` 2199 行の `// Write trailing comments since they may enable/disable zig fmt`、
+3300 行の doc ``/// a `zig fmt: off` comment.``、`tokenizer.zig` 1629 行）と、副の
+1 行（`src/link/Elf2.zig` 4919 行）は、どれもブロックの中にある。
+
+### 19.6 行頭の組み込み関数と `FencedUntagged`
+
+Zig の組み込み関数は `@` で始まる。0.17.0 の `lib/std/zig/BuiltinFn.zig` の `list`
+は 128 個で、125 個は英字だけ、残る 3 つ（`@exp2`・`@log2`・`@log10`）も
+`leading_tag` は数字の手前で止めて `@exp` / `@log`（どちらも組み込み関数）と読む。
+**128 個のどれも `docblock` のタグ表**（`TAGS_WITH_A_NAME` 9・
+`TAGS_WITH_A_TYPE_OR_A_NAME` 2・`TAGS_WITH_AN_OPAQUE_ARGUMENT` 18・`@example`）**と
+重ならない**ので、タグを読む規則では全部が既定の `TagArguments::Prose` に落ちる。
+lead に `@intCast ` を取り、残りを単位にし、**段落をそこで閉じる**。
+
+Zig を `Fenced`（JS / TS と同じ、タグを読む規則）で読んだ写しで数えた。対象は行頭
+（印と空白の後）が `@`＋英字の行で、フェンスの外のもの:
+
+| | 標準ライブラリ | 副 |
+|---|---|---|
+| 行頭が `@`＋英字の行 | 36（doc 9・普通 27） | 102（doc 39・普通 63） |
+| うち前の行の文の続き | 26（doc 6・普通 20） | 9（普通 9） |
+| `Fenced` でタグとして読まれる行 | 36 | 102 |
+| `Fenced` で割れる段落 | 24（doc 7・普通 17）。単位が 53 増える | 10（普通 10）。単位が 14 増える |
+| `Fenced` で行ごと写される行 | 1（`// @name`。単位が 1 減る） | 0 |
+| 単位（`Fenced` → 出荷） | 32,324 → 32,272 | 23,086 → 23,072 |
+| 断片（同） | 40,843 → 40,806 | 28,945 → 28,936 |
+| 断片の文字数（同） | 2,071,764 → 2,071,934 | 1,544,873 → 1,545,194 |
+| 動くブロック | 28（doc 8・普通 20） | 102（doc 39・普通 63） |
+
+**出荷経路（`FencedUntagged`）では、タグとして読まれる行も割れる段落も 0 である。**
+行頭の `@word` は周りの散文と同じ段落に入り、`preserve` がそれをプレースホルダに隠す。
+
+行頭の語は、標準ライブラリで `@divFloor` 8・`@divTrunc` 6・`@rem` 6・`@intCast` 3・
+`@min` 2・`@tagName` 2・`@ptrCast` 2・`@truncate`・`@mod`・`@popCount`・
+`@compileLog` 各 1 と、組み込み関数でない `@param` 2・`@name` 1。
+
+割れ方の例（`lib/std/enums.zig` 79 行。断片は 2 つの腕で実際に出たもの）:
+
+```
+/// Determines the length of a direct-mapped enum array, indexed by
+/// @intCast(usize, @intFromEnum(enum_value)).
+
+Fenced:          "Determines the length of a direct-mapped enum array, indexed by"
+                 "(usize, X0Q(X1Q))."
+FencedUntagged:  "Determines the length of a direct-mapped enum array, indexed by X0Q(usize, X1Q(X2Q))."
+```
+
+`lib/std/array_hash_map.zig` 1568 行（`@truncate` で始まる doc の 1 行目と、
+`target value.` で始まる 2 行目）も、`Fenced` では
+`fails if the target type is larger than the` と `target value.` の 2 つの断片に
+割れていた。
+
+**直すかどうかは実測ではなく判断で、リポジトリの持ち主が直すほうを選んだ
+（2026-10-05）。**core に `CommentRules::FencedUntagged`（例はフェンスで示し、行頭の
+`@word` は doc タグではなく散文）を足し、Zig と Rust をそこへ置いた。Rustdoc にも
+block tag は無い（Rust で動いたものは 19.7）。**Go（`Indented`）と JavaScript /
+TypeScript / TSX（`Fenced`）は据え置いた。**JS / TS / TSX は JSDoc のタグを書くから
+（§17）。Go も doc タグを持たないが、移すかは別の判断として残した。GOROOT で行頭が
+`@`＋英字の行は 6 行あり、4 行は字下げの例の中（`crypto/internal/fips140/aes/aes_generic.go`
+の `@version` / `@author`）で写されるので関係が無く、**残る 2 行は今日もタグとして
+読まれて段落が割れている**（`cmd/go/internal/work/shell.go` 594 行の
+`// @foo anywhere in the command line …`、`cmd/vendor/golang.org/x/arch/arm/armasm/plan9x.go`
+180 行の `// @x> is a lie; …`。どちらも文の続き）。
+
+払ったものもある。標準ライブラリで 2 箇所、`Fenced` のほうが良かった:
+
+- `lib/std/crypto/modes.zig` 23〜24 行の
+  `/// @param counter_offset: Byte offset where the counter starts` /
+  `/// @param counter_size: Size of the counter in bytes`。`Fenced` は名前を lead に
+  取って `Byte offset where the counter starts` と `Size of the counter in bytes` の
+  2 断片にしていた。出荷経路では 1 段落になり、
+  `X0Q X1Q: Byte offset where the counter starts X2Q X3Q:` と
+  `Size of the counter in bytes` が渡る。autodoc もこの 2 行を 1 段落として描く。
+- `lib/std/zig/Ast/Render.zig` 1656 行の行末コメント `// @name`。`@name` は
+  `TAGS_WITH_AN_OPAQUE_ARGUMENT` にあるので `Fenced` では行ごと写されていた。出荷
+  経路ではプレースホルダだけの断片 `X0Q` が渡る。
+
+### 19.7 既存の言語で動いたもの
+
+f1f99c8（変更前）と 4d49980 で、§16・§17 と同じ経路（`extract_comment_blocks` →
+`CommentShape` / `GlossPlan`）の出力を**ブロックの全フィールド**（style・rules・
+行と byte の範囲・`text`・`raw`・`units()`・`segments()`）でバイト比較した。コミット
+は 1 つだが、規則を足した段階と Zig を配線した段階の間でも一度全コーパスを吐いて
+ある。
+
+| コーパス | ブロック | 規則を足して Rust を移した段階 | Zig を配線した段階（4d49980） |
+|---|---|---|---|
+| この機械の registry（223 クレート、400 KB 未満の `.rs` 6,224 ファイル） | 185,513 | `rules` 欄が全ブロックで `Fenced` → `FencedUntagged`。それ以外が動いたのは **6 ブロック** | 前の段階と完全一致 |
+| GOROOT（go1.24.7、§16.1 と同じ 4,505 ファイル） | 196,406 | **完全一致** | 完全一致 |
+| npm の `.js`（4,179 ファイル） | 11,579 | **完全一致** | 完全一致 |
+| npm の `.d.ts`（1,492 ファイル） | 2,900 | **完全一致** | 完全一致 |
+| npm の `.ts`（243 ファイル） | 2,401 | **完全一致** | 完全一致 |
+
+npm は §17.1 の 8 パッケージを取り直したもの（lodash 4.18.1・date-fns 4.4.0・
+express 4.22.3・axios 1.20.0・zod 3.25.76・typescript 5.9.3・yargs 17.7.3・
+commander 12.1.0 とその依存）で、そのぶん §17.1 と数が少し違う。「前」の出力は
+f1f99c8 を `git archive` で取り出してビルドし直したもので、比較に使ったダンプと
+バイト一致する。
+
+**Rust で動いた 6 ブロックは、行頭が `@`＋英字の行を含むブロックの全部である**
+（registry 全体でそういう行は 7 行、ブロックは 6 つ）。行番号は 1 始まり:
+
+| 場所 | 行 | 前（`Fenced`） | 後（`FencedUntagged`） |
+|---|---|---|---|
+| `itertools-0.14.0/src/lib.rs` 322〜324 | `// @closure …` 2 行 | 単位 3 | 単位 1 |
+| `lsp-server-0.10.0/src/msg.rs` 144・152 | `/// @since 3.17.0` | `Opaque` で行ごと写す | 断片 `X0Q 3.17.0` |
+| `serde_json-1.0.151/src/macros.rs` 61〜64 | `// @SergioBenitez before making …` | `Check with` で文が切れる | `Check with X4Q before making breaking changes to this macro.` |
+| `synstructure-0.13.2/src/lib.rs` 2327 | `// @bound` | 写す | 断片 `X0Q` |
+| `unicode-ident-1.0.24/src/tables.rs` 1 | `// @generated by ../generate. …` | タグが lead | タグが単位に入る（`X0Q by ../generate.`） |
+
+6 ブロックの断片は 8 → 9 で、うち 3 つ（`X0Q 3.17.0` 2 つと `X0Q`）はプレース
+ホルダとほぼそれだけの断片になった。凍結コーパス
+（`tests/fixtures/comment-corpus.txt`）に行頭が `@`＋英字の行は無いので、**§12 の
+数字は動かない。**
+
+### 19.8 `PIPELINE_VERSION` を 9 → 10 に上げた
+
+`docblock` が規則によって違う答えを返すようになったからである
+（`CommentRules::reads_doc_tags`）。AGENTS.md の規則は「`preserve` / `sentence` /
+`docblock` の出力が変わったら上げる。測ったコーパスで動かなくても上げる」
+（§17.8）で、今回は測ったコーパスでも動いた（19.7 の Rust 6 ブロック）。
+`model.rs` の `the_key_encoding_is_stable` が固定している値は、
+`dac2e397…`（9）から `ea29aa3b…`（10）に意図して書き換えてある。
+
+**全言語のキャッシュが一度外れる。**リポジトリの持ち主が了承済みである。
+
+キーには規則のタグ（`CommentRules::tag`）が混ざるので、**Zig と Rust は
+`fenced-untagged` でキャッシュを共有し、JS / TS / TSX（`fenced`）とは共有しなく
+なった。**同じ `/// Returns the user.` を各言語で抽出してキーを計算すると
+（モデル版は `fugumt-en-ja@1`）、Rust と Zig が `407e7b47…` で一致し、JS / TS /
+TSX が `551a4a35…`、Go が `2204df5d…` になる。形の規則が同じなら訳も同じなので、
+これは設計どおりである（AGENTS.md の「言語ではなく規則を配る」）。
+
+### 19.9 依存と信頼の起点
+
+増えたのは tree-sitter-zig 1.1.2（checksum `ab11fc12…`、MIT、`src/parser.c` は
+ABI 14）だけで、その依存（`tree-sitter-language` 0.1.7 と、ビルド時の `cc`）は既に
+`Cargo.lock` に居た。`Cargo.lock` の差もこの 1 項目である。
+
+| | f1f99c8 | 4d49980 | 差 |
+|---|---:|---:|---:|
+| 既定ツリー（`cargo tree -p codegloss-lsp -e normal` のクレート名の異なり数） | 41 | 42 | **+1**（tree-sitter-zig） |
+| 出荷ツリー（`--features candle`） | 168 | 169 | **+1**（同） |
+| 既定ツリーの信頼の起点（GitHub の owner。自分を除く） | 14 | 15 | **+1**（tree-sitter-grammars） |
+| 出荷ツリーの信頼の起点 | 77 | 78 | **+1**（同） |
+
+**起点が 1 つ増える。**ほかの 4 つの文法の owner は tree-sitter で、Zig の文法は
+tree-sitter-grammars が持っている。crates.io の Zig の文法はこれだけではない
+（bearcove の arborium-zig 2.18.2 もある。通常の依存は `tree-sitter-language` だけ
+なので、取っても起点が 1 つ増えるのは同じ）。tree-sitter-zig は上流の文法の owner
+自身が出しているものである。
+
+cargo-deny 0.20.2 の `check advisories bans licenses sources` は、両方のコミットで
+`advisories ok, bans ok, licenses ok, sources ok`。重複の警告 10 件（`base64`・
+`cpufeatures`・`getrandom`・`hashbrown`・`r-efi`・`syn`・`thiserror`・
+`thiserror-impl`・`tokenizers`・`windows-sys`）も前後で同じである。
+
+### 19.10 エンジンへ渡るもの
+
+出荷経路の実測:
+
+| | 標準ライブラリ | 副 | ZON |
+|---|---|---|---|
+| ファイル | 563 | 478 | 7 |
+| ブロック | 31,242 | 22,571 | 212 |
+| ブロックの行のうち訳される行 | 46,543 | 34,447 | 258 |
+| 写される行（フェンス行とその中のコード） | 324 | 21 | 0 |
+| 単位 | 32,272 | 23,072 | 212 |
+| 断片 | 40,806 | 28,936 | 239 |
+| 断片の文字数 | 2,071,934 | 1,545,194 | 6,701 |
+| 単位を持たないブロック | 12（どれもフェンスだけのブロック） | 2（同） | 0 |
+
+訳される行には、フェンスの中で行全体がコメントである 11 行（§18）を含む。
+
+ZON は両方の editor が Zig と呼ぶので（Zed の Zig 拡張の `path_suffixes` と
+vscode-zig の `contributes.languages` に `.zon` がある）、`languageId` は `zig` で
+届き、同じ規則で読まれる。7 ファイルのコメント 268 行はすべて普通のコメントで、
+指示 3 行と語の無い行を除いた 258 行が 212 ブロックになる。木にはエラーが残るが
+（19.2）、コメントは tokenizer と全部合っている。
+
+### 19.11 未検証
+
+- **実機の Zed と VS Code。**どちらも Zig を本体に持たない。Zed は Zig 拡張
+  （`zed-extensions/zig` 996432e、v0.4.2。`languages/zig/config.toml` の
+  `name = "Zig"` を `lsp_id()` が小文字にして `zig`）、VS Code は vscode-zig
+  （`codeberg.org/ziglang/vscode-zig` 2e987c6、v0.6.19。`contributes.languages` の
+  `"id": "zig"`）が入っていて初めて `zig` が届く。ここまではソースを取って確認
+  した。**実際にバッファで codegloss が起動するかは確かめていない。**
+- **訳文の質。**この環境にモデルパックが無い。この節が測っているのは何がエンジンへ
+  渡るかで、渡ったものがどう訳されるかではない。§7 と同じ道具
+  （`examples/probe.rs`）で測れるが、まだ測っていない。
+- **文法の古さ。**この母集団では、木にエラーが残るファイルでもコメントは全部合って
+  いた（19.2）。それは今回の構文についての話で、文法が知らない構文がコメントの
+  切り出しを狂わせる日が来ないとは言えない。
+- **`* ` の箇条書きを `docblock` は知らない。**`marker_lead` が知っている印は `-`・
+  `+`・`1.`・`1)`・`#` で、autodoc の Markdown（`Parser.zig` の `startListItem`）と
+  CommonMark がリストと読む `* ` は散文として前の行に連結される。
+  `lib/std/Build.zig` 740 行の 3 行（`/// See also:` の下に `* ` の項目が 2 つ）は
+  `See also: * X0Q * X1Q` という 1 断片になる。
+  `///`・`//!` のブロックの行のうちフェンスの外で `* ` から始まる行は、標準
+  ライブラリで 698 / 30,078（2.32%）、副で 298 / 16,532（1.80%）、Rust の registry
+  で 2,693 / 231,703（1.16%）。**Zig に固有の問題ではなく、既存の制限である。**
+  表（標準ライブラリの doc で 27 行）と引用（11 行）も同じく段落として扱われる。
+- **`////` の単位に `/` が残る。**パーサは Zig と rustc の規則どおり `////` を普通の
+  コメントとして扱う（19.3）が、`docblock` の `after_markers` は `LINE_MARKERS` の
+  `///` を先に見て 3 文字を剥がすので、`//// Expect a sequence.` の単位は
+  `/ Expect a sequence.` になる。標準ライブラリで 3 ブロック
+  （`crypto/codecs/asn1/der/Decoder.zig` 82・87 行、`crypto/codecs/base64_hex_ct.zig`
+  236 行）、副で 1 ブロック（`src/Compilation.zig` 3690〜3692 行）。§16.10 の Go の
+  `///` と同じ仕組みである。

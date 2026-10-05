@@ -17,3 +17,4 @@ tree-sitter-go.workspace = true
 tree-sitter-javascript.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-typescript.workspace = true
+tree-sitter-zig.workspace = true

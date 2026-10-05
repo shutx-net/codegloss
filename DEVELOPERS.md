@@ -281,6 +281,9 @@ CI が重くなるため）。モデル無しでもサーバは動き、コメ�
    1 回目に原文だけが出るのは仕様（README「ホバーは 1 回目が原文、2 回目から
    訳文」）。
 
+   Zig で試すなら、先に Zed の Zig 拡張を入れておく（Zig は Zed 本体に無く、
+   言語を提供するのはこの拡張である）。
+
 拡張の wasm を手元で先に確かめたいときは次を実行する。Zed が使うのと同じ
 ターゲットとディレクトリ構成になる。
 
@@ -351,9 +354,12 @@ tokenizers）が `log` クレート越しに記録するが、**これも同じ�
 4. VS Code で `editors/vscode` を開き、F5（Run Extension）で拡張開発ホストを
    起動する。Zed と違ってビルドは手元の npm がやるので、Rust は要らない。
 
-5. `.rs` / `.go` / `.ts` / `.tsx` のファイルを開く。**Code Lens は VS Code では
-   既定で on** なので（`editor.codeLens`）、コメントの 1 つ上に行が増えれば
-   疎通できている。ホバーも設定なしで動く。
+5. `.rs` / `.go` / `.ts` / `.tsx` / `.zig` のファイルを開く。**Code Lens は
+   VS Code では既定で on** なので（`editor.codeLens`）、コメントの 1 つ上に
+   行が増えれば疎通できている。ホバーも設定なしで動く。
+
+   `.zig` で試すなら、拡張開発ホストに Zig Language（`ziglang.vscode-zig`）を
+   入れておく（VS Code 本体は Zig を知らず、入れないと `zig` が届かない）。
 
    設定を変えるとサーバは自動で再起動する。手で再起動したいときは
    コマンドパレットの **CodeGloss: Restart Language Server**。

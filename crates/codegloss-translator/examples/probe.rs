@@ -14,8 +14,8 @@
 //!
 //! With comments piped in on standard input, blocks separated by a `%%%` line,
 //! it probes those instead of the built-in list - under the rules the corpus
-//! names in its `%%% rules:` header ([`codegloss_parser::corpus`]), or under
-//! [`CommentRules::Fenced`] when it names none.
+//! names in its `%%% rules:` header ([`codegloss_parser::corpus`]), or as Rust
+//! when it names none.
 
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
@@ -101,10 +101,13 @@ fn main() -> ExitCode {
         eprintln!("standard input could not be read: {error}");
         return ExitCode::FAILURE;
     }
-    // The built-in probes are Rust doc comments written here; a piped corpus
-    // says at the top which rules it was extracted under, and reading a Go one
-    // as Rust would show the engine indented examples as prose - the thing this
-    // tool exists to make visible, hidden by the tool (Issue #62).
+    // The built-in probes are doc comments written here, tag lines among them,
+    // so they are read as `Fenced` - fences and tags, the way JSDoc writes
+    // them. Rust's rules have no tags and would take away the very leads those
+    // probes are there to show. A piped corpus says at the top which rules it
+    // was extracted under, and reading a Go one as Rust would show the engine
+    // indented examples as prose - the thing this tool exists to make visible,
+    // hidden by the tool (Issue #62).
     let (rules, probes) = if piped.trim().is_empty() {
         (CommentRules::Fenced, PROBES.to_vec())
     } else {
