@@ -359,6 +359,32 @@ mod tests {
         assert_eq!(document.blocks[0].text, "Greets a user.");
     }
 
+    /// Zig arrives as `zig` from both editors, and only through an extension:
+    /// neither has Zig built in. Zed's Zig extension names the language `Zig`
+    /// and Zed sends that lowercased; vscode-zig declares the id `zig` itself.
+    ///
+    /// The text is the other half of this seam. Zig's grammar hands no doc
+    /// marker over, so `///` comes off only because the registry spells it for
+    /// Zig; without that the text here is `/ Loads the user.` - and the text is
+    /// what a hover shows until the gloss lands, and what it quotes underneath
+    /// the gloss after.
+    #[test]
+    fn a_zig_document_is_read_under_the_id_both_editors_send() {
+        let store = DocumentStore::new();
+        let uri = Uri::from("file:///tmp/main.zig");
+        store.open(
+            uri.clone(),
+            "zig".to_owned(),
+            1,
+            "/// Loads the user.\npub fn load() void {}\n".to_owned(),
+        );
+
+        let document = store.snapshot(&uri).expect("document is open");
+        assert_eq!(document.blocks.len(), 1);
+        assert_eq!(document.blocks[0].rules, CommentRules::FencedUntagged);
+        assert_eq!(document.blocks[0].text, "Loads the user.");
+    }
+
     #[test]
     fn an_unsupported_language_yields_no_blocks() {
         let store = DocumentStore::new();

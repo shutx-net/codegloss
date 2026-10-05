@@ -510,3 +510,55 @@ fn a_go_document_is_glossed_under_go_rules() {
     );
     assert_eq!(engine.calls(), 1);
 }
+
+/// The same chain for Zig, where the `languageId` carries one thing more than
+/// the rules: how a doc comment is marked. Zig's grammar hands no marker over,
+/// so it is the registry, picked by `zig`, that reads `///` off the text. That
+/// keeps a slash out of the source quoted under each gloss, and it is what
+/// lets the parser see the closing fence at all: read as `//` and then a
+/// slash, that line has no word in it, is dropped as decoration, and leaves
+/// the example's gloss a fence that never closes. Under Zig's rules the
+/// paragraph is translated and the example comes back as the code it is.
+#[test]
+fn a_zig_doc_comment_is_glossed_and_its_example_copied_through() {
+    const ZIG_URI: &str = "file:///tmp/codegloss/main.zig";
+
+    let engine = TestEngine::new();
+    let mut server = server(Arc::clone(&engine));
+    let mut batches = Batches::of(&server);
+
+    initialize(&mut server, true);
+    did_open_as(
+        &mut server,
+        ZIG_URI,
+        "zig",
+        concat!(
+            "/// Loads the user.\n",
+            "///\n",
+            "/// ```zig\n",
+            "/// const user = load();\n",
+            "/// ```\n",
+            "pub fn load() void {}\n",
+        ),
+    );
+
+    engine.release_one_batch();
+    batches.next();
+
+    // The prose was translated, and the source quoted under it carries no
+    // marker.
+    assert_eq!(
+        hover_value_in(&mut server, ZIG_URI, 0, 5),
+        json!("[ja] Loads the user.\n\n> Loads the user.")
+    );
+
+    // The example was not. It is copied through fences and all, with no
+    // `[ja]` anywhere in it: the engine never saw it.
+    assert_eq!(
+        hover_value_in(&mut server, ZIG_URI, 2, 5),
+        json!("```zig\nconst user = load();\n```\n\n> ```zig const user = load(); ```")
+    );
+    // One call for the whole document; the hovers were answered from the
+    // cache.
+    assert_eq!(engine.calls(), 1);
+}
