@@ -820,6 +820,10 @@ mod tests {
             .collect()
     }
 
+    fn zig(source: &str) -> Vec<CommentBlock> {
+        extract_comment_blocks(source, SupportedLanguage::Zig).expect("zig source parses")
+    }
+
     /// A JSDoc block is one block, and `raw` is the bytes of the file so that
     /// `CommentShape` can read the star-decorated lines back.
     #[test]
@@ -968,6 +972,240 @@ mod tests {
                 SupportedLanguage::TypeScript
             ),
             ["/ Loads a user.".to_owned()]
+        );
+    }
+
+    /// [`line_doc_marker`] against Zig's own tokenizer, row for row: the test
+    /// `"line comment and doc comment"` in Zig 0.17.0's
+    /// `lib/std/zig/tokenizer.zig` (line 1291), where a plain comment yields
+    /// no token at all, `.doc_comment` is [`Marker::OuterDoc`] and
+    /// `.container_doc_comment` is [`Marker::InnerDoc`]. The number is where
+    /// the body starts, so it is the marker's length and never more: `//!!`
+    /// is a container doc comment whose body opens with `!`.
+    ///
+    /// The last two rows are not in that test, but follow from the two states
+    /// it exercises - a rule is a `////` that goes on, and the byte after
+    /// `///` has only to be something other than a slash. `zig ast-check` of
+    /// 0.17.0 answers all ten the same way: a doc comment where nothing can
+    /// take one is an error, and a plain comment never is.
+    #[test]
+    fn a_line_doc_marker_is_read_off_the_text_the_way_zig_tokenizes_it() {
+        let markers = SupportedLanguage::Zig
+            .comment_syntax()
+            .line_doc_markers
+            .expect("Zig spells its doc markers in the registry");
+        for (text, marker) in [
+            ("//", None),
+            ("// a / b", None),
+            ("// /", None),
+            ("/// a", Some((Marker::OuterDoc, 3))),
+            ("///", Some((Marker::OuterDoc, 3))),
+            ("////", None),
+            ("//!", Some((Marker::InnerDoc, 3))),
+            ("//!!", Some((Marker::InnerDoc, 3))),
+            ("//////////", None),
+            ("///a", Some((Marker::OuterDoc, 3))),
+        ] {
+            assert_eq!(line_doc_marker(text, markers), marker, "in {text:?}");
+        }
+    }
+
+    /// A Zig doc comment is told by its marker, and the marker stays out of
+    /// the text - the text is what a code lens shows and what a hover falls
+    /// back to. The grammar hands no marker over, so it is the registry's
+    /// spelling that takes it off; `raw` keeps it, for `CommentShape` to read.
+    ///
+    /// `a_triple_slash_directive_is_dropped_but_a_triple_slash_comment_is_not`
+    /// above is the other half: the same `///` in TypeScript keeps its third
+    /// slash, because no language but Zig spells a marker in the registry.
+    #[test]
+    fn a_zig_doc_comment_arrives_without_its_marker() {
+        for (source, raw, text) in [
+            (
+                "/// Loads the user.\npub fn load() void {}\n",
+                "/// Loads the user.",
+                "Loads the user.",
+            ),
+            ("//! Module.\n\nconst x = 1;\n", "//! Module.", "Module."),
+        ] {
+            let blocks = zig(source);
+            assert_eq!(blocks.len(), 1, "{source:?} gave {blocks:#?}");
+            assert_eq!(blocks[0].style, CommentStyle::DocLine, "in {source:?}");
+            assert_eq!(blocks[0].text, text);
+            assert_eq!(blocks[0].raw, raw);
+        }
+    }
+
+    /// `//!`, `///` and `//` say different things - about the container, about
+    /// the declaration that follows, about neither - so a run never crosses
+    /// from one to the next, while each still merges with its own kind. Rust's
+    /// grammar tells the three apart with nodes; here every one is read off
+    /// the text.
+    #[test]
+    fn zig_inner_outer_and_plain_comments_do_not_merge() {
+        let source = concat!(
+            "//! One.\n",
+            "//! Two.\n",
+            "/// Three.\n",
+            "/// Four.\n",
+            "// Five.\n",
+            "// Six.\n",
+            "const x = 1;\n",
+        );
+        let blocks: Vec<(CommentStyle, String)> = zig(source)
+            .into_iter()
+            .map(|block| (block.style, block.text))
+            .collect();
+        assert_eq!(
+            blocks,
+            [
+                (CommentStyle::DocLine, "One. Two.".to_owned()),
+                (CommentStyle::DocLine, "Three. Four.".to_owned()),
+                (CommentStyle::Line, "Five. Six.".to_owned()),
+            ]
+        );
+    }
+
+    /// Four slashes make a plain comment in Zig, as they do in Rust: a slash
+    /// right after `///` turns the doc comment back into a line comment. So
+    /// `//// Four.` does not join the `///` paragraph above it, and its text is
+    /// what follows the `//` - the text Rust's grammar gives the same line. A
+    /// longer run of slashes is a rule and stays the decoration it is, dropped,
+    /// with the paragraph ending at it.
+    #[test]
+    fn four_slashes_make_a_plain_zig_comment_and_a_rule_stays_decoration() {
+        let blocks: Vec<(CommentStyle, String)> = zig("/// Doc.\n//// Four.\nconst x = 1;\n")
+            .into_iter()
+            .map(|block| (block.style, block.text))
+            .collect();
+        assert_eq!(
+            blocks,
+            [
+                (CommentStyle::DocLine, "Doc.".to_owned()),
+                (CommentStyle::Line, "// Four.".to_owned()),
+            ]
+        );
+
+        assert_eq!(
+            texts_of("// One.\n//////////\n// Two.\n", SupportedLanguage::Zig),
+            ["One.".to_owned(), "Two.".to_owned()]
+        );
+    }
+
+    /// Issue #53 in Zig: a fenced example in a doc comment reaches
+    /// [`CommentShape`] in one piece, the blank `///` inside it included, and
+    /// none of it is handed to the engine.
+    ///
+    /// It takes the registry's markers to see the fence at all. Read the way
+    /// JavaScript reads `///` - `//` and then a slash - every line's body opens
+    /// with `/`, so `/ ```zig` is no fence, the blank line is decoration that
+    /// ends the run, and `_ = user;` reaches the engine as prose. CRLF changes
+    /// nothing: Zig's tokenizer takes `\r\n` as a line end, and the marker is
+    /// read off the line with its end trimmed.
+    #[test]
+    fn a_zig_fenced_example_stays_in_one_block() {
+        let source = concat!(
+            "/// Looks the user up in the cache.\n",
+            "///\n",
+            "/// ```zig\n",
+            "/// const user = find(7);\n",
+            "///\n",
+            "/// _ = user;\n",
+            "/// ```\n",
+            "pub fn find(id: u32) u32 {\n",
+            "    return id;\n",
+            "}\n",
+        );
+        let example = concat!(
+            "/// ```zig\n",
+            "/// const user = find(7);\n",
+            "///\n",
+            "/// _ = user;\n",
+            "/// ```",
+        );
+        for newline in ["\n", "\r\n"] {
+            let source = source.replace('\n', newline);
+            let blocks = zig(&source);
+
+            assert_eq!(blocks.len(), 2, "{source:?} gave {blocks:#?}");
+            let fenced = &blocks[1];
+            assert_eq!((fenced.start_line, fenced.end_line), (2, 6));
+            assert_eq!(
+                fenced.raw,
+                example.replace('\n', newline),
+                "both fences and every line between them belong to the block"
+            );
+            assert_eq!(
+                &source[fenced.start_byte..fenced.end_byte],
+                fenced.raw,
+                "raw must be exactly the bytes the range names"
+            );
+            assert!(
+                CommentShape::parse(&fenced.raw, fenced.rules)
+                    .units()
+                    .is_empty(),
+                "a fenced example has nothing to translate"
+            );
+        }
+    }
+
+    /// `// zig fmt: off` and `// zig fmt: on` speak to zig fmt, so they are
+    /// dropped - and dropping one ends the paragraph it interrupts, the way a
+    /// rule or an empty comment does.
+    ///
+    /// Only a plain comment is one, as it is to zig fmt: `renderComments`
+    /// scans the gaps between tokens, and a doc comment is a token. The same
+    /// words after `///` or `//!` are prose a reader is meant to see, and
+    /// after `////` they are a plain comment that says `// zig fmt: off`,
+    /// which zig fmt passes over too - all three put through `zig fmt` of
+    /// 0.17.0. And only Zig drops them: in a Rust file the line is a sentence
+    /// about Zig, so it neither goes away nor ends the paragraph.
+    #[test]
+    fn a_zig_fmt_directive_is_dropped_and_ends_the_run() {
+        for (directive, in_rust) in [
+            ("// zig fmt: off", "One. zig fmt: off Two."),
+            ("// zig fmt: on", "One. zig fmt: on Two."),
+        ] {
+            let source = format!("// One.\n{directive}\n// Two.\n");
+            assert_eq!(
+                texts_of(&source, SupportedLanguage::Zig),
+                ["One.".to_owned(), "Two.".to_owned()],
+                "{source:?}"
+            );
+            assert_eq!(texts(&source), [in_rust.to_owned()], "{source:?}");
+        }
+
+        for (source, text) in [
+            ("/// zig fmt: off\nconst x = 1;\n", "zig fmt: off"),
+            ("//! zig fmt: off\nconst x = 1;\n", "zig fmt: off"),
+            ("//// zig fmt: off\nconst x = 1;\n", "// zig fmt: off"),
+        ] {
+            assert_eq!(
+                texts_of(source, SupportedLanguage::Zig),
+                [text.to_owned()],
+                "{source:?}"
+            );
+        }
+    }
+
+    /// A ZON file arrives as `zig` - both editors' Zig extensions file `.zon`
+    /// under Zig - and its comments come out of it, though tree-sitter-zig
+    /// 1.1.2 cannot read one. The grammar's root is a list of container
+    /// members, and a ZON file is a single expression, which Zig's own parser
+    /// reads in a mode of its own (`Ast.Mode.zon`); to the grammar the file is
+    /// an error. A comment is an extra, though, and error recovery leaves it
+    /// in the tree where it stands.
+    #[test]
+    fn a_zon_file_yields_its_comments() {
+        let source = ".{\n    // The package name.\n    .name = .fixture,\n}\n";
+        let blocks = zig(source);
+
+        assert_eq!(blocks.len(), 1, "{blocks:#?}");
+        assert_eq!(blocks[0].text, "The package name.");
+        assert_eq!(blocks[0].start_line, 1);
+        assert_eq!(
+            &source[blocks[0].start_byte..blocks[0].end_byte],
+            "// The package name."
         );
     }
 }

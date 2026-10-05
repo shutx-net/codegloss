@@ -572,6 +572,10 @@ mod tests {
             CommentRules::FencedUntagged
         );
         assert_eq!(SupportedLanguage::Go.rules(), CommentRules::Indented);
+        // Rust's set, named on Zig's own account rather than inherited:
+        // autodoc's Markdown fences an example with backticks alone and has no
+        // block tag.
+        assert_eq!(SupportedLanguage::Zig.rules(), CommentRules::FencedUntagged);
         assert_eq!(
             SupportedLanguage::Rust.comment_syntax().directives,
             DirectiveSyntax::None
@@ -579,6 +583,10 @@ mod tests {
         assert_eq!(
             SupportedLanguage::Go.comment_syntax().directives,
             DirectiveSyntax::Go
+        );
+        assert_eq!(
+            SupportedLanguage::Zig.comment_syntax().directives,
+            DirectiveSyntax::Zig
         );
     }
 
@@ -613,6 +621,31 @@ mod tests {
         // The first two are Zed's display names rather than its `lsp_id`, the
         // next three are file suffixes, and the last is nobody's spelling.
         for id in ["JavaScript", "TSX", "js", "ts", "jsx", "TypeScriptReact"] {
+            assert_eq!(
+                SupportedLanguage::from_lsp_language_id(id),
+                None,
+                "in {id:?}"
+            );
+        }
+    }
+
+    /// Zig is built into neither editor, so the id it arrives under is the one
+    /// sent by the extensions that add it. Zed's - `zed-extensions/zig` at
+    /// 996432e - names the language `"Zig"` in `languages/zig/config.toml`,
+    /// and `lsp_id()` lowercases that; VS Code's -
+    /// `codeberg.org/ziglang/vscode-zig` at 2e987c6 - declares the id `zig` in
+    /// its `contributes.languages`. Both list `zon` among Zig's suffixes, so a
+    /// ZON file arrives as `zig` as well, and no client sends `zon`.
+    #[test]
+    fn zig_is_recognised_by_its_lsp_language_id() {
+        assert_eq!(
+            SupportedLanguage::from_lsp_language_id("zig"),
+            Some(SupportedLanguage::Zig)
+        );
+        // Zed's display name, a suffix both editors file under Zig, and the
+        // publisher of the VS Code extension: none of them is an id a client
+        // sends.
+        for id in ["Zig", "zon", "ziglang"] {
             assert_eq!(
                 SupportedLanguage::from_lsp_language_id(id),
                 None,
@@ -681,9 +714,10 @@ mod tests {
     ///
     /// [`CommentRules::Fenced`] reads a fence and a tag, so a language under it
     /// is one whose comments are JSDoc - the ECMAScript family, and nothing
-    /// else. Rust is [`CommentRules::FencedUntagged`]: Rustdoc has no block
-    /// tag, and the line stays in the sentence it continues. Go still reads it
-    /// as a tag, under [`CommentRules::Indented`]. Its doc comments have no
+    /// else. Rust and Zig are [`CommentRules::FencedUntagged`]: neither Rustdoc
+    /// nor Zig's autodoc has a block tag, and the line stays in the sentence it
+    /// continues - in Zig, `@intCast` is a builtin being named. Go still reads
+    /// it as a tag, under [`CommentRules::Indented`]. Its doc comments have no
     /// block tags either, but moving Go is a decision of its own, and it was
     /// not taken with Rust's.
     #[test]
@@ -708,10 +742,47 @@ mod tests {
             (SupportedLanguage::JavaScript, vec!["Calls", "on the id."]),
             (SupportedLanguage::TypeScript, vec!["Calls", "on the id."]),
             (SupportedLanguage::Tsx, vec!["Calls", "on the id."]),
+            (SupportedLanguage::Zig, vec!["Calls @intCast on the id."]),
         ] {
             assert_eq!(
                 CommentShape::parse(raw, language.rules()).units(),
                 units,
+                "in {language:?}"
+            );
+        }
+    }
+
+    /// Only Zig spells its doc markers here, and only Zig has no block comment.
+    ///
+    /// The other five have nothing to spell. Rust's grammar hands its markers
+    /// over as nodes, and the tree answers first; Go and JavaScript have no
+    /// doc marker at all, and a JavaScript `///` is a triple-slash directive or
+    /// a comment that happens to open with a slash - Zig's markers on them
+    /// would make `/// Loads a user.` in a TypeScript file a doc comment, which
+    /// `extract`'s `a_triple_slash_directive_is_dropped_but_a_triple_slash_comment_is_not`
+    /// says it is not. Zig's `None` is a statement about the language rather
+    /// than a field left empty: its tokenizer (`lib/std/zig/tokenizer.zig`,
+    /// Zig 0.17.0) reads `/*` as a slash and then an asterisk.
+    #[test]
+    fn only_zig_reads_its_doc_markers_off_the_text() {
+        let c_block = Some(BlockMarkers {
+            start: "/*",
+            end: "*/",
+            continuation: "*",
+        });
+        let zig_markers = Some(LineDocMarkers {
+            outer: "///",
+            inner: "//!",
+        });
+        for language in SupportedLanguage::ALL {
+            let syntax = language.comment_syntax();
+            let expected = match language {
+                SupportedLanguage::Zig => (zig_markers, None),
+                _ => (None, c_block),
+            };
+            assert_eq!(
+                (syntax.line_doc_markers, syntax.block),
+                expected,
                 "in {language:?}"
             );
         }
@@ -765,6 +836,55 @@ mod tests {
             "/",
         ] {
             assert!(!DirectiveSyntax::EcmaScript.matches(body), "in {body:?}");
+        }
+    }
+
+    /// zig fmt's test for a directive, row for row. `renderComments` in Zig
+    /// 0.17.0's `lib/std/zig/Ast/Render.zig` (line 3005) takes the `//` off,
+    /// trims `std.ascii.whitespace` from both ends and compares what is left
+    /// whole - so the spaces around the words do not count and the ones
+    /// between them do, case counts, and a reason written after `off` makes
+    /// the line a sentence. `// zig fmt: off` is what `//// zig fmt: off`
+    /// reaches this as, with only its `//` off: a plain comment to the
+    /// tokenizer, and nothing zig fmt acts on.
+    ///
+    /// Not read off the source alone: every row went through the real
+    /// `zig fmt --stdin` of 0.17.0 as a `//` comment, in front of a line it
+    /// would reformat and inside a region switched off, and only the first
+    /// four switched formatting off or back on.
+    ///
+    /// The last group is the scoping: no other language's rule takes the line.
+    /// Go's turns it down on the space after the marker, which makes any line
+    /// prose to `go/ast`.
+    #[test]
+    fn a_zig_fmt_directive_speaks_to_the_formatter_and_a_comment_does_not() {
+        for body in [
+            " zig fmt: off",
+            " zig fmt: on",
+            "zig fmt: off",
+            "   zig fmt: off   ",
+        ] {
+            assert!(DirectiveSyntax::Zig.matches(body), "in {body:?}");
+        }
+
+        for body in [
+            " zig fmt: off because the table",
+            " Zig fmt: off",
+            " zig fmt:off",
+            " zig  fmt: off",
+            "// zig fmt: off",
+            " zig fmt",
+            "",
+        ] {
+            assert!(!DirectiveSyntax::Zig.matches(body), "in {body:?}");
+        }
+
+        for other in [
+            DirectiveSyntax::None,
+            DirectiveSyntax::Go,
+            DirectiveSyntax::EcmaScript,
+        ] {
+            assert!(!other.matches(" zig fmt: off"), "in {other:?}");
         }
     }
 }
