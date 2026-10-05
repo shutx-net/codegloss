@@ -69,12 +69,29 @@
 実行ビットを立てているので（zip から出したものは実行ビットを持たない）、
 そこから先は保たれる。
 
+### 1.5 Zig は VS Code 本体に無い
+
+上の 4 つとは取得日が違う。`microsoft/vscode` の `main`（2dca67a、2026-10-05）の
+`extensions/` に Zig は無い（組み込み拡張 96 個の `package.json` のどれにも `zig`
+の文字が無い）。`zig` という言語 id を付けるのは vscode-zig（表示名
+`Zig Language`、id `ziglang.vscode-zig`）の `contributes.languages` で、`.zig` と
+`.zon` の両方がこの id になる（`codeberg.org/ziglang/vscode-zig` の `main`、
+2e987c6、v0.6.19）。実測は `docs/model-runtime-notes.md` §19。
+
 ## 2. 実機で確かめること（**すべて未確認**）
 
 以下は実機を持つ人間が埋める。**推測を所見として書かないこと。**
 
 - [ ] `.rs` / `.go` / `.js` / `.jsx` / `.ts` / `.tsx` のそれぞれで拡張が起動し、
       サーバがコメントを返す（`activationEvents` の 6 つがそれぞれ当たる）
+  - 所見:
+- [ ] Zig Language（`ziglang.vscode-zig`）を入れた状態で `.zig` / `.zon` を
+      開くと拡張が起動し、サーバがコメントを返す（`activationEvents` の
+      7 つ目、`onLanguage:zig` が当たる）
+  - 所見:
+- [ ] Zig Language を入れていないと `.zig` は plaintext で開かれ、CodeGloss は
+      何も出さないはずである。それが利用者に分かりにくくないか（要件は README
+      と Marketplace の説明に書いてある）
   - 所見:
 - [ ] 同梱のサーバが使われる（`codegloss.server.path` を書かない状態で、
       `PATH` に別の `codegloss-lsp` があっても VSIX の中のものが動く）

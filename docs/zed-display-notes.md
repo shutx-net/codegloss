@@ -270,6 +270,40 @@ Zed の Go は本体組み込みで、拡張が提供するものではない。
       （§18.5 の 115 行）。実際に見て邪魔か
   - 所見:
 
+### 2.9 Zig（**すべて未確認**）
+
+Zig は Zed 本体に無く、Zig 拡張（`zed-extensions/zig` の 996432e、v0.4.2）が
+提供する。`extension.toml` に書いた `"Zig"` は同拡張の
+`languages/zig/config.toml` の `name` で、LSP に送られる `languageId` は
+`LanguageName::lsp_id()` で `zig` になる。どちらも**一次情報で確認して**決めた
+値だが、利用者が動かしている版でそうかは確かめられていない。同拡張の
+`path_suffixes` は `zig` と `zon` なので、ZON のファイルも `zig` で届くはずで
+ある。実測は `docs/model-runtime-notes.md` §19。
+
+以下は実機を持つ人間が埋める。**推測を所見として書かないこと。**
+
+- [ ] Zig 拡張を入れた状態で、`.zig` のバッファで `codegloss-lsp` が起動する
+      （`languages` の `"Zig"` が当たる）
+  - 所見:
+- [ ] Zig 拡張を入れていないと、`.zig` は Plain Text として開かれて
+      `codegloss-lsp` は起動せず、エラーも出ない
+      （`tech-stack-evaluation.md` 8. の 6 番）
+  - 所見:
+- [ ] `.zon`（`build.zig.zon`）のバッファでも起動する
+  - 所見:
+- [ ] zls と並走して、両方のレンズ／ホバーが出る
+  - 所見:
+- [ ] `///`・`//!` の上の code lens の見出しに `/` や `!` が残っていない
+      （印は本文から読んで剥がしている。§19.3）
+  - 所見:
+- [ ] doc コメントのフェンス（```` ```zig ````）がコードブロックとして描かれる
+  - 所見:
+- [ ] `// zig fmt: off` / `// zig fmt: on` の行にレンズが出なくなっている
+  - 所見:
+- [ ] 行頭が `@intCast` などの組み込み関数の行も、前の行と 1 つの段落として
+      訳されている（§19.6）
+  - 所見:
+
 ## 3. 性能の実測値（Zed 無しで測定・実測）
 
 `tech-stack-evaluation.md` 8.3「大きなファイルでコメント数が多い場合の再計算

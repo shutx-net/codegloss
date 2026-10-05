@@ -25,7 +25,7 @@ changes, and copying the code gives you the original.
 ## Status
 
 Early. **The Zed and VS Code extensions** and the language server are in place, **Rust, Go,
-JavaScript, TypeScript and TSX** comments are extracted with Tree-sitter, and
+JavaScript, TypeScript, TSX and Zig** comments are extracted with Tree-sitter, and
 they come back as hovers and as code lenses (a line of their own above the
 comment). **Translation works for real** (candle + FuguMT, about 0.15 s per
 sentence on a CPU, when a batch of them is translated at once as it is when a
@@ -41,6 +41,10 @@ How a comment is read depends on the language it was written in.
   an argument's name, so only the description is translated. The body of an
   `@example` is code and is copied through whole. So are tool pragmas such as
   `// @ts-ignore` and `// eslint-disable-next-line`.
+- In a **Zig** doc comment (`///` and `//!`), as in Rust's, what sits inside a
+  code fence is an example, so it is copied through rather than translated. The
+  formatter's directives (`// zig fmt: off` and `// zig fmt: on`) are not
+  translated either.
 - **A line of an example that is nothing but a comment is translated.** The
   `// explanation` inside a doctest or an `@example` was written by the same
   author for the same reader as the paragraph above it. Output markers
@@ -64,6 +68,10 @@ hand, and no Python.
   after it starts. It answers normally while that happens, showing the comments
   in English, and switches to Japanese once the model arrives. Fetched once,
   reused after that.
+- **Zig** alone also needs the editor's Zig extension: `Zig` under Zed,
+  `Zig Language` (`ziglang.vscode-zig`) under VS Code. Neither editor has Zig
+  built in, so without that extension a `.zig` file is not opened as Zig, and
+  CodeGloss does not attach to it.
 
 **Not downloading 120 MB behind `initialize` is deliberate.** A language server
 that does not answer looks broken rather than busy.

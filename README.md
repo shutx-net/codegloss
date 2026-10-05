@@ -21,7 +21,7 @@ public User findUser(String id) {
 ## 状況
 
 開発初期です。**Zed 拡張と VS Code 拡張**、および LSP サーバの骨組みができ、**Rust・Go・JavaScript・
-TypeScript・TSX** のコメントを Tree-sitter で抜き出して、ホバーと Code Lens
+TypeScript・TSX・Zig** のコメントを Tree-sitter で抜き出して、ホバーと Code Lens
 （コメント行の上に出る独立した行）に返すところまで動きます。**翻訳も実際に
 動きます**（candle + FuguMT。CPU で 1 文あたり 0.15 秒ほど。ファイルを開いたときの
 ようにまとめて訳す場合）。
@@ -34,6 +34,9 @@ TypeScript・TSX** のコメントを Tree-sitter で抜き出して、ホバー
   `@param {string} id ユーザ ID` の `{string}` と `id` は型と引数名なので訳さず、
   説明だけを訳します。`@example` の中はコードなのでまるごと写します。
   `// @ts-ignore` や `// eslint-disable-next-line` のようなツールへの指示も訳しません。
+- **Zig** の doc コメント（`///` と `//!`）は、Rust と同じくコードフェンスの中が
+  用例なので、そこは訳さずそのまま写します。整形ツールへの指示
+  （`// zig fmt: off` と `// zig fmt: on`）も訳しません。
 - **用例の中でも、行まるごとがコメントの行は訳します。**doctest や `@example` の中に
   書かれた `// 説明` は、段落と同じ書き手が同じ読者に向けて書いたものだからです。
   出力の印（`//=>` や `// => 3`）は訳さずそのまま出ます。
@@ -55,6 +58,10 @@ TypeScript・TSX** のコメントを Tree-sitter で抜き出して、ホバー
 - **翻訳モデル**（120 MB）はサーバが起動後に裏で取ってきます。ダウンロード中も
   サーバは普通に応答し、コメントは英語のまま出ます。届いた時点で訳文へ
   切り替わります。1 回取れば以後は使い回されます。
+- **Zig** だけは、エディタ側の Zig 拡張も要ります。Zed なら `Zig`、VS Code なら
+  `Zig Language`（`ziglang.vscode-zig`）です。Zig は Zed にも VS Code にも本体に
+  入っていないので、Zig 拡張が無いと `.zig` のファイルが Zig として開かれず、
+  CodeGloss も付きません。
 
 **`initialize` の裏で 120 MB を落とさない**のは意図的です。応答しない
 language server は「忙しい」ではなく「壊れている」ように見えるためです。

@@ -321,6 +321,9 @@ comments in English.
    the translation reached the cache; the first hover showing only the original
    is by design (README, "Before the translation lands").
 
+   To try it on Zig, install Zed's Zig extension first (Zig is not built into
+   Zed; that extension is what provides the language).
+
 To check the extension's wasm build by hand first, run the following. It uses the
 same target and directory layout Zed does.
 
@@ -394,9 +397,13 @@ lines and leaves everything else at `warn`).
    extension development host. Unlike Zed, the build is done by your own npm, so
    no Rust is involved.
 
-5. Open a `.rs`, `.go`, `.ts` or `.tsx` file. **Code lenses are on by default in
-   VS Code** (`editor.codeLens`), so a new line above a comment means it works.
-   Hover works with no configuration either.
+5. Open a `.rs`, `.go`, `.ts`, `.tsx` or `.zig` file. **Code lenses are on by
+   default in VS Code** (`editor.codeLens`), so a new line above a comment means
+   it works. Hover works with no configuration either.
+
+   To try a `.zig` file, install Zig Language (`ziglang.vscode-zig`) in the
+   extension development host first (VS Code itself does not know Zig, and
+   without it nothing arrives as `zig`).
 
    Changing a setting restarts the server on its own. To restart it by hand, run
    **CodeGloss: Restart Language Server** from the command palette.
