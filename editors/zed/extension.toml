@@ -12,8 +12,8 @@ repository = "https://github.com/shutx-net/codegloss"
 # 「language server しか提供しない拡張は -lsp を付けろ」という規約に合わせてある。
 # こちらを変えると利用者の settings.json が壊れる。
 #
-# languages の値は Zed 側の言語名と一致させる必要がある。5 つとも Zed 本体に
-# 組み込まれていて（別の拡張は要らない）、名前は zed main の
+# languages の値は Zed 側の言語名と一致させる必要がある。Zig 以外の 5 つは
+# Zed 本体に組み込まれていて（別の拡張は要らない）、名前は zed main の
 # crates/grammars/src/{rust,go,javascript,typescript,tsx}/config.toml の name で
 # 確認した（"Rust" / "Go" / "JavaScript" / "TypeScript" / "TSX"）。
 # LSP に送られる languageId はそれを小文字にしたもの
@@ -25,13 +25,25 @@ repository = "https://github.com/shutx-net/codegloss"
 # JSX は JavaScript の path_suffixes に入っているので、別の言語ではない。
 # TSX は Zed でも Tree-sitter でも別の言語（`<T>x` がキャストか要素かが違う）。
 #
+# **Zig だけは本体に無く、Zig 拡張（zed-extensions/zig、拡張の id は zig）が
+# 言語を提供する。**名前は同拡張の languages/zig/config.toml の name で確認した
+# （"Zig"。996432e、v0.4.2）。languageId は上と同じ lsp_id() で zig になる。
+# 同拡張の path_suffixes は zig と zon なので、ZON のファイルも zig で届く。
+# Zig 拡張が無ければ .zig は Plain Text として開かれて codegloss は付かないが、
+# languages に Zig と書いてあっても害は無い。Zed は language server を言語名で
+# 登録するだけで、その言語があるかを確かめないからである（zed main@96837d7 の
+# crates/language_extension/src/extension_lsp_adapter.rs の
+# register_language_server → crates/language/src/language_registry.rs の
+# register_lsp_adapter）。**こちらも実機では未確認**——確認欄は
+# docs/zed-display-notes.md 2.9。
+#
 # **この一覧を触ったら codegloss-parser の SupportedLanguage::ALL も触ること。**
 # 別ワークスペースなのでどちらのビルドも相手を見ず、片方だけ足すと両方向に静かに
 # 壊れる。CI の `check the supported-language lists`（.github/workflows/ci.yml）が
 # 小文字化した集合で突き合わせている（#63）。
 [language_servers.codegloss]
 name = "CodeGloss"
-languages = ["Rust", "Go", "JavaScript", "TypeScript", "TSX"]
+languages = ["Rust", "Go", "JavaScript", "TypeScript", "TSX", "Zig"]
 
 # Zed は capability に載っていない URL の `download_file` を拒む
 # （`capability_granter.grant_download_file`）。これが無いと拡張はサーバを
