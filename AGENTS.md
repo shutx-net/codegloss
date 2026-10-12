@@ -48,7 +48,7 @@ Cargo ワークスペースがあり、`cargo build --workspace` / `cargo test -
   - **サーバの探索順は 設定 → 同梱 → `PATH`。**同梱を `PATH` より先に見るのは、それが「この版の拡張と一緒に試した組み合わせ」だからで、Zed 拡張が `latest` ではなく自分の版のタグを取りに行くのと同じ理由。設定で指したパスは**存在を確かめずにそのまま返す**（利用者が指したパスで失敗するほうが、黙って別のバイナリが動くよりよい）。
   - **`documentSelector` は `package.json` の `activationEvents` から導出する**（`src/server.ts` の `activatedLanguageIds`）。TypeScript 側に一覧を書き直すと、起動する言語と応答する言語が食い違いうる——どちらの壊れ方も画面には何も出ない。
   - **対応言語の一覧は 3 箇所になった**（レジストリ・`extension.toml`・`package.json`）。CI の `check the supported-language lists` が 2 つの突き合わせをする: 言語名（レジストリ ＝ Zed）と、id（レジストリの全 id ＝ Zed の名前 ∪ VS Code の `onLanguage`）。**後者が「和集合と等しい」なのが要点**で、部分集合で見るとレジストリだけが知っていて誰も送らない id を見逃す。**言語を足すときは 3 箇所とも触ること。**
-  - 版は `package.json` の `version` で、ワークスペース・`editors/zed` と揃っていることをリリースワークフローが見る（同梱するサーバと拡張が別の版になってはいけない）。Marketplace の publisher は `shutx-net`。**利用者に見えるテキストは英語**（Zed 拡張と同じ）。
+  - 版は `package.json` の `version` で、ワークスペース・`editors/zed` と揃っていることをリリースワークフローが見る（同梱するサーバと拡張が別の版になってはいけない）。Marketplace の publisher は `shutx`——**GitHub の owner（`shutx-net`）とは別の名前で、owner に揃えて直さないこと**（Marketplace は VSIX の `publisher` が登録した publisher id と一致しないとアップロードを受け付けない）。**利用者に見えるテキストは英語**（Zed 拡張と同じ）。
   - `npm test` は `node --test`（Node 22 の組み込み）で、テストランナーの依存は足していない。見ているのはサーバの探索順と引数の組み立てで、**VS Code は要らない**。
 
 ## 開発環境
