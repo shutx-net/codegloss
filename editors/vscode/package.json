@@ -3,7 +3,7 @@
   "displayName": "CodeGloss",
   "description": "Shows Japanese translations of English code comments in the editor",
   "version": "0.0.3",
-  "publisher": "shutx-net",
+  "publisher": "shutx",
   "license": "MIT",
   "repository": {
     "type": "git",
